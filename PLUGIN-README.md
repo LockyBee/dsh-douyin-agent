@@ -2,7 +2,7 @@
 
 原生入口为 `dsh-plugin.mjs`，当前源码工具目录共 22 个 `douyin_*` 工具。通过 `new BrowserController({source:'dsh'})` 接入同一个浏览器底座；加载插件时不启动浏览器，也不创建或改名工作区。工具注册、运行时加载和真实工具调用分别验收。
 
-2026-10-15 整理时，上次原生验收只读到了 17 项工具，今天的运行时目录尚未重新验收。新版 22 项源码与 SDK 测试不等于当前运行时已升级；本机控制台服务已恢复，自动回复仍关闭。
+2026-10-15 实机复验已核对当前 22 项工具目录，并真实调用时限、媒体状态、两位许可会话、精确表情观察与转发人工授权提示。本机控制台在线，自动回复和音频仍关闭；本轮没有外发。
 
 ## 复用的接口
 
@@ -51,7 +51,7 @@ node douyin-browser/plugin-install.mjs --uninstall
 
 音频默认关闭，`douyin_listen` 在开关开启且时间允许时录取当前视频最多 10 秒音轨；不会录麦克风或其他程序。只按用户选定的后端处理，模型不能开启或切换后端。本机 Whisper 提供对白转写，MiMo/MiniMax 云端后端需独立凭据，云端尚未真实验收。
 
-新版源码的 `douyin_forward_video` 不向模型开放可信授权参数，只提示使用本机控制台选择好友并点转发；本人明确的页面按钮或手动 CLI 才执行发送。该新工具尚未在当前 DSH 重新验收。普通视频 API 模型过滤此工具及所有聊天工具。转发受同一视频时限和许可名单约束，未确认不自动重发，未支持的界面不自动改发链接。
+`douyin_forward_video` 不向模型开放可信授权参数，只提示使用本机控制台选择好友并点转发；本人明确的页面按钮或手动 CLI 才执行发送。当前 DSH 已真实核对该工具返回 `requiresUserAction=true`、`sent=false`。普通视频 API 模型过滤此工具及所有聊天工具。转发受同一视频时限和许可名单约束，未确认不自动重发，未支持的界面不自动改发链接。
 
 ## 私信和富媒体
 
@@ -73,12 +73,16 @@ node --test douyin-browser/verification/dsh-plugin.test.mjs
 
 真实视频联合验收通过，见 `verification/native-live-workdir/native-plugin-receipt.json`：模型搜索、开作品、收到图片附件并暂停。整体聊天热加载曾因旧动态包冲突失败，回执保留；追加授权验收通过了真实联系人、状态及两人会话读取，旧版原生 17 项工具范围已实际核对。
 
-新版桥任务 `d1d836bf-a85f-487c-925c-a8bd82579e23` 真实热升级失败，刷新后仍为旧版 17 项，新增 5 项均返回 unknown tool。原 `remove` 调用未卸载配置中的 `include:douyin-browser` 旧条目，随后创建新版发生同名冲突。修复改用配置更新接口，尚未真实重验，不能称当前已加载 22 项。原始失败及只读诊断见 `verification/native-rich-workdir/native-rich-receipt.json`，没有自动新建任务规避原预算。
+旧桥任务 `d1d836bf-a85f-487c-925c-a8bd82579e23` 热升级失败，原 `remove` 未卸载配置中的 `include:douyin-browser` 条目，随后创建新版发生同名冲突。原始失败保留在 `verification/native-rich-workdir/native-rich-receipt.json`。用户明确追加 1 轮／1 次后，任务 `461ff7a2-5741-41bb-85c9-92b6e82bc71e` 使用原文 v5 helper 运行成功，刷新目录完整 22 项，真实状态和许可会话读取通过。辅助包保持运行，其他插件未动，没有自动追加预算。
+
+本轮指定表情经真实 DSH image content block 进入模型；Codex 从原生日志核对 ref，并独立读取持久 JPEG，尺寸 138×138、4355 字节、SHA256 与 ref 一致。两位会话均返回 `orderMode=relative` 和已核实最新端标记；音频为 `enabled=false`，视频轮次仍结束，转发入口只提示本人操作。执行回执与独立复核在 `verification/native-rich-workdir/recheck-20261015/`，桥状态保留 `needs_review`，不写成自动 accepted。
+
+当前 Inspect 未提供 Loader 条目的直接导出，helper 的 console JSON 也未落入可回读日志；v5 版本以逐字 helper 中的活动状态/URI/完整目录断言及真实调用核对，没有把运行态 URI 字符串标作独立读取结果。
 
 真人私信发送已做一条本人授权的明确功能测试：`confirmed=true` 且二次读取 `persisted=true`，见 `verification/chat-human-send-live.json`。这证明该次发送与回读，不证明收到新消息后的自动模型回复已由真人触发。
 
-真实表情和分享卡片的精准截取、公开 URL 解析通过；一张精确表情截图已送入真实 DeepSeek 并生成回复，没有向真人发送，见 `verification/chat-rich-api-live.json`。两位联系人真实只读回查确认时间顺序、最新端及消息 ID 稳定，见 `verification/chat-chronology-readonly-live.json`。这些 API/浏览器结果不代替失败的新版 DSH 附件工具验收，图文仍只到封面、元数据和 URL。
+真实表情和分享卡片的精准截取、公开 URL 解析通过；一张精确表情截图已送入真实 DeepSeek 并生成回复，没有向真人发送，见 `verification/chat-rich-api-live.json`。两位联系人真实只读回查确认时间顺序、最新端及消息 ID 稳定，见 `verification/chat-chronology-readonly-live.json`。2026-10-15 又单独完成上述 DSH 原生表情附件验收；图文仍只到封面、元数据和 URL。
 
 真实 API、DSH 两个专用抖音页到期后由后台检查暂停通过，观测延迟为 2652 毫秒（约 2.65 秒），原策略已恢复，见 `verification/video-limits-live.json`；这是本次观测值，不保证零延迟。Whisper 本地合成 WAV、WebM 对白转写通过，实际猫咪视频已采到 3 秒音轨但没有有效对白，ASR 准确性未验；MiMo/MiniMax 云联调未做，音频默认关闭。
 
-真人作品卡片转发已执行一次本人授权的点击；初始自动确认未通过，随后只读打开实际发出的卡片，精确核实公开作品 ID 为 `7579432563794584933`，没有再次发送。证据分别为 `verification/video-forward-human-live.json` 与 `verification/video-forward-post-readback.json`。真实 DOM 消息逆序问题修正后已有两人只读回查，自动回复目前仍停止；这次发送不等于新版 DSH 转发工具已实际调用。
+真人作品卡片转发已执行一次本人授权的点击；初始自动确认未通过，随后只读打开实际发出的卡片，精确核实公开作品 ID 为 `7579432563794584933`，没有再次发送。证据分别为 `verification/video-forward-human-live.json` 与 `verification/video-forward-post-readback.json`。2026-10-15 的原生转发工具实测仅覆盖人工授权提示分支，没有再发送；自动回复目前仍停止。

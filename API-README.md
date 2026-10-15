@@ -53,7 +53,7 @@ $env:DOUYIN_API_PORT = '3218'
 
 媒体源码随工具保存，实际复用三个社区项目的固定 commit 原文件及 MIT LICENSE：`ch1bug/dsh-mimo-agent-tools` 的 MiMo 请求正文驱动、`GooDAnDReaDY/dsh-voice` 的本机 Whisper HTTP provider、`moluyao/dsh-minimax-asr` 的 ASR 参数来源。来源、文件哈希和许可见 `media/PROVENANCE.json` 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，安装和开关说明见 [media/README.md](media/README.md)。这些社区源码不是 DeepSeek 官方媒体插件。
 
-“转发作品给好友”可留空使用当前作品，或输入标准 `https://www.douyin.com/video/数字` 链接，再选择许可名单中的当前已关注个人好友并点一次“转发这条作品”。普通视频模型没有转发工具；明确按钮请求或本人手动 CLI 命令才传入可信的 `humanAuthorized` 选项。新版 DSH 源码的模型入口只提示使用按钮，不自行发送，当前 DSH 尚未重新验收该新工具。发送前还会核对名单和关注关系。分享面板可能开始播放，因此转发也受本轮视频时限约束。未确认结果提示人工核对，不自动重试；暂不支持的平台界面不会自动改发文本链接。
+“转发作品给好友”可留空使用当前作品，或输入标准 `https://www.douyin.com/video/数字` 链接，再选择许可名单中的当前已关注个人好友并点一次“转发这条作品”。普通视频模型没有转发工具；明确按钮请求或本人手动 CLI 命令才传入可信的 `humanAuthorized` 选项。DSH 的模型入口只提示使用按钮，2026-10-15 实机返回 `requiresUserAction=true`、`sent=false`。发送前还会核对名单和关注关系。分享面板可能开始播放，因此转发也受本轮视频时限约束。未确认结果提示人工核对，不自动重试；暂不支持的平台界面不会自动改发文本链接。
 
 真实作品卡片转发已执行一次本人授权的点击，初始自动回读未确认。随后没有重发，只读打开实际发出的卡片，公开作品 ID `7579432563794584933` 与所选作品一致，转发和再次回查通过。初始失败与后续证据分别保留在 `verification/video-forward-human-live.json`、`verification/video-forward-post-readback.json`。真实 DOM 消息逆序问题修正后的两人只读回查确认消息 ID 稳定，私信自动回复仍停止。
 
@@ -78,7 +78,7 @@ node --test 'D:/codex分局/dsh配置/douyin-browser/tests/api-agent.test.mjs'
 
 启动脚本和 HTTP 页面也已实测。`start-api.ps1 -NoOpen` 成功启动 `http://127.0.0.1:3218`；在真实临时 Edge 的控制台提交读取当前播放状态的任务，DeepSeek 自主调用工具后答出了对应作品作者与已暂停状态，页面无脚本错误，桌面和手机宽度均无横向溢出。证据见 `verification/api-console-live.json` 与 `verification/api-console-live.png`。
 
-上述 API 验证不代替 DSH 插件加载或 QQ 双向记忆验收。旧版原生 17 项工具范围已验收；新版桥任务 `d1d836bf-a85f-487c-925c-a8bd82579e23` 真实热升级失败，仍只有旧版 17 项。旧配置 `include` 条目未被原 `remove` 调用卸载；更新接口修复尚未真实重验。源码和 SDK 的 22 项不能写成当前 DSH 已全部加载，失败回执见 `verification/native-rich-workdir/native-rich-receipt.json`。
+上述 API 验证与 DSH 插件加载、QQ 双向记忆分别验收。旧热升级失败回执保留在 `verification/native-rich-workdir/native-rich-receipt.json`。2026-10-15 用户追加授权的桥任务 `461ff7a2-5741-41bb-85c9-92b6e82bc71e` 已刷新到完整 22 项工具，并真实核对时间/音频状态、两位许可会话、精确表情附件与转发人工授权提示；Codex 独立回读原生日志及附件哈希、尺寸。详细结果及 Loader 元数据读取限制见 PLUGIN-README 和 `verification/native-rich-workdir/recheck-20261015/`，桥状态仍保留 `needs_review`，不冒充自动 accepted。
 
 视频时限、音频设置和转发入口通过真实 HTTP 校验、跨午夜及共享时钟、到点取消模型任务、两页真实 HTML 视频被定时暂停，以及临时 Edge 中修改设置和点一次合成好友转发。音频后端和好友发送在这些控制台测试中使用替身，没有调用云端音频或发送真人私信。
 
