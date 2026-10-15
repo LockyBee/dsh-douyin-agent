@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { ApiAgent, DEFAULT_LIMITS, loadApiConfig, normalizeApiConfig, publicApiConfig, redact } from './api-agent.mjs';
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
+import { AutonomousWatch } from './autonomous-watch.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,7 +61,7 @@ async function staticAsset(root, pathname) {
   } catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return null; throw error; }
 }
 
-export function createApiServer({ controller, config, agent = new ApiAgent({ controller, config }), chatService, videoLimits, pauseVideoSources, mediaAdapter, port = 3218, htmlFile = path.join(ROOT, 'public/index.html'), staticRoot } = {}) {
+export function createApiServer({ controller, config, personaMemory, watchService, agent = new ApiAgent({ controller, config, personaMemory }), chatService, videoLimits, pauseVideoSources, mediaAdapter, port = 3218, htmlFile = path.join(ROOT, 'public/index.html'), staticRoot } = {}) {
   if (staticRoot !== undefined && (typeof staticRoot !== 'string' || !path.isAbsolute(staticRoot))) throw new Error('静态资源目录必须是绝对路径。');
   const token = randomBytes(32).toString('hex');
   const events = [];
@@ -84,7 +85,7 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
   };
   const pauseSource = pauseVideoSources || (async (source) => source === 'api' ? typeof controller.pauseForLimits === 'function' ? controller.pauseForLimits() : controller.execute('douyin_pause') : { skipped: true, reason: '此测试服务未提供 DSH 暂停控制器。' });
   let lastVideoDenial = '';
-  const denyVideo = (state) => { const error = new Error(state.reason || '刷视频时间已结束。'); active?.abort.abort(error); forwardAbort?.abort(error); const key = `${state.session?.id || 'none'}:${state.reason}`; if (key !== lastVideoDenial) { lastVideoDenial = key; append({ type: 'video.limited', message: state.reason || '刷视频时间已结束。' }); } };
+  const denyVideo = (state) => { const error = Object.assign(new Error(state.reason || '刷视频时间已结束。'), { watchStatus: 'limited' }); active?.abort.abort(error); forwardAbort?.abort(error); watchService?.cancel(error); const key = `${state.session?.id || 'none'}:${state.reason}`; if (key !== lastVideoDenial) { lastVideoDenial = key; append({ type: 'video.limited', message: state.reason || '刷视频时间已结束。' }); } };
   const enforceVideo = () => videoLimits?.enforce({ pause: pauseSource, onDeny: denyVideo });
   const cancelVideoWatch = videoLimits?.watch({ pause: pauseSource, onDeny: denyVideo });
   const server = http.createServer(async (request, response) => {
@@ -99,7 +100,7 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
       if (request.method === 'GET' && url.pathname === '/') return reply(response, 200, await fs.readFile(htmlFile), 'text/html; charset=utf-8');
       if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
         const memory = resolveRuntimePaths();
-        return reply(response, 200, { service: 'douyin-api-local', version: 1, token, videoTime: { enabled: Boolean(videoLimits) }, media: { available: Boolean(mediaAdapter) }, forward: { available: Boolean(chatService && videoLimits) }, config: redact(publicApiConfig(config), [config.apiKey]), limits: { maxSteps: agent.maxSteps ?? DEFAULT_LIMITS.maxSteps, maxToolCalls: agent.maxToolCalls ?? DEFAULT_LIMITS.maxToolCalls, taskTimeoutSeconds: (agent.taskTimeoutMs ?? DEFAULT_LIMITS.taskTimeoutMs) / 1_000, apiTimeoutSeconds: (agent.apiTimeoutMs ?? DEFAULT_LIMITS.apiTimeoutMs) / 1_000, maxTokens: agent.maxTokens ?? DEFAULT_LIMITS.maxTokens, maxFrames: agent.maxFrames ?? DEFAULT_LIMITS.maxFrames }, memory: { description: '与 QQ 机器人共享的记忆 / 视频笔记。具体连通状态以检索结果为准。', folder: memory.memoryDir, database: memory.memoryDbPath } });
+        return reply(response, 200, { service: 'douyin-api-local', version: 1, token, videoTime: { enabled: Boolean(videoLimits) }, media: { available: Boolean(mediaAdapter) }, watch: { available: Boolean(watchService) }, persona: { available: Boolean(personaMemory) }, forward: { available: Boolean(chatService && videoLimits) }, config: redact(publicApiConfig(config), [config.apiKey]), limits: { maxSteps: agent.maxSteps ?? DEFAULT_LIMITS.maxSteps, maxToolCalls: agent.maxToolCalls ?? DEFAULT_LIMITS.maxToolCalls, taskTimeoutSeconds: (agent.taskTimeoutMs ?? DEFAULT_LIMITS.taskTimeoutMs) / 1_000, apiTimeoutSeconds: (agent.apiTimeoutMs ?? DEFAULT_LIMITS.apiTimeoutMs) / 1_000, maxTokens: agent.maxTokens ?? DEFAULT_LIMITS.maxTokens, maxFrames: agent.maxFrames ?? DEFAULT_LIMITS.maxFrames }, memory: { description: '与 QQ 机器人共享的记忆 / 视频笔记。具体连通状态以检索结果为准。', folder: memory.memoryDir, database: memory.memoryDbPath } });
       }
       if (request.method === 'GET' && !url.pathname.startsWith('/api/') && staticRoot) {
         const asset = await staticAsset(staticRoot, url.pathname);
@@ -107,6 +108,35 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
       }
       if (!url.pathname.startsWith('/api/')) return reply(response, 404, { error: '地址不存在。' });
       if (!tokenMatches(request.headers['x-session-token'], token)) return reply(response, 403, { error: '控制台会话校验失败，请刷新页面。' });
+      if (url.pathname.startsWith('/api/watch/')) {
+        if (!watchService) return reply(response, 503, { error: '自主观看模块尚未就绪。' });
+        if (request.method === 'GET' && url.pathname === '/api/watch/state') return reply(response, 200, watchService.state());
+        if (request.method === 'POST') {
+          const body = await readJson(request);
+          if (url.pathname === '/api/watch/start') {
+            if (Object.keys(body).some(key => !['startSession', 'maxRequests'].includes(key))) return reply(response, 400, { error: '自主观看只接受是否开启有限轮次及请求上限。' });
+            if (active || forwardAbort) return reply(response, 409, { error: '请先停止手动视频任务或等待转发结束。' });
+            return reply(response, 200, watchService.start(body, { explicit: true }));
+          }
+          if (url.pathname === '/api/watch/stop') {
+            if (Object.keys(body).length) return reply(response, 400, { error: '停止自主观看不接受额外参数。' });
+            return reply(response, 200, await watchService.stop({ explicit: true }));
+          }
+        }
+        return reply(response, 404, { error: '自主观看接口不存在。' });
+      }
+      if (url.pathname === '/api/persona' && request.method === 'GET') {
+        if (!personaMemory) return reply(response, 503, { error: '共同人格模块尚未就绪。' });
+        return reply(response, 200, personaMemory.snapshot());
+      }
+      if (url.pathname === '/api/persona/card' && request.method === 'POST') {
+        if (!personaMemory) return reply(response, 503, { error: '共同人格模块尚未就绪。' });
+        const body = await readJson(request);
+        if (Object.keys(body).some(key => !['text', 'expectedRevision'].includes(key))) return reply(response, 400, { error: '人格卡只接受正文和读取时的版本。' });
+        if (watchService?.state().running) return reply(response, 409, { error: '请先停止两个入口的自主观看，再修改人格卡。' });
+        try { return reply(response, 200, personaMemory.saveManualText(body, { explicit: true })); }
+        catch (error) { error.status ||= error.code === 'PERSONA_REVISION_CONFLICT' ? 409 : 400; throw error; }
+      }
       if (url.pathname.startsWith('/api/media/')) {
         if (!mediaAdapter) return reply(response, 503, { error: '可选音频模块尚未就绪。' });
         if (request.method === 'GET' && url.pathname === '/api/media/state') return reply(response, 200, await mediaAdapter.status());
@@ -137,10 +167,11 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
               videoUrl = `https://www.douyin.com${value.pathname.replace(/\/$/, '')}`;
             } catch { return reply(response, 400, { error: '请使用 https://www.douyin.com/video/数字 形式的作品链接；留空转发当前作品。' }); }
           }
-          if (forwardAbort || active) return reply(response, 409, { error: '已有视频任务或转发正在执行，请等待完成。' });
+          if (forwardAbort || active || watchService?.state().running) return reply(response, 409, { error: '已有视频任务、自主观看或转发正在执行，请等待完成。' });
           if (!chatService.state().policy.allowlist.some((item) => item.id === body.recipientId && item.followed === true && item.isGroup === false)) return reply(response, 403, { error: '此联系人不在已核对的许可名单内。' });
           const permit = videoLimits.beforeAction('api', 'douyin_forward_video');
           if (!permit.allowed) { await enforceVideo(); return reply(response, 409, { error: permit.reason }); }
+          const releaseManual = watchService?.claimManual('forward');
           const abort = new AbortController(); forwardAbort = abort;
           const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(60_000)]);
           try {
@@ -151,7 +182,7 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
             if (!latest.allowed) { await enforceVideo(); return reply(response, 409, { error: latest.reason }); }
             const result = await controller.execute('douyin_forward_video', { recipientId: body.recipientId, ...(videoUrl ? { url: videoUrl } : {}) }, { signal, humanAuthorized: true });
             return reply(response, 200, redact(result, [config.apiKey]));
-          } finally { if (forwardAbort === abort) forwardAbort = null; }
+          } finally { if (forwardAbort === abort) forwardAbort = null; await releaseManual?.(); }
         }
         return reply(response, 404, { error: '转发接口不存在。' });
       }
@@ -163,6 +194,7 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
         if (url.pathname === '/api/video/policy') { let result; try { result = videoLimits.savePolicy(body, { explicit: true }); } catch (error) { error.status ||= 400; throw error; } await enforceVideo(); return reply(response, 200, result); }
         if (url.pathname === '/api/video/start') {
           if (Object.keys(body).length) return reply(response, 400, { error: '开始新一轮不接受额外参数。' });
+          if (watchService?.state().running) return reply(response, 409, { error: '请先停止自主观看，再开始新一轮。' });
           active?.abort.abort(new Error('用户开始新一轮，结束上一次视频任务。'));
           forwardAbort?.abort(new Error('用户开始新一轮，结束上一次转发操作。'));
           await Promise.allSettled(['api','dsh'].map((source) => pauseSource(source)));
@@ -198,12 +230,13 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
         return reply(response, 200, { result: redact(result, [config.apiKey]) });
       }
       if (request.method === 'POST' && url.pathname === '/api/task') {
-        if (active || forwardAbort) return reply(response, 409, { error: '已有任务或转发正在执行，请等待或停止。' });
+        if (active || forwardAbort || watchService?.state().running) return reply(response, 409, { error: '已有任务、自主观看或转发正在执行，请等待或停止。' });
         if (videoLimits) { const permit = videoLimits.beforeAction('api', 'douyin_open'); if (!permit.allowed) { await enforceVideo(); return reply(response, 409, { error: permit.reason, videoTime: permit.state }); } }
         if (!config.apiKey) return reply(response, 400, { error: '未配置 DeepSeek API Key，请打开本机 API 设置。' });
         const { instruction } = await readJson(request);
         if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 4_000) return reply(response, 400, { error: '任务请输入 1 至 4000 个字符。' });
-        if (active || forwardAbort) return reply(response, 409, { error: '已有任务或转发正在执行，请等待或停止。' });
+        if (active || forwardAbort || watchService?.state().running) return reply(response, 409, { error: '已有任务、自主观看或转发正在执行，请等待或停止。' });
+        const releaseManual = watchService?.claimManual('task');
         const task = { id: randomUUID(), instruction: instruction.trim(), startedAt: new Date().toISOString(), abort: new AbortController() };
         active = task;
         append({ type: 'task.started', message: task.instruction, at: task.startedAt });
@@ -214,7 +247,7 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
         }).catch((error) => {
           lastTask = { id: task.id, status: 'failed', message: redact(error.message || String(error), [config.apiKey]) };
           append({ type: 'task.failed', message: lastTask.message });
-        }).finally(() => { if (active === task) active = null; });
+        }).finally(async () => { try { await releaseManual?.(); } catch (error) { append({ type: 'task.coordination_error', message: error.message }); } finally { if (active === task) active = null; } });
         return;
       }
       if (request.method === 'POST' && url.pathname === '/api/stop') {
@@ -231,14 +264,15 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
   server.apiConfig = () => publicApiConfig(config);
   server.configureApi = value => {
     if (stopping) throw new Error('本机服务正在退出，不能修改 API 设置。');
-    if (active || forwardAbort || chatService?.running || chatService?.starting || chatService?.busy || chatService?.worker?.()?.alive) throw new Error('请先停止视频任务、转发和私信自动回复，再修改 API 设置。');
+    if (active || forwardAbort || watchService?.state().running || chatService?.running || chatService?.starting || chatService?.busy || chatService?.worker?.()?.alive) throw new Error('请先停止视频任务、自主观看、转发和私信自动回复，再修改 API 设置。');
     const updated = normalizeApiConfig(value);
     Object.assign(config, updated);
     agent.config = config;
     if (chatService) { chatService.config = config; if (chatService.agent) chatService.agent.config = config; }
+    if (watchService) { watchService.config = config; if (watchService.agent) watchService.agent.config = config; }
     return publicApiConfig(config);
   };
-  server.stopTask = () => { const error = new Error('控制台已关闭。'); active?.abort.abort(error); forwardAbort?.abort(error); };
+  server.stopTask = () => { const error = new Error('控制台已关闭。'); active?.abort.abort(error); forwardAbort?.abort(error); watchService?.cancel(); };
   server.enforceVideoLimits = enforceVideo;
   const cleanup = () => cleanupPromise ??= (async () => {
     stopping = true;
@@ -246,11 +280,14 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
     const pending = active?.completion;
     server.stopTask();
     // 暂停现有视频，再等待领域操作、浏览器连接与 worker 一起退出。
-    await Promise.allSettled(['api', 'dsh'].map(source => pauseSource(source)));
+    const sharedWatch = watchService?.state();
+    const protectedSource = sharedWatch?.worker?.alive && !sharedWatch.owned ? sharedWatch.worker.source : null;
+    await Promise.allSettled(['api', 'dsh'].filter(source => source !== protectedSource).map(source => pauseSource(source)));
     const results = await Promise.allSettled([
       ...(pending ? [pending] : []),
+      ...(watchService ? [Promise.resolve().then(() => watchService.close())] : []),
       ...(chatService ? [Promise.resolve().then(() => chatService.close())] : []),
-      ...(typeof controller.close === 'function' ? [Promise.resolve().then(() => controller.close())] : []),
+      ...(typeof controller.close === 'function' ? [Promise.resolve().then(async () => { if (controller.source === protectedSource) controller.limitsEnabled = false; await controller.close(); })] : []),
       ...shutdownHooks.map(hook => Promise.resolve().then(hook)),
     ]);
     const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
@@ -284,7 +321,7 @@ export function stopApiServer(server) {
   return server.stop();
 }
 
-export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT || 3218), config = loadApiConfig(), controller, chatService, videoLimits = new VideoLimits(), mediaAdapter, htmlFile, staticRoot } = {}) {
+export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT || 3218), config = loadApiConfig(), controller, chatService, videoLimits = new VideoLimits(), mediaAdapter, personaMemory, watchService, htmlFile, staticRoot } = {}) {
   if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535) throw new Error('端口须为 0，或 1024 至 65535 的整数。');
   if (!controller) {
     const { BrowserController } = await import('./core.mjs');
@@ -296,10 +333,14 @@ export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT
   }
   const { BrowserController } = await import('./core.mjs');
   if (!mediaAdapter) { const { MediaAdapter } = await import('./media/index.mjs'); mediaAdapter = new MediaAdapter(); }
+  if (!personaMemory) { const { PersonaMemory } = await import('./persona-memory.mjs'); personaMemory = new PersonaMemory(); personaMemory.initialize({ importLegacy: false }); }
+  if (chatService?.agent) chatService.agent.personaMemory = personaMemory;
+  const agent = new ApiAgent({ controller, config, personaMemory });
+  if (!watchService) watchService = new AutonomousWatch({ controller, config, personaMemory, videoLimits, agent });
   const dshVideoController = new BrowserController({ source: 'dsh' });
   const pauseVideoSources = async (source) => { const target = source === 'api' ? controller : dshVideoController; if (typeof target.pauseForLimits !== 'function') throw new Error('浏览器底座尚未提供 pauseForLimits，到点暂停未验收。'); return target.pauseForLimits(); };
-  const server = createApiServer({ controller, config, chatService, videoLimits, pauseVideoSources, mediaAdapter, port, htmlFile, staticRoot });
-  server.addShutdownHook(() => dshVideoController.close());
+  const server = createApiServer({ controller, config, chatService, videoLimits, pauseVideoSources, mediaAdapter, personaMemory, watchService, agent, port, htmlFile, staticRoot });
+  server.addShutdownHook(() => { const state = watchService.state(); if (state.worker?.alive && !state.owned && state.worker.source === 'dsh') dshVideoController.limitsEnabled = false; return dshVideoController.close(); });
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
   } catch (error) {

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -6,11 +6,37 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from './playwright-runtime.mjs';
 import { MemoryStore } from './memory.mjs?v=2';
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=5';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=6';
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
+import { PersonaMemory } from './persona-memory.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const VIDEO_ACTIONS=new Set(['douyin_open','douyin_search','douyin_open_video','douyin_next','douyin_previous','douyin_observe','douyin_screenshot','douyin_play','douyin_listen']);
+const processAlive=pid=>{if(!Number.isSafeInteger(pid)||pid<1)throw new Error('共享视频操作锁无效。');try{process.kill(pid,0);return true;}catch(error){return error.code==='EPERM';}};
+const optionalRecord=file=>{try{return JSON.parse(readFileSync(file,'utf8'));}catch(error){if(error.code==='ENOENT')return null;throw new Error('共享视频操作记录无法读取，未操作视频。');}};
+async function watchControl(directory,action,signal) {
+  const file=path.join(directory,'watch-control.guard'),token=randomUUID();
+  for(let attempt=0;;attempt++) {
+    signal?.throwIfAborted(); let descriptor;
+    try {descriptor=openSync(file,'wx',0o600);}
+    catch(error){if(error.code!=='EEXIST'||attempt>=100)throw Object.assign(new Error('共享视频控制正在更新，请稍后重试。'),{status:409});await wait(20,signal);continue;}
+    try {writeFileSync(descriptor,JSON.stringify({pid:process.pid,token}));}
+    finally {closeSync(descriptor);}
+    try{return action();}finally{if(optionalRecord(file)?.token===token)unlinkSync(file);}
+  }
+}
+async function acquireNativeVideoLease(directory,signal) {
+  const file=path.join(directory,'watch-manual.lock'),token=randomUUID();
+  await watchControl(directory,()=>{
+    const owner=optionalRecord(path.join(directory,'watch-loop.lock'));
+    if(owner)throw Object.assign(new Error('自主观看正在运行或需要清理残留，请先停止它再手动操作视频。'),{status:409});
+    const manual=optionalRecord(file);
+    if(manual&&processAlive(manual.pid))throw Object.assign(new Error('另一个入口正在手动操作视频，请等待完成。'),{status:409});
+    writeFileSync(file,JSON.stringify({pid:process.pid,token,kind:'native-tool'}),{mode:0o600});
+  },signal);
+  return ()=>watchControl(directory,()=>{const manual=optionalRecord(file);if(manual?.pid===process.pid&&manual.token===token)unlinkSync(file);});
+}
 const { browserProfileDir: PROFILE, browserControlDir: CONTROL } = resolveRuntimePaths();
 const RECOMMEND = 'https://www.douyin.com/?recommend=1&from_nav=1';
 const PORT = 9227;
@@ -165,9 +191,9 @@ export function readPageState() {
 }
 
 export class BrowserController {
-  constructor({ source = 'api', memory, videoLimits } = {}) {
+  constructor({ source = 'api', memory, videoLimits, personaMemory } = {}) {
     if (!['api','dsh','verification','api-chat','dsh-chat'].includes(source)) throw new TypeError('不支持这个浏览器入口。');
-    this.source = source; this.memory = memory; this.browser = null; this.page = null;
+    this.source = source; this.memory = memory; this.personaMemory = personaMemory; this.browser = null; this.page = null;
     this.queue = Promise.resolve();
     this.videoLimits = videoLimits;
     this.limitsEnabled = ['api','dsh'].includes(source);
@@ -212,9 +238,16 @@ export class BrowserController {
     } finally { if(temporary) await connection?.close().catch(()=>{}); }
   }
   store() { return this.memory ??= new MemoryStore(resolveRuntimePaths().memoryDbPath); }
+  getPersonaMemory() {
+    if (!this.personaMemory) {
+      this.personaMemory = new PersonaMemory({ memoryDir: path.dirname(this.memory?.dbPath || resolveRuntimePaths().memoryDbPath) });
+      this.personaMemory.initialize({ importLegacy: false });
+    }
+    return this.personaMemory;
+  }
   getChatService() {
-    this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=5'),import('./chat-service.mjs?v=5')])
-      .then(([{ChatBrowser},{ChatService}])=>new ChatService({browser:new ChatBrowser({source:this.source==='dsh'?'dsh-chat':'api-chat'})}))
+    this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=5'),import('./chat-service.mjs?v=6')])
+      .then(([{ChatBrowser},{ChatService}])=>{const service=new ChatService({browser:new ChatBrowser({source:this.source==='dsh'?'dsh-chat':'api-chat'})});service.agent.personaMemory=this.getPersonaMemory();return service;})
       .catch(error=>{this.chatPromise=null;throw error;});
     return this.chatPromise;
   }
@@ -286,12 +319,31 @@ export class BrowserController {
     });
     this.queue=operation;return operation;
   }
-  execute(name, args = {}, { signal, humanAuthorized = false } = {}) {
+  execute(name, args = {}, { signal, humanAuthorized = false, autonomousRunId } = {}) {
     const definition = TOOL_DEFINITIONS.find(tool=>tool.name===name);
     if (!definition) return Promise.reject(new Error('不支持的抖音工具。'));
     try { validateToolArguments(definition,args); } catch(error) { return Promise.reject(error); }
     const operation = this.queue.catch(()=>{}).then(async()=>{
+      let releaseNativeLease;
+      try {
       aborted(signal);
+      if(this.source==='dsh'&&!autonomousRunId&&VIDEO_ACTIONS.has(name)) releaseNativeLease=await acquireNativeVideoLease(this.limits().stateDir,signal);
+      if (this.limitsEnabled && ['douyin_open','douyin_search','douyin_open_video','douyin_next','douyin_previous','douyin_observe','douyin_screenshot','douyin_play','douyin_listen','douyin_pause'].includes(name)) {
+        let owner;
+        try { owner=JSON.parse(readFileSync(path.join(this.limits().stateDir,'watch-loop.lock'),'utf8')); }
+        catch(error) { if(error.code!=='ENOENT' && name!=='douyin_pause') throw new Error('自主观看锁无法核对，未操作视频。'); }
+        if(owner) {
+          let living=false;
+          if(!Number.isSafeInteger(owner.pid)||owner.pid<1||typeof owner.runId!=='string') { if(name!=='douyin_pause')throw new Error('自主观看锁无效，未操作视频。'); }
+          else { try {process.kill(owner.pid,0);living=true;}catch(error){living=error.code==='EPERM';} }
+          if(living && owner.runId!==autonomousRunId) {
+            if(name!=='douyin_pause') throw Object.assign(new Error('自主观看正在运行，请先停止它再手动操作视频。'),{status:409});
+            const requestFile=path.join(this.limits().stateDir,'watch-stop.request.json'),temporary=`${requestFile}.${randomUUID()}.tmp`;
+            try {writeFileSync(temporary,JSON.stringify({runId:owner.runId,requestedAt:Date.now()}),{flag:'wx'});renameSync(temporary,requestFile);}
+            finally {try{unlinkSync(temporary);}catch(error){if(error.code!=='ENOENT')throw error;}}
+          }
+        }
+      }
       if(name.startsWith('douyin_chat_')) {
         const chat=await this.getChatService();aborted(signal);
         if(name==='douyin_chat_contacts') return chat.listContacts({signal});
@@ -307,6 +359,13 @@ export class BrowserController {
         return (await this.getForwarder()).forward(args,{signal,humanAuthorized:true});
       }
       if (name==='douyin_recall') return this.store().recall({query:args.query??'',limit:args.limit??10});
+      if (name==='douyin_persona_status') return this.getPersonaMemory().snapshot();
+      if (name==='douyin_watch_status') {
+        const {AutonomousWatch}=await import('./autonomous-watch.mjs');
+        this.watchStatusReader??=new AutonomousWatch({controller:this,config:{},videoLimits:this.limits(),personaMemory:this.getPersonaMemory(),source:this.source==='dsh'?'dsh':'api',stateDir:this.limits().stateDir});
+        return this.watchStatusReader.state();
+      }
+      if (name==='douyin_interest_record') return this.getPersonaMemory().updateAgentInterests({ evidenceId:args.evidenceId,topics:[{topic:args.topic,signal:args.signal}],reflection:args.reflection },{source:this.source==='dsh'?'dsh':'api'});
       if (name==='douyin_remember') {
         const state = this.page && !this.page.isClosed() ? await this.state({record:false}) : null;
         return this.store().remember({content:args.content,kind:args.kind??'note',source:this.source,
@@ -351,6 +410,7 @@ export class BrowserController {
         aborted(signal);
         return this.state();
       } finally { signal?.removeEventListener('abort',onAbort); release(); }
+      } finally { await releaseNativeLease?.(); }
     });
     this.queue=operation; return operation;
   }
@@ -404,8 +464,13 @@ export class BrowserController {
       frames.push({mimeType:'image/jpeg',data:data.toString('base64'),time:state.video.time,videoId:state.video.id});
       sampledState=checked;
     }
-    return {state:sampledState,frames,observation:{seconds,videoId:before.id,stoppedReason,beforeTime:before.time,afterTime:sampledState.video?.time,paused:sampledState.video?.paused,
+    const result={state:sampledState,frames,observation:{seconds,videoId:before.id,stoppedReason,beforeTime:before.time,afterTime:sampledState.video?.time,paused:sampledState.video?.paused,
       note:'采集的是实际视频视口画面；没有音频，只能说明这些采样时刻。'}};
+    if (frames.length && ['api','dsh'].includes(this.source)) {
+      try { result.personaEvidenceId=this.getPersonaMemory().recordObservation(result,{source:this.source,kind:'visual'}).evidenceId; }
+      catch { result.personaWarning='本次画面未登记为兴趣证据，不能据此更新人格兴趣。'; }
+    }
+    return result;
   }
   async captureAudio(seconds,signal) {
     await this.checkVideoLimits('douyin_listen');

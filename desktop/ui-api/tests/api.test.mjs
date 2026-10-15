@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createApiClient, createForwardGate, mergeEvents, publicSettings, saveNativeSettings } from '../src/api.mjs';
+import { createApiClient, createForwardGate, mergeEvents, publicSettings, saveNativeSettings, watchIsActive, watchStartInput } from '../src/api.mjs';
 
 test('会话凭证只进入本机请求头，bootstrap返回状态不暴露token', async () => {
   const calls = [];
@@ -48,4 +48,25 @@ test('本机服务重建会话后给UI重置事件水位提示，不回传新旧
   const first = await client.bootstrap(), second = await client.bootstrap();
   assert.equal(first.sessionChanged, false); assert.equal(second.sessionChanged, true);
   assert.doesNotMatch(JSON.stringify({ first, second }), /synthetic-/);
+});
+
+test('自主观看预算只接受有限整数，界面启动不隐式创建新轮', () => {
+  assert.deepEqual(watchStartInput('30'), { startSession: false, maxRequests: 30 });
+  for (const value of [0, 101, 2.5, '', '无上限', Infinity]) assert.throws(() => watchStartInput(value), /1 至 100/);
+  assert.deepEqual(watchStartInput(1), { startSession: false, maxRequests: 1 });
+  assert.deepEqual(watchStartInput(100), { startSession: false, maxRequests: 100 });
+  assert.equal(watchIsActive({ running: false, owned: false, worker: { alive: true, source: 'dsh' } }), true);
+  assert.equal(watchIsActive({ status: 'stopping' }), true);
+  assert.equal(watchIsActive({ status: 'limited', running: false, worker: null }), false);
+});
+
+test('人格保存的版本冲突保留HTTP状态供界面处理，不隐式重试', async () => {
+  const calls = [];
+  const client = createApiClient(async (route, options) => {
+    calls.push({ route, options });
+    return route === '/api/bootstrap' ? { ok: true, json: async () => ({ service: 'douyin-api-local', token: 'synthetic-persona' }) } : { ok: false, status: 409, json: async () => ({ error: '人格版本已更新' }) };
+  });
+  await client.bootstrap();
+  await assert.rejects(client.request('/api/persona/card', { text: '手编人格', expectedRevision: '旧版本' }), error => error.status === 409 && /版本/.test(error.message));
+  assert.equal(calls.filter(call => call.route === '/api/persona/card').length, 1);
 });

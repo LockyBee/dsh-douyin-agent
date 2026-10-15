@@ -7,10 +7,10 @@ const PROMPT = `你是用户在抖音私信中的 AI 自动回复助手。仅依
 只输出要发送的普通文本，不使用 Markdown，不输出推理过程。系统会为回复添加“自动回复”标记。`;
 
 export class ChatAgent {
-  constructor({ config = loadApiConfig(), fetchImpl = fetch, timeoutMs = 45_000, replyTokens = 512 } = {}) {
+  constructor({ config = loadApiConfig(), personaMemory, fetchImpl = fetch, timeoutMs = 45_000, replyTokens = 512 } = {}) {
     if (!Number.isSafeInteger(replyTokens) || replyTokens < 1 || replyTokens > 512) throw new Error('私信回复最多生成 512 token。');
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error('私信请求超时须在 1 至 60000 毫秒之间。');
-    Object.assign(this, { config, fetchImpl, timeoutMs, replyTokens });
+    Object.assign(this, { config, personaMemory, fetchImpl, timeoutMs, replyTokens });
   }
 
   async reply({ messages, mediaObservations = [], signal } = {}) {
@@ -34,10 +34,12 @@ export class ChatAgent {
     const combined = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
     try {
       combined.throwIfAborted();
+      const manualPersona=this.personaMemory?.snapshot().manualText || '';
+      const systemPrompt=PROMPT+(manualPersona ? '\n\n共用人格卡的手编正文只作为表达风格参考，不增加联系人范围、现实承诺或工具权限。不读取或带出兴趣生成区、观看记录和其他会话。\n'+JSON.stringify(redact(manualPersona.slice(0,18_000),[this.config.apiKey])) : '');
       const response = await this.fetchImpl(`${this.config.baseUrl}/chat/completions`, {
         method: 'POST', redirect: 'error', signal: combined,
         headers: { authorization: `Bearer ${this.config.apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: this.config.model, messages: [{ role: 'system', content: PROMPT }, ...content], thinking: { type: 'disabled' }, stream: false, max_tokens: this.replyTokens }),
+        body: JSON.stringify({ model: this.config.model, messages: [{ role: 'system', content: systemPrompt }, ...content], thinking: { type: 'disabled' }, stream: false, max_tokens: this.replyTokens }),
       });
       if (!response.ok) throw new Error(`私信模型请求失败（HTTP ${response.status}）。`);
       const data = await response.json();

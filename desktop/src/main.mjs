@@ -96,6 +96,7 @@ else {
       return publicSettings();
     });
     ipcMain.handle('douyin:open-memory', async event => { authorized(event); await fs.mkdir(memoryFolder, { recursive: true }); const error = await shell.openPath(memoryFolder); if (error) throw new Error('无法打开共享记忆文件夹。'); return { opened: true }; });
+    ipcMain.handle('douyin:open-persona', async event => { authorized(event); const folder=path.join(memoryFolder,'persona'); await fs.mkdir(folder,{recursive:true}); const error=await shell.openPath(folder); if(error)throw new Error('无法打开共用人格文件夹。'); return {opened:true}; });
     window = new BrowserWindow({ title: '大肥鱼抖音助手 · 独立 API 版', width: 1320, height: 880, minWidth: 920, minHeight: 640, autoHideMenuBar: true, backgroundColor: '#10141d', webPreferences: { preload: path.join(appRoot, 'app', 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     window.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== backend.origin) event.preventDefault(); });

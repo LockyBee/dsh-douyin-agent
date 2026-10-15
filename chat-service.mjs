@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
-import { ChatAgent } from './chat-agent.mjs';
+import { ChatAgent } from './chat-agent.mjs?v=6';
 import { loadApiConfig, redact } from './api-agent.mjs';
 import { messageFingerprint } from './chat-message.mjs';
 

@@ -7,10 +7,11 @@ import { pathToFileURL } from 'node:url';
 import { TOOL_DEFINITIONS, validateToolArguments } from '../tool-definitions.mjs';
 import { apply, createNativeToolDefinitions } from '../dsh-plugin.mjs';
 import { BEGIN_MARKER, END_MARKER, managePlugin, planPatch } from '../plugin-install.mjs';
+import { bindNativePersonaContext } from '../native-persona-context.mjs';
 
 const dshModules = process.env.DSH_NODE_MODULES || 'F:/codex/DSH Desktop 2/resources/app/node_modules';
 // 这里加载电脑上 DSH 正在使用的实现，不以自写 schema 校验器替代原生接口。
-const [{ ToolRuntime, assertObjectJsonSchema, assertSupportedJsonSchema }, { Context }, { default: Loader }, { LocalAttachmentStore }, { default: sharp }, { DynamicCordisRunnerService }, { default: Include }] = await Promise.all([
+const [{ ToolRuntime, assertObjectJsonSchema, assertSupportedJsonSchema }, { Context }, { default: Loader }, { LocalAttachmentStore }, { default: sharp }, { DynamicCordisRunnerService }, { default: Include }, { SystemPrompt, renderContextSnapshot }] = await Promise.all([
   import(pathToFileURL(join(dshModules, '@deepseek-ai/dsh-tools/lib/index.js')).href),
   import(pathToFileURL(join(dshModules, '@deepseek-ai/cordis/lib/index.js')).href),
   import(pathToFileURL(join(dshModules, '@deepseek-ai/cordis-plugin-loader/lib/index.js')).href),
@@ -18,6 +19,7 @@ const [{ ToolRuntime, assertObjectJsonSchema, assertSupportedJsonSchema }, { Con
   import(pathToFileURL(join(dshModules, 'sharp/dist/index.cjs')).href),
   import(pathToFileURL(join(dshModules, '@deepseek-ai/dsh-cordis-host-runner/lib/index.js')).href),
   import(pathToFileURL(join(dshModules, '@deepseek-ai/cordis-plugin-include/lib/index.js')).href),
+  import(pathToFileURL(join(dshModules, '@deepseek-ai/dsh-system-prompt/lib/index.js')).href),
 ]);
 
 function context() {
@@ -31,7 +33,7 @@ function execution(name, args = {}, signal = new AbortController().signal) {
   return { name, arguments: args, signal, token: {}, callId: `验证-${name}` };
 }
 
-const inputs = { douyin_search: { query: '科普' }, douyin_open_video: { index: 0 }, douyin_observe: { seconds: 1 }, douyin_remember: { content: '喜欢清楚的解释。' }, douyin_recall: { query: '解释', limit: 2 },douyin_chat_read:{recipientId:'conv:synthetic'},douyin_chat_observe:{recipientId:'conv:synthetic',messageId:'msg:'+'a'.repeat(64)},douyin_forward_video:{recipientId:'conv:synthetic'} };
+const inputs = { douyin_search: { query: '科普' }, douyin_open_video: { index: 0 }, douyin_observe: { seconds: 1 }, douyin_remember: { content: '喜欢清楚的解释。' }, douyin_recall: { query: '解释', limit: 2 },douyin_chat_read:{recipientId:'conv:synthetic'},douyin_chat_observe:{recipientId:'conv:synthetic',messageId:'msg:'+'a'.repeat(64)},douyin_forward_video:{recipientId:'conv:synthetic'}, douyin_interest_record:{evidenceId:'video:'+'b'.repeat(64),topic:'合成科普题材',signal:'like',reflection:'根据合成采样证据记录兴趣，不代表用户偏好。'} };
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPEkAAAAASUVORK5CYII=';
 
 async function managedIncludeFixture({ version = '4', mode = 'complete' } = {}) {
@@ -40,14 +42,14 @@ async function managedIncludeFixture({ version = '4', mode = 'complete' } = {}) 
   const configFile = join(directory, 'plugins.json'), otherFile = join(directory, 'other-plugin.mjs');
   const { ctx, runtime } = context();
   const config = { marker: '保留原插件配置', nested: { enabled: true }, mode };
-  await writeFile(file, `import {createNativeToolDefinitions} from ${JSON.stringify(new URL('../dsh-plugin.mjs?v=5', import.meta.url).href)};
+  await writeFile(file, `import {createNativeToolDefinitions} from ${JSON.stringify(new URL('../dsh-plugin.mjs?v=6', import.meta.url).href)};
 export const name='douyin-managed-fixture';export const inject=['tools'];
 export function apply(ctx,config={}){
   const version=new URL(import.meta.url).searchParams.get('v');
   const all=createNativeToolDefinitions({ctx,getController:async()=>{throw new Error('SDK临时测试禁止浏览器执行')}});
-  const count=version==='5'?(config.mode==='incomplete'?all.length-1:all.length):${version === '4-full' ? 'all.length' : '17'};
+  const count=version==='6'?(config.mode==='incomplete'?all.length-1:all.length):${version.endsWith('-full') ? 'all.length' : version === '5' ? '22' : '17'};
   for(const tool of all.slice(0,count)){const off=ctx.tools.register(tool);ctx.effect(()=>off)}
-  if(version==='5'&&config.mode==='throw')throw new Error('合成升级失败');
+  if(version==='6'&&config.mode==='throw')throw new Error('合成升级失败');
   ctx.provide('douyinManagedFixture',{version,config});
 }`);
   await writeFile(otherFile, `export const name='unrelated-fixture';export function apply(ctx,config){ctx.provide('unrelatedManagedFixture',config)}`);
@@ -80,7 +82,7 @@ test('真实SDK复现：include限定ID移除无效，随后创建新条目触�
   const fixture = await managedIncludeFixture();
   try {
     assert.equal(fixture.runtime.schemas().length, 17);
-    const legacy = `return {name:'legacy-remove-create',inject:['loader','tools'],async apply(ctx){await ctx.loader.remove('include:douyin-browser');await ctx.loader.create({name:${JSON.stringify(`${fixture.uri}?v=5`)}});await ctx.loader.await()}};`;
+    const legacy = `return {name:'legacy-remove-create',inject:['loader','tools'],async apply(ctx){await ctx.loader.remove('include:douyin-browser');await ctx.loader.create({name:${JSON.stringify(`${fixture.uri}?v=6`)}});await ctx.loader.await()}};`;
     const { result } = await fixture.run(legacy);
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.match(JSON.stringify(result), /duplicate|已注册|重复|already/i);
@@ -91,7 +93,7 @@ test('真实SDK复现：include限定ID移除无效，随后创建新条目触�
   } finally { await fixture.close(); }
 });
 
-test('真实纯host沙箱使用公开update原位升级include条目，停止辅助包仍保留22工具与其他配置', async () => {
+test('真实纯host沙箱使用公开update原位升级include条目，停止辅助包仍保留完整工具与其他配置', async () => {
   const fixture = await managedIncludeFixture();
   try {
     const before = structuredClone(fixture.entry.options);
@@ -100,31 +102,32 @@ test('真实纯host沙箱使用公开update原位升级include条目，停止辅
     await fixture.ctx.loader.await();
     assert.equal(fixture.ctx.loader.resolve('include:douyin-browser'), fixture.entry);
     assert.notEqual(fixture.entry.fiber, fixture.originalFiber);
-    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=5`);
+    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=6`);
     assert.deepEqual({ ...fixture.entry.options, name: before.name }, before);
-    assert.equal(fixture.runtime.schemas().length, 22);
-    assert.equal(fixture.ctx.get('douyinManagedFixture').version, '5');
+    assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
+    assert.equal(fixture.ctx.get('douyinManagedFixture').version, '6');
     assert.deepEqual(fixture.ctx.get('douyinManagedFixture').config, fixture.config);
     assert.equal(fixture.unrelated.fiber, fixture.unrelatedFiber);
     const persisted = await fixture.persisted();
     assert.deepEqual(persisted.map(entry => entry.id), ['douyin-browser', 'unrelated']);
-    assert.deepEqual(persisted[0], { ...fixture.entries[0], name: `${fixture.uri}?v=5` });
+    assert.deepEqual(persisted[0], { ...fixture.entries[0], name: `${fixture.uri}?v=6` });
     assert.deepEqual(persisted[1], fixture.entries[1]);
     const stopped = await fixture.runner.undefine(fixture.agent, defined.pluginId);
     assert.equal(stopped.ok, true);
     assert.equal(fixture.ctx.loader.resolve('include:douyin-browser'), fixture.entry);
-    assert.equal(fixture.runtime.schemas().length, 22);
+    assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
     assert.equal(fixture.unrelated.fiber, fixture.unrelatedFiber);
   } finally { await fixture.close(); }
 });
 
-test('已有完整22工具仍核对自有entry版本，旧版本升级到v5且重复运行不重启', async () => {
-  const fixture = await managedIncludeFixture({ version: '4-full' });
+test('已有完整目录或v5旧22工具仍核对自有entry版本，升级到v6且重复运行不重启', async () => {
+  for (const version of ['4-full', '5']) {
+  const fixture = await managedIncludeFixture({ version });
   try {
-    assert.equal(fixture.runtime.schemas().length, 22);
+    assert.equal(fixture.runtime.schemas().length, version === '5' ? 22 : TOOL_DEFINITIONS.length);
     const first = await fixture.run(await fixture.helper());
     assert.equal(first.result.ok, true, JSON.stringify(first.result));
-    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=5`);
+    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=6`);
     assert.notEqual(fixture.entry.fiber, fixture.originalFiber);
     const upgradedFiber = fixture.entry.fiber;
     const second = await fixture.run(await fixture.helper());
@@ -132,8 +135,9 @@ test('已有完整22工具仍核对自有entry版本，旧版本升级到v5且�
     assert.equal(fixture.entry.fiber, upgradedFiber);
     await fixture.runner.undefine(fixture.agent, first.defined.pluginId);
     await fixture.runner.undefine(fixture.agent, second.defined.pluginId);
-    assert.equal(fixture.runtime.schemas().length, 22);
+    assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
   } finally { await fixture.close(); }
+  }
 });
 
 test('原位升级的应用失败或工具目录不完整时回滚原include条目和配置', async () => {
@@ -156,13 +160,13 @@ test('原位升级的应用失败或工具目录不完整时回滚原include条�
 });
 
 test('工具名齐全但来源不是目标entry，或自有entry不唯一时拒绝加载', async () => {
-  const foreign = await managedIncludeFixture({ version: '5' });
+  const foreign = await managedIncludeFixture({ version: '6' });
   try {
     const body = (await foreign.helper()).replaceAll(foreign.uri, foreign.uri.replace('plugin.mjs', 'different-plugin.mjs'));
     const { result } = await foreign.run(body);
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal(foreign.entry.fiber, foreign.originalFiber);
-    assert.equal(foreign.runtime.schemas().length, 22);
+    assert.equal(foreign.runtime.schemas().length, TOOL_DEFINITIONS.length);
   } finally { await foreign.close(); }
   const ambiguous = await managedIncludeFixture();
   try {
@@ -175,9 +179,9 @@ test('工具名齐全但来源不是目标entry，或自有entry不唯一时拒�
   } finally { await ambiguous.close(); }
 });
 
-test('停用或等待注入依赖的自有v5条目，不因外部22工具齐全而被误报为活动插件', async () => {
+test('停用或等待注入依赖的自有v6条目，不因外部完整工具齐全而被误报为活动插件', async () => {
   for (const inactive of ['disabled', 'waiting']) {
-    const fixture = await managedIncludeFixture({ version: '5' });
+    const fixture = await managedIncludeFixture({ version: '6' });
     const disposers = [];
     try {
       await fixture.ctx.loader.update('include:douyin-browser', inactive === 'disabled' ? { disabled: true } : { inject: ['missing-verification-service'] });
@@ -186,12 +190,12 @@ test('停用或等待注入依赖的自有v5条目，不因外部22工具齐全�
       const before = structuredClone(fixture.entry.options), parkedFiber = fixture.entry.fiber;
       const external = createNativeToolDefinitions({ ctx: fixture.ctx, getController: async () => { throw new Error('禁止浏览器执行'); } });
       for (const tool of external) disposers.push(fixture.runtime.register(tool));
-      assert.equal(fixture.runtime.schemas().length, 22);
+      assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
       const { result } = await fixture.run(await fixture.helper());
       assert.equal(result.ok, false, JSON.stringify(result));
       assert.deepEqual(fixture.entry.options, before);
       assert.equal(fixture.entry.fiber, parkedFiber);
-      assert.equal(fixture.runtime.schemas().length, 22);
+      assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
       assert.equal(fixture.unrelated.fiber, fixture.unrelatedFiber);
     } finally { for (const dispose of disposers) dispose(); await fixture.close(); }
   }
@@ -201,7 +205,7 @@ test('新建条目的清理不删除同ID替换、原位改名的其他插件，
   for (const replacement of ['replace', 'rename', 'removed']) {
     const directory = await mkdtemp(join(tmpdir(), 'douyin-cleanup-owner-'));
     const file = join(directory, 'plugin.mjs'), uri = pathToFileURL(file).href;
-    await writeFile(file, `export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=5', import.meta.url).href)};`);
+    await writeFile(file, `export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=6', import.meta.url).href)};`);
     const { ctx, runtime } = context();
     const fiber = ctx.plugin(Loader, { baseUrl: pathToFileURL(join(directory, 'cordis.yml')).href });
     await fiber.await(); ctx.loader.internal = undefined;
@@ -212,8 +216,8 @@ test('新建条目的清理不删除同ID替换、原位改名的其他插件，
       const defined = runner.define({ sessionId: agent.id, plugin: { kind: 'new', idPrefix: 'douyin' }, name: '清理归属测试', purpose: '核对停止辅助包不会删除其他插件。', code: { host } });
       const result = await runner.run(agent, defined.pluginId, defined.packageId, 'run', new AbortController().signal);
       assert.equal(result.ok, true, JSON.stringify(result));
-      assert.equal(runtime.schemas().length, 22);
-      const entry = [...ctx.loader.entries()].find(entry => entry.options.name === `${uri}?v=5`), id = entry.id;
+      assert.equal(runtime.schemas().length, TOOL_DEFINITIONS.length);
+      const entry = [...ctx.loader.entries()].find(entry => entry.options.name === `${uri}?v=6`), id = entry.id;
       if (replacement === 'rename') await ctx.loader.update(id, { name: 'cordis:unrelated' });
       else {
         await ctx.loader.remove(id);
@@ -253,6 +257,65 @@ test('完整工具目录使用真实 DSH schema、注册表和执行管线', asy
       assert.equal(calls.at(-1).options.signal instanceof AbortSignal, true);
     }
   } finally { for (const dispose of disposers.reverse()) dispose(); }
+});
+
+test('自主观看原生工具注入服务时走共享watch，默认只使用现有轮次，不回落浏览器执行', async () => {
+  const { ctx, runtime } = context();
+  const calls = [], lookups = [];
+  const watch = {
+    state() { calls.push({ method: 'state' }); return { status: 'stopped', running: false }; },
+    async start(input, options) { calls.push({ method: 'start', input, options }); return { status: 'running', running: true }; },
+    async stop(options) { calls.push({ method: 'stop', options }); return { status: 'stopped', running: false }; },
+  };
+  const agent = { id: '合成自主观看代理' };
+  const definitions = createNativeToolDefinitions({ ctx,
+    getController: async () => ({ execute() { assert.fail('注入watch服务后不得把自主观看转到浏览器执行'); } }),
+    getWatch: async (exec, starting) => { lookups.push({ agent: exec.agent, starting }); return watch; },
+  }).filter(definition => definition.name.startsWith('douyin_watch_'));
+  const disposers = definitions.map(definition => runtime.register(definition));
+  try {
+    for (const [name, args] of [['douyin_watch_status', {}], ['douyin_watch_start', {}], ['douyin_watch_start', { maxRequests: 7 }], ['douyin_watch_stop', {}]]) {
+      const result = await runtime.execute({ ...execution(name, args), agent });
+      assert.equal(result.isError, false, JSON.stringify(result)); assert.equal(result.value.tool, name);
+    }
+    assert.deepEqual(calls, [{ method: 'state' }, { method: 'start', input: { startSession: false, maxRequests: 30 }, options: { explicit: true } }, { method: 'start', input: { startSession: false, maxRequests: 7 }, options: { explicit: true } }, { method: 'stop', options: { explicit: true } }]);
+    assert.deepEqual(lookups.map(item => item.starting), [false, true, true, false]);
+    assert.equal(lookups.every(item => item.agent === agent), true);
+    const before = calls.length;
+    for (const args of [{ maxRequests: 0 }, { maxRequests: 101 }, { maxRequests: 1.5 }, { startSession: true }]) {
+      const result = await runtime.execute({ ...execution('douyin_watch_start', args), agent });
+      assert.equal(result.isError, true, JSON.stringify(args));
+    }
+    assert.equal(calls.length, before, '无效预算或新轮次参数不会进入watch服务');
+  } finally { for (const dispose of disposers.reverse()) dispose(); await ctx.fiber.dispose(); }
+});
+
+test('共享人格绑定可使用已装真实SystemPrompt变量与动态上下文，每次组装刷新且卸载释放', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'douyin-native-persona-sdk-'));
+  const ctx = new Context(), prompt = new SystemPrompt(ctx, { includeHarnessIdentity: false });
+  let current = '合成人格版本一：喜欢清楚的解释。';
+  const binding = bindNativePersonaContext(ctx, { workspacePaths: [directory], getPersonaMemory: () => ({ context: () => current }) });
+  const agent = { id: '合成人格代理', session: { header: { cwd: directory } }, ctx };
+  try {
+    assert.equal(binding.attach(agent), true);
+    assert.equal(binding.attach(agent), false, '重复工具调用不重复注册人格');
+    assert.equal(binding.attach({ session: { header: { cwd: join(directory, 'other-workspace') } }, ctx }), false);
+    const first = await prompt.assemble();
+    assert.equal(first.variables.douyin_shared_persona, current);
+    assert.equal(first.contexts.filter(item => item.name === 'workspace:douyin-shared-persona').length, 1);
+    assert.match(renderContextSnapshot(first), /合成人格版本一/);
+    assert.doesNotMatch(renderContextSnapshot(first), /\{\{douyin_shared_persona\}\}/);
+    current = '合成人格版本二：新增有依据的科普兴趣。';
+    const refreshed = renderContextSnapshot(await prompt.assemble());
+    assert.match(refreshed, /合成人格版本二/); assert.doesNotMatch(refreshed, /合成人格版本一/);
+    binding.close();
+    const closed = await prompt.assemble();
+    assert.equal('douyin_shared_persona' in closed.variables, false);
+    assert.equal(closed.contexts.some(item => item.name === 'workspace:douyin-shared-persona'), false);
+  } finally {
+    binding.close(); await ctx.fiber.dispose();
+    assert.equal(dirname(resolve(directory)), resolve(tmpdir())); assert.match(directory, /douyin-native-persona-sdk-[^\\/]+$/); await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('无效参数和控制器失败进入真实 ToolRuntime 的 isError 结果', async () => {
@@ -350,13 +413,13 @@ test('真实动态包可通过 Loader 原位升级同路径旧模块，保留已
     await writeFile(file,`export const name='old-douyin';export const inject=['tools'];export function apply(ctx){const off=ctx.tools.register({name:'douyin_open',description:'合成旧版本',parameters:{type:'object',properties:{}},output:{schema:{type:'object',additionalProperties:true},render:()=>[{type:'text',text:'合成状态'}]},execute:async()=>({ok:true})});ctx.effect(()=>off)}`);
     const old=await ctx.loader.create({name:uri});await ctx.loader.await();
     assert.equal(runtime.schemas().length,1);
-    await writeFile(file,`export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=2',import.meta.url).href)};`);
+    await writeFile(file,`export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=6',import.meta.url).href)};`);
     const body=(await readFile(new URL('../plugin-hotload.js',import.meta.url),'utf8')).replaceAll('file:///D:/codex%E5%88%86%E5%B1%80/dsh%E9%85%8D%E7%BD%AE/douyin-browser/dsh-plugin.mjs',uri);
     const defined=runner.define({sessionId:'升级测试',plugin:{kind:'new',idPrefix:'douyin'},name:'升级测试',purpose:'核实模块升级',code:{host:body}});
     const result=await runner.run({id:'升级测试'},defined.pluginId,defined.packageId,'run',new AbortController().signal);await ctx.loader.await();
     assert.equal(result.ok,true,JSON.stringify(result));
     assert.equal(runtime.schemas().length,TOOL_DEFINITIONS.length);assert.equal(Boolean(ctx.loader.store[old]),true);
-    assert.equal(ctx.loader.resolve(old).options.name,`${uri}?v=5`);
+    assert.equal(ctx.loader.resolve(old).options.name,`${uri}?v=6`);
     await runner.undefine({id:'升级测试'},defined.pluginId);
     assert.equal(runtime.schemas().length,TOOL_DEFINITIONS.length);
   }finally{await ctx.fiber.dispose();await rm(directory,{recursive:true,force:true});}

@@ -1,4 +1,4 @@
-const LONG = new Set(['/api/chat/contacts', '/api/chat/configure', '/api/chat/start', '/api/forward/contacts', '/api/forward']);
+const LONG = new Set(['/api/chat/contacts', '/api/chat/configure', '/api/chat/start', '/api/forward/contacts', '/api/forward', '/api/watch/start', '/api/watch/stop']);
 
 export function createApiClient(fetcher = globalThis.fetch.bind(globalThis)) {
   let token = '';
@@ -21,10 +21,20 @@ export function createApiClient(fetcher = globalThis.fetch.bind(globalThis)) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '本机请求未完成。');
+    if (!response.ok) { const error = new Error(data.error || '本机请求未完成。'); error.status = response.status; throw error; }
     return data;
   }
   return { bootstrap, request };
+}
+
+export function watchIsActive(state) {
+  return state?.running === true || state?.worker?.alive === true || ['running', 'stopping'].includes(state?.status);
+}
+
+export function watchStartInput(value) {
+  const maxRequests = Number(value);
+  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 100) throw new Error('本轮请求上限须为 1 至 100 的整数。');
+  return { startSession: false, maxRequests };
 }
 
 export function publicSettings(value = {}) {

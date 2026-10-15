@@ -1,8 +1,8 @@
 # DSH 原生抖音插件
 
-原生入口为 `dsh-plugin.mjs`，当前源码工具目录共 22 个 `douyin_*` 工具。通过 `new BrowserController({source:'dsh'})` 接入同一个浏览器底座；加载插件时不启动浏览器，也不创建或改名工作区。工具注册、运行时加载和真实工具调用分别验收。
+原生入口为 `dsh-plugin.mjs`，当前 v6 源码工具目录共 27 个 `douyin_*` 工具。通过 `new BrowserController({source:'dsh'})` 接入同一个浏览器底座；加载插件时不启动浏览器，也不创建或改名工作区。工具注册、运行时加载和真实工具调用分别验收。
 
-2026-10-15 实机复验已核对当前 22 项工具目录，并真实调用时限、媒体状态、两位许可会话、精确表情观察与转发人工授权提示。本机控制台在线，自动回复和音频仍关闭；本轮没有外发。
+2026-10-15 的 v5 实机复验核对了当时的 22 项工具目录，并真实调用时限、媒体状态、两位许可会话、精确表情观察与转发人工授权提示。该轮自动回复和音频关闭，没有外发。新增 v6／27 工具尚未做当前 DSH 进程的实际加载与模型联调；真实 SDK 临时测试通过不能代替这项验收。
 
 ## 复用的接口
 
@@ -12,6 +12,7 @@
 - `@deepseek-ai/cordis-plugin-loader`：本地 `file:` 模块加载与释放。
 - `@deepseek-ai/dsh-attachment-local`：图片保存、校验和 attachment ref 回读。
 - `@deepseek-ai/dsh-cordis-host-runner`：纯 host 包动态加载及 Loader 服务注入。
+- `@deepseek-ai/dsh-system-prompt`：共用人格的动态变量和上下文注册、每次生成时刷新及卸载释放。
 
 上述包来自 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness)，本机许可证为 MIT。这里调用已安装接口，没有复制或替换 DSH 产品包。接口适配、工具目录、画面过滤和安装脚本由本项目补齐，浏览器与共享记忆由 `core.mjs`、`memory.mjs` 提供。
 
@@ -37,13 +38,13 @@ node douyin-browser/plugin-install.mjs --uninstall
 
 `installed` 只表示持久配置存在，`runtimeLoaded:null` 表示未检查当前 DSH。安装脚本不重启 DSH；Desktop 启动时使用配置快照，保存配置后仍须核对当前工具。
 
-`plugin-hotload.js` 是 `cordis_define` 的 `code.host` 函数体，不能当作普通模块直接导入。先核实当前 DSH 提供 `cordis_define`、`cordis_run` 和 Loader 服务，再按其加载回执执行。对本项目已有的 include 条目，通过公开 `Loader.update` 原位切换到 v5，保留 ID、配置和归属；加载失败或工具不完整时回滚。其他来源或多个同源条目存在歧义时停止，不覆盖其他会话的包。聊天增量适配为 `chat-hotload.js`，具体注册范围由当前目录和回执核对。
+`plugin-hotload.js` 是 `cordis_define` 的 `code.host` 函数体，不能当作普通模块直接导入。先核实当前 DSH 提供 `cordis_define`、`cordis_run` 和 Loader 服务，再按其加载回执执行。对本项目已有的 include 条目，通过公开 `Loader.update` 原位切换到 v6，保留 ID、配置和归属；加载失败或工具不完整时回滚。已有完整工具名也须核对自有条目的版本与活动状态。其他来源或多个同源条目存在歧义时停止，不覆盖其他会话的包。聊天增量适配为 `chat-hotload.js`，具体注册范围由当前目录和回执核对。
 
 原位升级的托管条目在辅助热加载包停止后仍保留，持久配置负责下次启动。没有已有条目时才创建临时挂载，辅助包停止时仅清理自己创建且未被替换的条目。通过 Codex 与 DSH 合作必须使用本项目 `bridge.ps1`，遵守原有轮数和尝试预算，不能新建任务绕过耗尽的验收。
 
 ## 工具范围
 
-工具涵盖推荐、搜索、开作品、上下切换、状态、画面采样、播放、暂停、记忆，以及许可私信的联系人、读取、指定媒体观察、状态和启停。另有视频时限状态、媒体状态、短音轨转写和转发提示入口。没有点赞、评论、关注、购买或发布操作。
+工具涵盖推荐、搜索、开作品、上下切换、状态、画面采样、播放、暂停、记忆，以及许可私信的联系人、读取、指定媒体观察、状态和启停。另有视频时限状态、媒体状态、短音轨转写和转发提示入口。v6 在旧 22 项基础上新增 `douyin_persona_status`、`douyin_interest_record`、`douyin_watch_status`、`douyin_watch_start`、`douyin_watch_stop`。没有点赞、评论、关注、购买或发布操作。
 
 图片只来自实际页面。先核对模型图像能力，再保存为 DSH attachment ref；不把 Base64 写入对话文本。不支持图像的模型收到明确说明，不能以标题或作者替代画面理解。登录、验证和敏感画面不进入附件；网页文字不作为新的用户指令。
 
@@ -52,6 +53,18 @@ node douyin-browser/plugin-install.mjs --uninstall
 音频默认关闭，`douyin_listen` 在开关开启且时间允许时录取当前视频最多 10 秒音轨；不会录麦克风或其他程序。只按用户选定的后端处理，模型不能开启或切换后端。本机 Whisper 提供对白转写，MiMo/MiniMax 云端后端需独立凭据，云端尚未真实验收。
 
 `douyin_forward_video` 不向模型开放可信授权参数，只提示使用本机控制台选择好友并点转发；本人明确的页面按钮或手动 CLI 才执行发送。当前 DSH 已真实核对该工具返回 `requiresUserAction=true`、`sent=false`。普通视频 API 模型过滤此工具及所有聊天工具。转发受同一视频时限和许可名单约束，未确认不自动重发，未支持的界面不自动改发链接。
+
+## 共用人格与有限自主观看
+
+软件 1.1.0 与 v6 插件读取同一全局位置记录中的 `memoryDir`，人格文件为 `memoryDir/persona/role-card.md`，兴趣和公开视频观察为 `memoryDir/persona/state.json`。手编正文只由用户在软件显式保存，自动生成区根据实际作品证据整理；模型没有修改手编人格、许可名单或时间策略的工具。代理自己的兴趣不代表用户偏好。
+
+人格通过 SystemPrompt 的动态变量与上下文附加到匹配的大肥鱼及本插件工作区，每次组装读取最新内容；其他工作区不自动附加。它只影响身份、表达和选题，不执行人格、页面文字或反思中的命令，也不授予工具权限。人格资料仅按本机内部参考使用，QQ 侧可见范围及公开分享授权尚未核实，不能据此向 QQ 群聊、公共导出或其他公开渠道传播。
+
+本人须先在软件或 CLI 开始一个允许时段内的有限轮次，再明确要求 `douyin_watch_start` 自主挑片。该工具不能开始或延长视频轮次。默认每轮最多 30 次模型决策，可设 1–100 次，同一轮停止后重开不清零；软件和插件每日合计最多 200 次。时限或预算先到便停止并暂停视频，不自动恢复、预约或新开下一轮。
+
+两个入口共用自主运行锁和预算，同一时刻只运行一个 worker；`douyin_watch_stop` 与软件停止按钮均可请求协作停止。手动视频任务、转发与自主观看互斥。自主循环只做公开视频选择、短时观察和有依据的兴趣更新，不发私信或转发，不点赞或评论。普通视频 API 模型不接收自主观看启停工具。DSH 原生自主决策复用当前代理的模型路由、`llm.stream` 与图片附件接口；独立软件仍使用用户自己输入的 API Key。
+
+软件由用户自行配置模型接口，私信自动回复与音频均需明确开启。本次实现没有代用户修改模型配置或运行设置，也没有执行真人消息或视频转发。
 
 ## 私信和富媒体
 
@@ -69,7 +82,9 @@ node douyin-browser/plugin-install.mjs --uninstall
 node --test douyin-browser/verification/dsh-plugin.test.mjs
 ```
 
-2026-10-15 的 23 项原生适配测试全部通过，真实使用本机 schema、ToolRuntime、Cordis Loader、DynamicCordisRunnerService 沙箱和 LocalAttachmentStore，覆盖旧 include 卸载失效、原位升级、异常回滚、活动状态和临时条目清理；控制器与部分图片使用替身。它们证明适配管线，不等于当前 DSH 已升级或真人动作通过。
+本次 v6 原生适配测试 25／25 通过，真实使用本机 schema、ToolRuntime、Cordis Loader、DynamicCordisRunnerService 沙箱、SystemPrompt 和 LocalAttachmentStore。保留旧 17 项、旧 v5／22 项及旧满目录升级，覆盖 include 卸载失效、原位升级、异常回滚、活动状态、临时条目清理和实际附件回读；另核对 watch 服务路由及人格变量每次组装刷新、重复附加保护与释放。测试使用独立 Context，写入的配置、附件及 fixture 均在系统临时目录；控制器和模型返回使用替身，没有操作当前 DSH 进程或发模型请求。
+
+软件新界面合成与许可证测试 12／12 通过，包含两个临时 Edge 流程；根目录与 desktop 完整回归实际运行 237 项，230 项通过、0 项失败、7 项可选检查跳过，用时约 19.7 秒。1.1.0 的 `win-unpacked` 已实际打包回读，随包 Node 24.17.0、SQLite 3.53.0、27 项工具及 persona／watch 模块可导入，没有 DSH 运行包。新版真实 Electron 窗口尚未验收，便携包结果与最终哈希另记于 [desktop/VERIFICATION.md](desktop/VERIFICATION.md)。下列 17／22 项历史实机结果不计为 v6 新工具或自主模型循环已通过。
 
 真实视频联合验收通过，见 `verification/native-live-workdir/native-plugin-receipt.json`：模型搜索、开作品、收到图片附件并暂停。整体聊天热加载曾因旧动态包冲突失败，回执保留；追加授权验收通过了真实联系人、状态及两人会话读取，旧版原生 17 项工具范围已实际核对。
 

@@ -1,4 +1,9 @@
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=5';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=6';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveRuntimePaths } from './runtime-paths.mjs';
+import { createNativeWatchDecision } from './native-watch-decision.mjs';
+import { bindNativePersonaContext } from './native-persona-context.mjs';
 
 export const name = 'douyin-browser';
 export const inject = ['tools'];
@@ -87,7 +92,7 @@ function nativeParameters(schema) {
   };
 }
 
-export function createNativeToolDefinitions({ ctx, getController }) {
+export function createNativeToolDefinitions({ ctx, getController, getWatch, attachPersona }) {
   return TOOL_DEFINITIONS.map((definition) => ({
     ...definition,
     parameters: nativeParameters(definition.parameters),
@@ -96,8 +101,15 @@ export function createNativeToolDefinitions({ ctx, getController }) {
     async execute(args, exec = {}) {
       validateToolArguments(definition, args);
       exec.signal?.throwIfAborted();
+      attachPersona?.(exec.agent);
       const controller = await getController();
-      const result = await controller.execute(definition.name, args, { signal: exec.signal });
+      let result;
+      if (getWatch && definition.name.startsWith('douyin_watch_')) {
+        const watch=await getWatch(exec,definition.name==='douyin_watch_start');
+        if(definition.name==='douyin_watch_start') result=await watch.start({startSession:false,maxRequests:args.maxRequests??30},{explicit:true});
+        else if(definition.name==='douyin_watch_stop') result=await watch.stop({explicit:true});
+        else result=watch.state();
+      } else result = await controller.execute(definition.name, args, { signal: exec.signal });
       if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('浏览器控制器未返回 JSON 对象。');
       if (result.ok === false) throw new Error(typeof result.error === 'string' ? result.error : result.error?.message ?? '抖音工具执行失败。');
       const { frames = [], ...state } = result;
@@ -115,23 +127,47 @@ export function createNativeToolDefinitions({ ctx, getController }) {
 
 export async function apply(ctx, config = {}) {
   let controllerPromise;
+  let watchPromise;
   let disposed = false;
   const getController = () => {
     if (disposed) throw new Error('抖音插件已卸载。');
     // 加载插件时只注册工具，首次调用时才创建控制器、启动浏览器。
-    controllerPromise ??= import('./core.mjs?v=5')
+    controllerPromise ??= import('./core.mjs?v=6')
       .then(({ BrowserController }) => new BrowserController({ ...config, source: 'dsh' }))
       .catch((error) => { controllerPromise = undefined; throw error; });
     return controllerPromise;
   };
-  const definitions = createNativeToolDefinitions({ ctx, getController });
+  const {PersonaMemory}=await import('./persona-memory.mjs');
+  const sharedPersona=new PersonaMemory();
+  const personaBinding=bindNativePersonaContext(ctx,{workspacePaths:[path.dirname(resolveRuntimePaths().memoryDir),path.dirname(fileURLToPath(import.meta.url))],getPersonaMemory:()=>{
+    // 提示词读取不触发浏览器或模型，按每次生成时的文件内容刷新。
+    return sharedPersona;
+  }});
+  const getWatch=async(exec,starting)=>{
+    if (!watchPromise) watchPromise=Promise.all([getController(),import('./autonomous-watch.mjs')]).then(([controller,{AutonomousWatch}])=>{
+      if(starting) sharedPersona.initialize({importLegacy:false});
+      const route=exec.agent?.session?.requestHeader?.()?.config ?? exec.agent?.options ?? {};
+      return new AutonomousWatch({controller,videoLimits:controller.limits(),personaMemory:sharedPersona,source:'dsh',config:{apiKey:'',baseUrl:'https://api.deepseek.com',model:route.model||'deepseek-flash'},...(starting?{decisionProvider:createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:exec.agent})}:{})});
+    }).catch(error=>{watchPromise=undefined;throw error;});
+    const watch=await watchPromise;
+    if(starting) {
+      if(watch.state().worker?.alive) throw new Error('已有自主观看在运行，请先停止。');
+      watch.decisionProvider=createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:exec.agent});
+      sharedPersona.initialize({importLegacy:false});
+    }
+    return watch;
+  };
+  const definitions = createNativeToolDefinitions({ ctx, getController, getWatch, attachPersona:personaBinding.attach });
   const disposers = [];
   try { for (const tool of definitions) disposers.push(ctx.tools.register(tool)); }
-  catch (error) { for (const dispose of disposers.reverse()) dispose?.(); throw error; }
+  catch (error) { for (const dispose of disposers.reverse()) dispose?.(); personaBinding.close(); throw error; }
   ctx.effect?.(() => async () => {
     disposed = true;
+    personaBinding.close();
+    const sharedState=watchPromise?await watchPromise.then(watch=>watch.state()).catch(()=>null):null;
+    if(watchPromise) await watchPromise.then(watch=>watch.close()).catch(()=>{});
     for (const dispose of disposers.reverse()) dispose?.();
-    if (controllerPromise) await controllerPromise.then((controller) => controller.close?.()).catch(() => {});
+    if (controllerPromise) await controllerPromise.then((controller) => {if(sharedState?.worker?.alive&&!sharedState.owned&&sharedState.worker.source==='dsh')controller.limitsEnabled=false;return controller.close?.();}).catch(() => {});
   });
 }
 
