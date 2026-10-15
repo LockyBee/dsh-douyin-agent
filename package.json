@@ -1,0 +1,18 @@
+{
+  "name": "dsh-douyin-browser-local",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 原生抖音工具与独立 DeepSeek 本地助手",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node app.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:native": "node --test verification/dsh-plugin.test.mjs",
+    "test:browser": "node verification/browser-live.mjs"
+  },
+  "dependencies": {
+    "@playwright/cli": "0.1.22",
+    "@playwright/mcp": "0.0.83"
+  }
+}

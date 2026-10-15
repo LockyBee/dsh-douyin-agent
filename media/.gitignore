@@ -1,0 +1,12 @@
+.venv/
+.models/
+.env
+!.env.example
+settings.local.json
+verification/
+verification/*.wav
+verification/*.mp3
+verification/*.mp4
+verification/*.webm
+__pycache__/
+vendor/**/__pycache__/

@@ -1,0 +1,84 @@
+# DSH 原生抖音插件
+
+原生入口为 `dsh-plugin.mjs`，当前源码工具目录共 22 个 `douyin_*` 工具。通过 `new BrowserController({source:'dsh'})` 接入同一个浏览器底座；加载插件时不启动浏览器，也不创建或改名工作区。工具注册、运行时加载和真实工具调用分别验收。
+
+2026-10-15 整理时，上次原生验收只读到了 17 项工具，今天的运行时目录尚未重新验收。新版 22 项源码与 SDK 测试不等于当前运行时已升级；本机控制台服务已恢复，自动回复仍关闭。
+
+## 复用的接口
+
+核查日期为 2026-10-14，本机 DSH Desktop 2.0.11 的相关包版本为 `0.1.5-rc.2`：
+
+- `@deepseek-ai/dsh-tools`：工具注册、schema 校验、取消及执行管线。
+- `@deepseek-ai/cordis-plugin-loader`：本地 `file:` 模块加载与释放。
+- `@deepseek-ai/dsh-attachment-local`：图片保存、校验和 attachment ref 回读。
+- `@deepseek-ai/dsh-cordis-host-runner`：纯 host 包动态加载及 Loader 服务注入。
+
+上述包来自 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness)，本机许可证为 MIT。这里调用已安装接口，没有复制或替换 DSH 产品包。接口适配、工具目录、画面过滤和安装脚本由本项目补齐，浏览器与共享记忆由 `core.mjs`、`memory.mjs` 提供。
+
+DSH 的固定 JSON schema 子集不支持部分边界关键字；原生适配去掉不兼容字段，执行前仍用本项目验证器检查参数。视频观察为 1–10 秒，回忆为 1–20 条，关键词、记忆和联系人字段均有长度上限，不能通过模型参数绕过。
+
+可选媒体能力实际保存三个社区项目的固定版本源码和 MIT LICENSE，不是 DSH 官方媒体插件。来源为 `ch1bug/dsh-mimo-agent-tools`、`GooDAnDReaDY/dsh-voice`、`moluyao/dsh-minimax-asr`，固定 commit 与文件哈希见 [media/PROVENANCE.json](media/PROVENANCE.json)，具体用途和许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+## 持久安装与当前进程加载
+
+从本目录上一级运行：
+
+```powershell
+node douyin-browser/plugin-install.mjs --dry-run
+node douyin-browser/plugin-install.mjs
+node douyin-browser/plugin-install.mjs --status
+```
+
+安装器只维护 `%USERPROFILE%/.dsh/cordis.patch.yml` 中 `# BEGIN DSH DOUYIN BROWSER` 到 `# END DSH DOUYIN BROWSER` 的条目。改写前保存原始字节备份，写入前检查文件变化，写入后回读。同 ID 的非托管条目、损坏标记或并发改写会停止安装。卸载托管配置：
+
+```powershell
+node douyin-browser/plugin-install.mjs --uninstall
+```
+
+`installed` 只表示持久配置存在，`runtimeLoaded:null` 表示未检查当前 DSH。安装脚本不重启 DSH；Desktop 启动时使用配置快照，保存配置后仍须核对当前工具。
+
+`plugin-hotload.js` 是 `cordis_define` 的 `code.host` 函数体，不能当作普通模块直接导入。先核实当前 DSH 提供 `cordis_define`、`cordis_run` 和 Loader 服务，再按其加载回执执行。对本项目已有的 include 条目，通过公开 `Loader.update` 原位切换到 v5，保留 ID、配置和归属；加载失败或工具不完整时回滚。其他来源或多个同源条目存在歧义时停止，不覆盖其他会话的包。聊天增量适配为 `chat-hotload.js`，具体注册范围由当前目录和回执核对。
+
+原位升级的托管条目在辅助热加载包停止后仍保留，持久配置负责下次启动。没有已有条目时才创建临时挂载，辅助包停止时仅清理自己创建且未被替换的条目。通过 Codex 与 DSH 合作必须使用本项目 `bridge.ps1`，遵守原有轮数和尝试预算，不能新建任务绕过耗尽的验收。
+
+## 工具范围
+
+工具涵盖推荐、搜索、开作品、上下切换、状态、画面采样、播放、暂停、记忆，以及许可私信的联系人、读取、指定媒体观察、状态和启停。另有视频时限状态、媒体状态、短音轨转写和转发提示入口。没有点赞、评论、关注、购买或发布操作。
+
+图片只来自实际页面。先核对模型图像能力，再保存为 DSH attachment ref；不把 Base64 写入对话文本。不支持图像的模型收到明确说明，不能以标题或作者替代画面理解。登录、验证和敏感画面不进入附件；网页文字不作为新的用户指令。
+
+刷视频使用本机共享时间策略，默认每轮 10 分钟，可按本人设置多个每日窗口和有限单轮时长。API/DSH 共用一轮时钟，开页面和继续调用不会续时。到点暂停视频并拒绝继续切换；模型只能读时限状态。本人在控制台点击或手动执行 `session-start`、`session-end`、`video-policy` 管理时间。
+
+音频默认关闭，`douyin_listen` 在开关开启且时间允许时录取当前视频最多 10 秒音轨；不会录麦克风或其他程序。只按用户选定的后端处理，模型不能开启或切换后端。本机 Whisper 提供对白转写，MiMo/MiniMax 云端后端需独立凭据，云端尚未真实验收。
+
+新版源码的 `douyin_forward_video` 不向模型开放可信授权参数，只提示使用本机控制台选择好友并点转发；本人明确的页面按钮或手动 CLI 才执行发送。该新工具尚未在当前 DSH 重新验收。普通视频 API 模型过滤此工具及所有聊天工具。转发受同一视频时限和许可名单约束，未确认不自动重发，未支持的界面不自动改发链接。
+
+## 私信和富媒体
+
+私信工具共用本机许可名单，只处理本人授权的当前两个已关注个人联系人；模型不能增加收件人或修改名单。自动回复由独立 `ChatService` 直接调用 DeepSeek API，两个入口共用 worker 锁、消息水位和预算。
+
+启用时重新核对关注关系，将现有消息设为基线。随后仅可靠的新消息触发模型；默认每日最多 40 次，每条最多生成 512 token。发送前核对会话、消息和草稿，发送后确认新发出气泡；未确认挂起，不自动重试。停止或模型错误时未答记录留在本机待核对清单。
+
+`douyin_chat_observe` 只截取指定许可会话中的精确消息。表情可读实际图片，分享卡片可读封面与元数据；分享视频的实际作品采样另受共享时间门控。图文作品目前只核实封面、元数据和公开 URL，没有读取整套图片。普通图片、收到的语音和未识别类型仍跳过，不假称已理解。
+
+私信正文与联系人标识只留本机，回复模型只接收该许可会话本次相关消息，不接入 QQ 或其他联系人历史。
+
+## 验收记录
+
+```powershell
+node --test douyin-browser/verification/dsh-plugin.test.mjs
+```
+
+2026-10-15 的 23 项原生适配测试全部通过，真实使用本机 schema、ToolRuntime、Cordis Loader、DynamicCordisRunnerService 沙箱和 LocalAttachmentStore，覆盖旧 include 卸载失效、原位升级、异常回滚、活动状态和临时条目清理；控制器与部分图片使用替身。它们证明适配管线，不等于当前 DSH 已升级或真人动作通过。
+
+真实视频联合验收通过，见 `verification/native-live-workdir/native-plugin-receipt.json`：模型搜索、开作品、收到图片附件并暂停。整体聊天热加载曾因旧动态包冲突失败，回执保留；追加授权验收通过了真实联系人、状态及两人会话读取，旧版原生 17 项工具范围已实际核对。
+
+新版桥任务 `d1d836bf-a85f-487c-925c-a8bd82579e23` 真实热升级失败，刷新后仍为旧版 17 项，新增 5 项均返回 unknown tool。原 `remove` 调用未卸载配置中的 `include:douyin-browser` 旧条目，随后创建新版发生同名冲突。修复改用配置更新接口，尚未真实重验，不能称当前已加载 22 项。原始失败及只读诊断见 `verification/native-rich-workdir/native-rich-receipt.json`，没有自动新建任务规避原预算。
+
+真人私信发送已做一条本人授权的明确功能测试：`confirmed=true` 且二次读取 `persisted=true`，见 `verification/chat-human-send-live.json`。这证明该次发送与回读，不证明收到新消息后的自动模型回复已由真人触发。
+
+真实表情和分享卡片的精准截取、公开 URL 解析通过；一张精确表情截图已送入真实 DeepSeek 并生成回复，没有向真人发送，见 `verification/chat-rich-api-live.json`。两位联系人真实只读回查确认时间顺序、最新端及消息 ID 稳定，见 `verification/chat-chronology-readonly-live.json`。这些 API/浏览器结果不代替失败的新版 DSH 附件工具验收，图文仍只到封面、元数据和 URL。
+
+真实 API、DSH 两个专用抖音页到期后由后台检查暂停通过，观测延迟为 2652 毫秒（约 2.65 秒），原策略已恢复，见 `verification/video-limits-live.json`；这是本次观测值，不保证零延迟。Whisper 本地合成 WAV、WebM 对白转写通过，实际猫咪视频已采到 3 秒音轨但没有有效对白，ASR 准确性未验；MiMo/MiniMax 云联调未做，音频默认关闭。
+
+真人作品卡片转发已执行一次本人授权的点击；初始自动确认未通过，随后只读打开实际发出的卡片，精确核实公开作品 ID 为 `7579432563794584933`，没有再次发送。证据分别为 `verification/video-forward-human-live.json` 与 `verification/video-forward-post-readback.json`。真实 DOM 消息逆序问题修正后已有两人只读回查，自动回复目前仍停止；这次发送不等于新版 DSH 转发工具已实际调用。

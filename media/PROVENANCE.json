@@ -1,0 +1,65 @@
+[
+  {
+    "repository": "https://github.com/ch1bug/dsh-mimo-agent-tools",
+    "commit": "38a7985d25090a4b87b987c2d99613a5c6b318d7",
+    "upstreamPath": "driver/mimo_driver.py",
+    "localPath": "vendor/mimo/driver/mimo_driver.py",
+    "sha256": "af37aa2fc3476033d4c8a28601114255c00ae919909a39522fcb8403309ec233",
+    "sourceUrl": "https://raw.githubusercontent.com/ch1bug/dsh-mimo-agent-tools/38a7985d25090a4b87b987c2d99613a5c6b318d7/driver/mimo_driver.py",
+    "modified": false
+  },
+  {
+    "repository": "https://github.com/ch1bug/dsh-mimo-agent-tools",
+    "commit": "38a7985d25090a4b87b987c2d99613a5c6b318d7",
+    "upstreamPath": "LICENSE",
+    "localPath": "vendor/mimo/LICENSE",
+    "sha256": "e37210eb330951cc3ee2cb5b0430d0bb9027dc3b4d57323cd0d3500ff5d7cb0e",
+    "sourceUrl": "https://raw.githubusercontent.com/ch1bug/dsh-mimo-agent-tools/38a7985d25090a4b87b987c2d99613a5c6b318d7/LICENSE",
+    "modified": false
+  },
+  {
+    "repository": "https://github.com/GooDAnDReaDY/dsh-voice",
+    "commit": "e3e96e0bd3a34d73fec0edac45a1fba1cb7b6f6f",
+    "upstreamPath": "lib/providers.js",
+    "localPath": "vendor/voice/lib/providers.js",
+    "sha256": "695e075b2758012f71c2450c576980a22b4b4ef3603127d43385f73315c661ee",
+    "sourceUrl": "https://raw.githubusercontent.com/GooDAnDReaDY/dsh-voice/e3e96e0bd3a34d73fec0edac45a1fba1cb7b6f6f/lib/providers.js",
+    "modified": false
+  },
+  {
+    "repository": "https://github.com/GooDAnDReaDY/dsh-voice",
+    "commit": "e3e96e0bd3a34d73fec0edac45a1fba1cb7b6f6f",
+    "upstreamPath": "lib/provider-http.js",
+    "localPath": "vendor/voice/lib/provider-http.js",
+    "sha256": "cb079e8c0ebc7366a4debbbf19b29740899ee52caac457bec1ab8ff902f9d2e3",
+    "sourceUrl": "https://raw.githubusercontent.com/GooDAnDReaDY/dsh-voice/e3e96e0bd3a34d73fec0edac45a1fba1cb7b6f6f/lib/provider-http.js",
+    "modified": false
+  },
+  {
+    "repository": "https://github.com/GooDAnDReaDY/dsh-voice",
+    "commit": "e3e96e0bd3a34d73fec0edac45a1fba1cb7b6f6f",
+    "upstreamPath": "LICENSE",
+    "localPath": "vendor/voice/LICENSE",
+    "sha256": "dc6f2fbad994189e1e1466c51173363264826fc454f0cfccdafa91a9a41b6365",
+    "sourceUrl": "https://raw.githubusercontent.com/GooDAnDReaDY/dsh-voice/e3e96e0bd3a34d73fec0edac45a1fba1cb7b6f6f/LICENSE",
+    "modified": false
+  },
+  {
+    "repository": "https://github.com/moluyao/dsh-minimax-asr",
+    "commit": "bbf79d17e32a1dab94bffba20fa6b1fbd8cf700e",
+    "upstreamPath": "lib/index.js",
+    "localPath": "vendor/minimax/lib/index.js",
+    "sha256": "4e4fd8883533b1c2dd43282d3d162d3efe91eef1bb5deae7270a41209ce6d408",
+    "sourceUrl": "https://raw.githubusercontent.com/moluyao/dsh-minimax-asr/bbf79d17e32a1dab94bffba20fa6b1fbd8cf700e/lib/index.js",
+    "modified": false
+  },
+  {
+    "repository": "https://github.com/moluyao/dsh-minimax-asr",
+    "commit": "bbf79d17e32a1dab94bffba20fa6b1fbd8cf700e",
+    "upstreamPath": "LICENSE",
+    "localPath": "vendor/minimax/LICENSE",
+    "sha256": "03d00326944899f5f24ea05f96bb9799a3e9ae4986802d0c6682d22715f955bd",
+    "sourceUrl": "https://raw.githubusercontent.com/moluyao/dsh-minimax-asr/bbf79d17e32a1dab94bffba20fa6b1fbd8cf700e/LICENSE",
+    "modified": false
+  }
+]
