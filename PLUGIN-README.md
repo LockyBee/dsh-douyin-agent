@@ -79,6 +79,8 @@ node --test douyin-browser/verification/dsh-plugin.test.mjs
 
 当前 Inspect 未提供 Loader 条目的直接导出，helper 的 console JSON 也未落入可回读日志；v5 版本以逐字 helper 中的活动状态/URI/完整目录断言及真实调用核对，没有把运行态 URI 字符串标作独立读取结果。
 
+2026-10-15 还单独核查了桌面启动：用户截图中的 `Failed to load plugins` 来自已装 `dsh-web-ui-notify@0.1.6`。该扩展要求核心 `0.1.7-rc.2+`，当前 Desktop 2.0.11 内置核心为 `0.1.5-rc.2`，缺少它直接订阅的 `uiSession.sessionStatus`。本机备份 profile 后，仅从启用的 bundles 移除该通知扩展，保留依赖文件；重新启动后，实际窗口的会话列表和输入框恢复，错误页消失。抖音插件不依赖该通知扩展。工具后端验收与桌面启动验收分别记录，不能仅凭后端 health 判断界面可用。
+
 真人私信发送已做一条本人授权的明确功能测试：`confirmed=true` 且二次读取 `persisted=true`，见 `verification/chat-human-send-live.json`。这证明该次发送与回读，不证明收到新消息后的自动模型回复已由真人触发。
 
 真实表情和分享卡片的精准截取、公开 URL 解析通过；一张精确表情截图已送入真实 DeepSeek 并生成回复，没有向真人发送，见 `verification/chat-rich-api-live.json`。两位联系人真实只读回查确认时间顺序、最新端及消息 ID 稳定，见 `verification/chat-chronology-readonly-live.json`。2026-10-15 又单独完成上述 DSH 原生表情附件验收；图文仍只到封面、元数据和 URL。
