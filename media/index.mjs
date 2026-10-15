@@ -12,6 +12,7 @@ import { connect as tlsConnect } from 'node:tls';
 import { Readable } from 'node:stream';
 import { parseEnv } from 'node:util';
 import { makeProviders } from './vendor/voice/lib/providers.js';
+import { resolveRuntimePaths } from '../runtime-paths.mjs';
 
 // MiMo驱动、dsh-voice provider与MiniMax ASR参数的来源和MIT声明见README.md及vendor。
 
@@ -24,7 +25,7 @@ const privateHost = host => /^(localhost|.*\.localhost|.*\.local)$/i.test(host) 
 const publicAddress = item => item.family === 4 && !privateHost(item.address) && !/^(192\.0\.|192\.0\.2\.|198\.(18|19|51)\.|203\.0\.113\.|22[4-9]\.|2[3-5]\d\.)/.test(item.address);
 const validatedAddresses=new WeakMap();
 
-export async function loadMediaConfig({ envFile = path.join(ROOT, '.env'), env = process.env } = {}) {
+export async function loadMediaConfig({ env = process.env, envFile = resolveRuntimePaths({ env }).mediaEnvFile } = {}) {
   let saved = {};
   try { saved = parseEnv(await fs.readFile(envFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw new Error('媒体配置文件无法解析。'); }
   return Object.fromEntries(ENV_KEYS.map(key => [key, env[key] ?? saved[key] ?? '']));
@@ -100,7 +101,7 @@ async function publicMediaResponse(url,signal){
 async function run(executable, args, { input, signal, timeoutMs = 180_000, maxOutputBytes = 40 * 1024 * 1024 } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const childEnvironment={...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8'};delete childEnvironment.XIAOMI_API_KEY;delete childEnvironment.MINIMAX_API_KEY;
+    const childEnvironment={...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8',PYTHONDONTWRITEBYTECODE:'1'};delete childEnvironment.XIAOMI_API_KEY;delete childEnvironment.MINIMAX_API_KEY;
     const child = spawn(executable, args, { windowsHide: true, shell: false, env: childEnvironment, stdio: ['pipe','pipe','pipe'] });
     const chunks = []; let length = 0, finished = false;
     const finish = (error, value) => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener('abort', cancel); error ? reject(error) : resolve(value); };
@@ -124,7 +125,7 @@ async function cleanTemporary(directory) {
 }
 
 export class MediaAdapter {
-  constructor({ config, envFile, settingsFile = path.join(ROOT,'settings.local.json'), fetchImpl = fetch, python, ffmpeg, ffprobe, limits = {} } = {}) {
+  constructor({ config, envFile, settingsFile = resolveRuntimePaths().mediaSettingsFile, fetchImpl = fetch, python, ffmpeg, ffprobe, limits = {} } = {}) {
     this.configPromise = config ? Promise.resolve(config) : loadMediaConfig({ envFile });
     this.settingsFile=settingsFile;
     this.settingsWrite=Promise.resolve();
@@ -152,14 +153,15 @@ export class MediaAdapter {
   async runtime() {
     const config = await this.configPromise;
     if(config.DOUYIN_MEDIA_WHISPER_MODEL&&!LOCAL_MODELS.has(config.DOUYIN_MEDIA_WHISPER_MODEL))throw new Error('本地Whisper模型须从受支持的模型名称中选择。');
-    const localPython = path.join(ROOT,'.venv','Scripts','python.exe');
+    const paths = resolveRuntimePaths();
+    const localPython = path.join(paths.mediaRuntimeRoot,'.venv','Scripts','python.exe');
     const bundled = path.join(os.homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','python','python.exe');
-    return { config, python: this.pythonOverride || config.DOUYIN_MEDIA_PYTHON || (existsSync(localPython) ? localPython : existsSync(bundled) ? bundled : 'python'), ffmpeg: this.ffmpegOverride || config.DOUYIN_MEDIA_FFMPEG || 'ffmpeg', ffprobe: this.ffprobeOverride || config.DOUYIN_MEDIA_FFPROBE || 'ffprobe' };
+    return { config, modelsDir: paths.mediaModelsDir, python: this.pythonOverride || config.DOUYIN_MEDIA_PYTHON || (existsSync(localPython) ? localPython : existsSync(bundled) ? bundled : 'python'), ffmpeg: this.ffmpegOverride || config.DOUYIN_MEDIA_FFMPEG || 'ffmpeg', ffprobe: this.ffprobeOverride || config.DOUYIN_MEDIA_FFPROBE || 'ffprobe' };
   }
   async status() {
     const settings=await this.settings();
     const runtime = await this.runtime(); let local = { available: false, note: '本地 Whisper 依赖尚未就绪。' };
-    try { local = JSON.parse(await run(runtime.python,[path.join(ROOT,'local_whisper.py'),'--probe','--model',runtime.config.DOUYIN_MEDIA_WHISPER_MODEL||'tiny'],{timeoutMs:10_000,maxOutputBytes:4096})); } catch {}
+    try { local = JSON.parse(await run(runtime.python,[path.join(ROOT,'local_whisper.py'),'--probe','--model',runtime.config.DOUYIN_MEDIA_WHISPER_MODEL||'tiny','--models-dir',runtime.modelsDir],{timeoutMs:10_000,maxOutputBytes:4096})); } catch {}
     return { ...settings,backends: { mimo: { available: Boolean(runtime.config.XIAOMI_API_KEY), note: '云端音视频理解，需要独立 MiMo 凭据。' }, minimax: { available: Boolean(runtime.config.MINIMAX_API_KEY), note: '云端语音转写，需要独立 MiniMax 凭据。' }, 'local-whisper': { ...local, model: runtime.config.DOUYIN_MEDIA_WHISPER_MODEL || 'tiny', note: '依赖检查不等于模型已下载或转写已通过；真实验收另记录。' } }, limits: this.limits };
   }
   analyzeAudio(args, options = {}) { return this.execute('audio', args, options); }
@@ -237,7 +239,7 @@ export class MediaAdapter {
         output = await makeProviders({resolveKey:async()=>'',fetchImpl:this.fetch,cfg:{whisperUrl:endpoint.href}}, {bytes,mime:'audio/wav',lang:args.language||'auto',signal:combined})['local-whisper']();
         if (!output.ok) throw new Error('本地 Whisper 服务未返回有效转写。');
       } else if (backend==='local-whisper') {
-        output = JSON.parse(await run(runtime.python,[path.join(ROOT,'local_whisper.py')],{input:{path:prepared.path,language:args.language||'auto',model:config.DOUYIN_MEDIA_WHISPER_MODEL||'tiny'},signal:combined,timeoutMs:this.limits.processTimeoutMs,maxOutputBytes:200_000}));
+        output = JSON.parse(await run(runtime.python,[path.join(ROOT,'local_whisper.py')],{input:{path:prepared.path,language:args.language||'auto',model:config.DOUYIN_MEDIA_WHISPER_MODEL||'tiny',modelsDir:runtime.modelsDir},signal:combined,timeoutMs:this.limits.processTimeoutMs,maxOutputBytes:200_000}));
         if (!output.text?.trim()) throw new Error('Whisper 未识别到可用对白；没有把静音当成内容。');
       } else if (backend==='mimo') {
         const requestKind = kind==='video'?'video':kind==='transcription'?'asr':'audio';

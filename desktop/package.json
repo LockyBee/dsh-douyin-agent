@@ -1,0 +1,19 @@
+{
+  "name": "dafeiyu-douyin-desktop",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "description": "独立 API 抖音助手，与 DSH 插件共用本地记忆",
+  "main": "app/main.mjs",
+  "scripts": {
+    "build": "node scripts/build-api-desktop.mjs",
+    "start": "electron .",
+    "package:dir": "electron-builder --win --x64 --dir --config electron-builder.json",
+    "package:portable": "electron-builder --win portable --x64 --config electron-builder.json"
+  },
+  "devDependencies": {
+    "electron": "44.0.0",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.1"
+  }
+}

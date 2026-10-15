@@ -1,9 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
 
-const STATE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'state');
 const DAY = 86_400_000;
 const SOURCES = ['api', 'dsh'];
 const READ_ACTIONS = new Set(['douyin_status', 'douyin_pause', 'douyin_recall', 'douyin_remember', 'douyin_video_limits_status']);
@@ -45,7 +44,7 @@ export function allowedWindow(policy, now) {
 
 // 复用 Node.js 时间、文件与定时器，以及本项目的本机持久状态方式，无新增依赖。
 export class VideoLimits {
-  constructor({ stateDir = STATE, now = Date.now } = {}) {
+  constructor({ stateDir = resolveRuntimePaths().stateDir, now = Date.now } = {}) {
     Object.assign(this, { stateDir, now }); fs.mkdirSync(stateDir, { recursive: true });
     this.policyFile = path.join(stateDir, 'video-policy.json'); this.sessionsFile = path.join(stateDir, 'video-sessions.json'); this.guardFile = path.join(stateDir, 'video-control.guard');
     initialize(this.policyFile, DEFAULT_VIDEO_POLICY); initialize(this.sessionsFile, { version: 1, current: null });

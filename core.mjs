@@ -1,5 +1,4 @@
 import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -9,11 +8,10 @@ import { chromium } from './playwright-runtime.mjs';
 import { MemoryStore } from './memory.mjs?v=2';
 import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=5';
 import { VideoLimits } from './video-limits.mjs';
+import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const BASE = path.join(homedir(), '.dsh', 'douyin-browser');
-const PROFILE = path.join(BASE, 'cli-profile');
-const CONTROL = path.join(BASE, 'control');
+const { browserProfileDir: PROFILE, browserControlDir: CONTROL } = resolveRuntimePaths();
 const RECOMMEND = 'https://www.douyin.com/?recommend=1&from_nav=1';
 const PORT = 9227;
 
@@ -77,7 +75,7 @@ async function endpoint(signal) {
     if (!owned) {
       const output = openSync(path.join(CONTROL, 'browser-host.log'), 'a');
       try {
-        const child = spawn(process.execPath, [path.join(ROOT, 'browser-host.mjs'), PROFILE, CONTROL, String(PORT)], {
+        const child = spawn(resolveNodeExecutable(), [path.join(ROOT, 'browser-host.mjs'), PROFILE, CONTROL, String(PORT)], {
           detached: true, windowsHide: true, stdio: ['ignore', output, output],
         });
         child.unref();
@@ -213,7 +211,7 @@ export class BrowserController {
       return {paused,existingPage};
     } finally { if(temporary) await connection?.close().catch(()=>{}); }
   }
-  store() { return this.memory ??= new MemoryStore(process.env.DEEPSEEK_SHARED_MEMORY_DB || 'D:/codex分局/大肥鱼/memory/shared.sqlite'); }
+  store() { return this.memory ??= new MemoryStore(resolveRuntimePaths().memoryDbPath); }
   getChatService() {
     this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=5'),import('./chat-service.mjs?v=5')])
       .then(([{ChatBrowser},{ChatService}])=>new ChatService({browser:new ChatBrowser({source:this.source==='dsh'?'dsh-chat':'api-chat'})}))
@@ -445,7 +443,7 @@ export class BrowserController {
     const media=await this.getMediaAdapter(),settings=await media.settings();
     if(!settings.enabled) return {ok:true,audioAvailable:false,note:'音频能力默认关闭，请由用户在本机控制台选择开启。'};
     const captured=await this.captureAudio(seconds,signal);
-    const directory=path.join(ROOT,'state','media-captures');mkdirSync(directory,{recursive:true});
+    const directory=resolveRuntimePaths().mediaCaptureDir;mkdirSync(directory,{recursive:true});
     const target=path.join(directory,`${randomUUID()}.webm`);writeFileSync(target,Buffer.from(captured.data,'base64'));
     try {
       const result=await media.transcribeAudio({source:target,backend:settings.backend,durationSeconds:seconds},{signal});

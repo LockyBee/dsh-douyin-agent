@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { BrowserController, readPageState } from './core.mjs?v=5';
 import { ChatBrowser } from './chat-browser.mjs?v=5';
 import { VideoLimits } from './video-limits.mjs';
 
-const STATE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'state');
 const stop = signal => signal?.throwIfAborted();
 const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 }); fs.renameSync(temporary, file); };
 
@@ -58,7 +57,7 @@ function assertVideo(state, videoId) {
 }
 
 export class VideoForwarder {
-  constructor({ source = 'api', controller, chatBrowser, videoLimits, stateDir = STATE } = {}) {
+  constructor({ source = 'api', controller, chatBrowser, videoLimits, stateDir = resolveRuntimePaths().stateDir } = {}) {
     if (!['api', 'dsh'].includes(source)) throw new TypeError('视频转发入口只能是 api 或 dsh。');
     this.source = controller?.source === 'dsh' ? 'dsh' : source;
     this.videoLimits = videoLimits ?? controller?.videoLimits ?? new VideoLimits({ stateDir });

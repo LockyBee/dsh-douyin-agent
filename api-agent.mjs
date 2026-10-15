@@ -7,6 +7,20 @@ export const DEFAULT_QQ_ROOT = 'D:/codex分局/聊天机器人';
 export const DEFAULT_MODEL = 'deepseek-flash';
 export const DEFAULT_LIMITS = Object.freeze({ maxSteps: 20, maxToolCalls: 20, apiTimeoutMs: 60_000, taskTimeoutMs: 180_000, maxTokens: 2_048, maxFrames: 4, maxFrameBytes: 2_000_000 });
 
+export function normalizeApiConfig(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['apiKey', 'baseUrl', 'model', 'keySource'].includes(key))) throw new Error('API 设置只接受密钥、接口地址和模型。');
+  for (const key of ['apiKey', 'baseUrl', 'model']) if (value[key] !== undefined && typeof value[key] !== 'string') throw new Error('API 设置必须使用文本。');
+  const apiKey = value.apiKey?.trim() || '';
+  if (apiKey.length > 4096 || /\s|\0/.test(apiKey)) throw new Error('API Key 不能包含空白字符，且最多 4096 个字符。');
+  const baseUrl = value.baseUrl?.trim() || 'https://api.deepseek.com';
+  let url;
+  try { url = new URL(baseUrl); } catch { throw new Error('DeepSeek 接口地址不是有效 URL。'); }
+  if (baseUrl.length > 2048 || url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)))) throw new Error('DeepSeek 接口地址必须使用 HTTPS，或本机 HTTP 地址。地址中不能带凭据或查询参数。');
+  const model = value.model?.trim() || DEFAULT_MODEL;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)) throw new Error('模型名称格式无效，最多 128 个字符。');
+  return { apiKey, baseUrl: url.href.replace(/\/+$/, ''), model, keySource: apiKey ? '本机 API 设置' : '未配置' };
+}
+
 export function loadApiConfig({ env = process.env, qqRoot = env.DOUYIN_QQ_ROOT || DEFAULT_QQ_ROOT } = {}) {
   let stored = {};
   const envFile = path.join(qqRoot, '.env');
@@ -107,7 +121,7 @@ export class ApiAgent {
 
   async runTask({ instruction, signal, onEvent = () => {} } = {}) {
     if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 4_000) throw new Error('任务请输入 1 至 4000 个字符。');
-    if (!this.config.apiKey) throw new Error('没有找到 DEEPSEEK_API_KEY。请先配置 QQ 机器人项目的 .env 或当前进程环境变量。');
+    if (!this.config.apiKey) throw new Error('未配置 DeepSeek API Key，请打开本机 API 设置。');
     const budget = new AbortController();
     const timer = setTimeout(() => budget.abort(new Error(`任务达到 ${this.taskTimeoutMs / 1_000} 秒时间限制。`)), this.taskTimeoutMs);
     const taskSignal = signal ? AbortSignal.any([signal, budget.signal]) : budget.signal;

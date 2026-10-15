@@ -1,6 +1,11 @@
 import { createRequire } from 'node:module';
 
-// CLI/MCP 已锁定同一套官方 Playwright，控制器直接复用它的浏览器库。
+// 独立软件直接使用 playwright-core；原插件的 CLI/MCP 安装保留兼容入口。
 const require = createRequire(import.meta.url);
-const runtime = createRequire(require.resolve('@playwright/mcp/package.json'));
-export const { chromium } = runtime('playwright-core');
+let playwright;
+try { playwright = require('playwright-core'); }
+catch (error) {
+  if (error.code !== 'MODULE_NOT_FOUND') throw error;
+  playwright = createRequire(require.resolve('@playwright/mcp/package.json'))('playwright-core');
+}
+export const { chromium } = playwright;

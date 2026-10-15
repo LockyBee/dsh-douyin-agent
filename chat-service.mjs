@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
 import { ChatAgent } from './chat-agent.mjs';
 import { loadApiConfig, redact } from './api-agent.mjs';
 import { messageFingerprint } from './chat-message.mjs';
 
-const STATE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'state');
 const basePolicy = () => ({ version: 1, enabled: false, allowlist: [], dailyReplyLimit: 40 });
 const dayKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 const load = (file, fallback) => fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : fallback;
@@ -35,7 +34,7 @@ function messagesOf(snapshot) {
 
 // 沿用视频工具的本机配置与直接 API 请求；私信状态及正文只写本机 state。
 export class ChatService {
-  constructor({ browser, config = loadApiConfig(), agent = new ChatAgent({ config }), stateDir = STATE, pollIntervalMs = 15_000 } = {}) {
+  constructor({ browser, config = loadApiConfig(), agent = new ChatAgent({ config }), stateDir = resolveRuntimePaths().stateDir, pollIntervalMs = 15_000 } = {}) {
     if (!browser?.listContacts || !browser?.readConversation || !browser?.sendMessage) throw new Error('缺少私信浏览器控制器。');
     Object.assign(this, { browser, config, agent, stateDir, pollIntervalMs });
     this.policyFile = path.join(stateDir, 'chat-policy.json');

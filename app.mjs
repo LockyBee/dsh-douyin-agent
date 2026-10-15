@@ -3,8 +3,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes, timingSafeEqual, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { ApiAgent, DEFAULT_LIMITS, loadApiConfig, publicApiConfig, redact } from './api-agent.mjs';
+import { ApiAgent, DEFAULT_LIMITS, loadApiConfig, normalizeApiConfig, publicApiConfig, redact } from './api-agent.mjs';
 import { VideoLimits } from './video-limits.mjs';
+import { resolveRuntimePaths } from './runtime-paths.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,7 +45,23 @@ function tokenMatches(actual, expected) {
   return timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 
-export function createApiServer({ controller, config, agent = new ApiAgent({ controller, config }), chatService, videoLimits, pauseVideoSources, mediaAdapter, port = 3218, htmlFile = path.join(ROOT, 'public/index.html') } = {}) {
+const STATIC_TYPES = { '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff': 'font/woff', '.woff2': 'font/woff2' };
+async function staticAsset(root, pathname) {
+  let decoded;
+  try { decoded = decodeURIComponent(pathname); } catch { return null; }
+  if (/[\0\r\n]/.test(decoded)) return null;
+  const file = path.resolve(root, '.' + decoded);
+  const within = (base, target) => { const relative = path.relative(base, target); return relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative); };
+  if (!within(path.resolve(root), file) || !STATIC_TYPES[path.extname(file).toLowerCase()]) return null;
+  try {
+    const [actualRoot, actualFile] = await Promise.all([fs.realpath(root), fs.realpath(file)]);
+    if (!within(actualRoot, actualFile) || !(await fs.stat(actualFile)).isFile()) return null;
+    return { data: await fs.readFile(actualFile), contentType: STATIC_TYPES[path.extname(file).toLowerCase()] };
+  } catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return null; throw error; }
+}
+
+export function createApiServer({ controller, config, agent = new ApiAgent({ controller, config }), chatService, videoLimits, pauseVideoSources, mediaAdapter, port = 3218, htmlFile = path.join(ROOT, 'public/index.html'), staticRoot } = {}) {
+  if (staticRoot !== undefined && (typeof staticRoot !== 'string' || !path.isAbsolute(staticRoot))) throw new Error('静态资源目录必须是绝对路径。');
   const token = randomBytes(32).toString('hex');
   const events = [];
   let revision = 0;
@@ -52,6 +69,10 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
   let lastTask = null;
   let lastBrowserState = null;
   let forwardAbort = null;
+  let stopping = false;
+  let stopPromise;
+  let cleanupPromise;
+  const shutdownHooks = [];
   const append = (event) => {
     const safe = redact(event, [config.apiKey]);
     events.push({ ...safe, revision: ++revision });
@@ -74,8 +95,16 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
       if ((request.headers.origin && request.headers.origin !== origin) || ['cross-site', 'same-site'].includes(request.headers['sec-fetch-site'])) return reply(response, 403, { error: '拒绝跨来源请求。' });
       const url = new URL(request.url, origin);
       if (url.origin !== origin) return reply(response, 403, { error: '请求地址与本机服务不一致。' });
+      if (stopping) return reply(response, 503, { error: '本机服务正在退出。' });
       if (request.method === 'GET' && url.pathname === '/') return reply(response, 200, await fs.readFile(htmlFile), 'text/html; charset=utf-8');
-      if (request.method === 'GET' && url.pathname === '/api/bootstrap') return reply(response, 200, { service: 'douyin-api-local', version: 1, token, videoTime: { enabled: Boolean(videoLimits) }, media: { available: Boolean(mediaAdapter) }, forward: { available: Boolean(chatService && videoLimits) }, config: redact(publicApiConfig(config), [config.apiKey]), limits: { maxSteps: agent.maxSteps ?? DEFAULT_LIMITS.maxSteps, maxToolCalls: agent.maxToolCalls ?? DEFAULT_LIMITS.maxToolCalls, taskTimeoutSeconds: (agent.taskTimeoutMs ?? DEFAULT_LIMITS.taskTimeoutMs) / 1_000, apiTimeoutSeconds: (agent.apiTimeoutMs ?? DEFAULT_LIMITS.apiTimeoutMs) / 1_000, maxTokens: agent.maxTokens ?? DEFAULT_LIMITS.maxTokens, maxFrames: agent.maxFrames ?? DEFAULT_LIMITS.maxFrames }, memory: { description: '与 QQ 机器人共享的记忆 / 视频笔记。具体连通状态以检索结果为准。' } });
+      if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
+        const memory = resolveRuntimePaths();
+        return reply(response, 200, { service: 'douyin-api-local', version: 1, token, videoTime: { enabled: Boolean(videoLimits) }, media: { available: Boolean(mediaAdapter) }, forward: { available: Boolean(chatService && videoLimits) }, config: redact(publicApiConfig(config), [config.apiKey]), limits: { maxSteps: agent.maxSteps ?? DEFAULT_LIMITS.maxSteps, maxToolCalls: agent.maxToolCalls ?? DEFAULT_LIMITS.maxToolCalls, taskTimeoutSeconds: (agent.taskTimeoutMs ?? DEFAULT_LIMITS.taskTimeoutMs) / 1_000, apiTimeoutSeconds: (agent.apiTimeoutMs ?? DEFAULT_LIMITS.apiTimeoutMs) / 1_000, maxTokens: agent.maxTokens ?? DEFAULT_LIMITS.maxTokens, maxFrames: agent.maxFrames ?? DEFAULT_LIMITS.maxFrames }, memory: { description: '与 QQ 机器人共享的记忆 / 视频笔记。具体连通状态以检索结果为准。', folder: memory.memoryDir, database: memory.memoryDbPath } });
+      }
+      if (request.method === 'GET' && !url.pathname.startsWith('/api/') && staticRoot) {
+        const asset = await staticAsset(staticRoot, url.pathname);
+        if (asset) return reply(response, 200, asset.data, asset.contentType);
+      }
       if (!url.pathname.startsWith('/api/')) return reply(response, 404, { error: '地址不存在。' });
       if (!tokenMatches(request.headers['x-session-token'], token)) return reply(response, 403, { error: '控制台会话校验失败，请刷新页面。' });
       if (url.pathname.startsWith('/api/media/')) {
@@ -171,7 +200,7 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
       if (request.method === 'POST' && url.pathname === '/api/task') {
         if (active || forwardAbort) return reply(response, 409, { error: '已有任务或转发正在执行，请等待或停止。' });
         if (videoLimits) { const permit = videoLimits.beforeAction('api', 'douyin_open'); if (!permit.allowed) { await enforceVideo(); return reply(response, 409, { error: permit.reason, videoTime: permit.state }); } }
-        if (!config.apiKey) return reply(response, 400, { error: '没有找到 DeepSeek API Key，请配置 QQ 机器人项目的 .env 或当前进程环境变量。' });
+        if (!config.apiKey) return reply(response, 400, { error: '未配置 DeepSeek API Key，请打开本机 API 设置。' });
         const { instruction } = await readJson(request);
         if (typeof instruction !== 'string' || !instruction.trim() || instruction.length > 4_000) return reply(response, 400, { error: '任务请输入 1 至 4000 个字符。' });
         if (active || forwardAbort) return reply(response, 409, { error: '已有任务或转发正在执行，请等待或停止。' });
@@ -179,8 +208,8 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
         active = task;
         append({ type: 'task.started', message: task.instruction, at: task.startedAt });
         reply(response, 202, { id: task.id, status: 'running' });
-        Promise.resolve().then(() => agent.runTask({ instruction: task.instruction, signal: task.abort.signal, onEvent: append })).then((result) => {
-          lastTask = { id: task.id, instruction: task.instruction, startedAt: task.startedAt, endedAt: new Date().toISOString(), ...redact(result, [config.apiKey]) };
+        task.completion = Promise.resolve().then(() => agent.runTask({ instruction: task.instruction, signal: task.abort.signal, onEvent: append })).then((result) => {
+          lastTask = redact({ id: task.id, instruction: task.instruction, startedAt: task.startedAt, endedAt: new Date().toISOString(), ...result }, [config.apiKey]);
           append({ type: `task.${result.status}`, message: result.status === 'completed' ? 'DeepSeek 已答复，见上方结果。' : result.message, at: lastTask.endedAt });
         }).catch((error) => {
           lastTask = { id: task.id, status: 'failed', message: redact(error.message || String(error), [config.apiKey]) };
@@ -199,19 +228,64 @@ export function createApiServer({ controller, config, agent = new ApiAgent({ con
   server.requestTimeout = 15_000;
   server.headersTimeout = 10_000;
   server.keepAliveTimeout = 5_000;
+  server.apiConfig = () => publicApiConfig(config);
+  server.configureApi = value => {
+    if (stopping) throw new Error('本机服务正在退出，不能修改 API 设置。');
+    if (active || forwardAbort || chatService?.running || chatService?.starting || chatService?.busy || chatService?.worker?.()?.alive) throw new Error('请先停止视频任务、转发和私信自动回复，再修改 API 设置。');
+    const updated = normalizeApiConfig(value);
+    Object.assign(config, updated);
+    agent.config = config;
+    if (chatService) { chatService.config = config; if (chatService.agent) chatService.agent.config = config; }
+    return publicApiConfig(config);
+  };
   server.stopTask = () => { const error = new Error('控制台已关闭。'); active?.abort.abort(error); forwardAbort?.abort(error); };
   server.enforceVideoLimits = enforceVideo;
-  server.on('close', () => {
+  const cleanup = () => cleanupPromise ??= (async () => {
+    stopping = true;
+    cancelVideoWatch?.();
+    const pending = active?.completion;
+    server.stopTask();
+    // 暂停现有视频，再等待领域操作、浏览器连接与 worker 一起退出。
+    await Promise.allSettled(['api', 'dsh'].map(source => pauseSource(source)));
+    const results = await Promise.allSettled([
+      ...(pending ? [pending] : []),
+      ...(chatService ? [Promise.resolve().then(() => chatService.close())] : []),
+      ...(typeof controller.close === 'function' ? [Promise.resolve().then(() => controller.close())] : []),
+      ...shutdownHooks.map(hook => Promise.resolve().then(hook)),
+    ]);
+    const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) throw new AggregateError(errors, '本机服务退出时未能释放全部资源。');
+  })();
+  server.addShutdownHook = (hook) => {
+    if (stopping || typeof hook !== 'function') throw new Error('退出清理回调必须在服务停止前注册。');
+    shutdownHooks.push(hook);
+  };
+  server.stop = () => stopPromise ??= (async () => {
+    stopping = true;
     cancelVideoWatch?.();
     server.stopTask();
-    if (chatService) void chatService.close().catch((error) => console.error(`私信服务关闭失败：${redact(error.message, [config.apiKey])}`));
-    if (typeof controller.close === 'function') Promise.resolve(controller.close()).catch((error) => console.error(`浏览器连接关闭失败：${redact(error.message || String(error), [config.apiKey])}`));
+    const cleaned = cleanup();
+    // close 事件也会监听同一清理 Promise；提前挂拒绝处理，随后统一回传。
+    void cleaned.catch(() => {});
+    await new Promise((resolve, reject) => {
+      server.close(error => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve());
+      server.closeIdleConnections();
+    });
+    await cleaned;
+  })();
+  server.on('close', () => {
+    if (!stopPromise) void cleanup().catch((error) => console.error(`本机服务退出失败：${redact(error.message || String(error), [config.apiKey])}`));
   });
   return server;
 }
 
-export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT || 3218), config = loadApiConfig(), controller, chatService, videoLimits = new VideoLimits(), mediaAdapter } = {}) {
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('端口必须是 1024 至 65535 的整数。');
+export function stopApiServer(server) {
+  if (typeof server?.stop !== 'function') throw new TypeError('只能停止本工具创建的服务。');
+  return server.stop();
+}
+
+export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT || 3218), config = loadApiConfig(), controller, chatService, videoLimits = new VideoLimits(), mediaAdapter, htmlFile, staticRoot } = {}) {
+  if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535) throw new Error('端口须为 0，或 1024 至 65535 的整数。');
   if (!controller) {
     const { BrowserController } = await import('./core.mjs');
     controller = new BrowserController({ source: 'api' });
@@ -224,12 +298,22 @@ export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT
   if (!mediaAdapter) { const { MediaAdapter } = await import('./media/index.mjs'); mediaAdapter = new MediaAdapter(); }
   const dshVideoController = new BrowserController({ source: 'dsh' });
   const pauseVideoSources = async (source) => { const target = source === 'api' ? controller : dshVideoController; if (typeof target.pauseForLimits !== 'function') throw new Error('浏览器底座尚未提供 pauseForLimits，到点暂停未验收。'); return target.pauseForLimits(); };
-  const server = createApiServer({ controller, config, chatService, videoLimits, pauseVideoSources, mediaAdapter, port });
-  server.on('close', () => void dshVideoController.close());
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
-  console.log(`大肥鱼 · 视频助手：http://127.0.0.1:${port}`);
+  const server = createApiServer({ controller, config, chatService, videoLimits, pauseVideoSources, mediaAdapter, port, htmlFile, staticRoot });
+  server.addShutdownHook(() => dshVideoController.close());
+  try {
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  } catch (error) {
+    await server.stop().catch(() => {});
+    throw error;
+  }
+  console.log(`大肥鱼 · 视频助手：http://127.0.0.1:${server.address().port}`);
   console.log(`模型：${config.model}；凭据：${config.apiKey ? '已在内存读取' : '未配置'}`);
-  for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { server.stopTask(); server.close(); server.closeIdleConnections(); });
+  const signalHandlers = ['SIGINT', 'SIGTERM'].map(signal => {
+    const handler = () => { void server.stop().catch(error => { console.error(`退出失败：${redact(error.message, [config.apiKey])}`); process.exitCode = 1; }); };
+    process.once(signal, handler);
+    return [signal, handler];
+  });
+  server.addShutdownHook(() => { for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler); });
   return server;
 }
 

@@ -3,7 +3,7 @@
 ## 浏览器、运行时及接口
 
 - Microsoft Playwright CLI 0.1.22、Playwright MCP 0.0.83 及锁定的 playwright-core：Apache-2.0，来源为 [Microsoft Playwright](https://github.com/microsoft/playwright)。依赖由包管理器安装，原 LICENSE 和版权声明保留在包内；分发时须保留 Apache-2.0 要求的声明和通知。
-- DSH 原生 runtime、schema、Cordis Loader 与附件接口：调用本机已安装产品的公开接口，相关包的 MIT LICENSE 留在依赖内。本仓库没有复制 DSH 产品文件或账号配置。
+- DSH 原生插件使用本机已安装产品的 runtime、schema、Cordis Loader 与附件接口，相关包的 MIT LICENSE 留在依赖内。独立软件的 UI 源码复用范围另见下文；账号配置和个人历史不随源码或软件提供。
 - DeepSeek API：按官方 Chat Completions 协议调用，使用用户已有账户配置；接口服务使用与费用另受供应商条款约束。
 - 相关抖音方案研究：`chu557/douyin-plugin-dsh-plugin`（MIT）、`AnacondaKC/dsh-douyin`（BSD-3-Clause）、`q35888/dsh-plugin-browser`（MIT）。本项目没有复制这三个抖音插件的业务实现。
 
@@ -24,3 +24,13 @@
 媒体与插件的适配验收分开记录：本地 Whisper 已真实处理合成 WAV、WebM；精确表情截图进入 DeepSeek 的真实请求不使用上述云音频后端，也没有向真人发送。2026-10-15 又独立完成真实 DSH 的 22 项工具目录核对、状态/许可会话读取、表情图片附件和人工转发提示分支；云端音频仍未联调。具体结果及元数据读取限制见主 README 和 PLUGIN-README；上游许可证不改变这些验收边界。
 
 本仓库目前是私有源码备份，尚未为本项目自身指定开源许可证。第三方许可和上游测试不替本项目作交付保证。
+
+## 独立 API 桌面软件
+
+界面复用 `deepseek-ai/deepseek-harness` 固定提交 `fb2c4b9e698e30edb738bca4cf0618587db7d203` 中的 `ui-primitives` React 基础组件、`ui-theme` 样式及 `ui-layout` 的 `AppFrame.module.css`。官方 MIT 全文保存在 [desktop/licenses/DeepSeek-Harness-MIT.txt](desktop/licenses/DeepSeek-Harness-MIT.txt)，固定下载与来源校验见 [desktop/UPSTREAM.json](desktop/UPSTREAM.json) 和 [desktop/UPSTREAM.md](desktop/UPSTREAM.md)。同目录留存的完整上游第三方通知用于来源核查，不表示本软件使用了上游全部依赖。
+
+独立软件的模型请求、业务表单、桌面生命周期及 IPC 由本项目实现，运行资源不包含 DSH Host、Cordis、DSH SDK 或社区桌面壳。它不代表 DeepSeek 官方发行，也不复制用户 DSH 的外观图片、桌宠、音效、凭据、会话或历史。
+
+桌面构建使用 Electron `44.0.0`、electron-builder `26.15.3`、esbuild `0.28.1`；后台使用 Node.js `24.17.0`、`playwright-core` `1.64.0-alpha-1790635538000` 和 `yaml` `2.9.0`。Node 完整许可、Playwright 的 Apache-2.0/NOTICE/ThirdPartyNotices 和 YAML 的 ISC 许可随后台实际运行包保留。React、KaTeX 字体、Markdown、Shiki 及其他前端组件以 `desktop/ui-api` 的锁文件和实际构建产物为准，各自版权与许可证随界面产物保存；Electron/Chromium 的通知由桌面分发层保留。
+
+上述依赖的许可不代替模型接口服务的条款，也不构成软件联调保证。可选音频仍使用前述三个社区项目的来源与 MIT；Python、FFmpeg、音频模型及个人密钥不随基础软件提供。构建与验收范围见 [desktop/README.md](desktop/README.md)。

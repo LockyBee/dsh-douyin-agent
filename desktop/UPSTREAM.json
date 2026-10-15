@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/deepseek-ai/deepseek-harness",
+  "tag": "dsh-v0.1.5-rc.2",
+  "commit": "fb2c4b9e698e30edb738bca4cf0618587db7d203",
+  "version": "0.1.5-rc.2",
+  "archive": {
+    "url": "https://codeload.github.com/deepseek-ai/deepseek-harness/tar.gz/fb2c4b9e698e30edb738bca4cf0618587db7d203",
+    "sha256": "60038295d9ea8849dc50a9d77dfcbed6c14397f0d54fadb035f768841415a3bd",
+    "bytes": 19474104,
+    "entries": 11756,
+    "rootDirectory": "deepseek-harness-fb2c4b9e698e30edb738bca4cf0618587db7d203"
+  },
+  "license": {
+    "spdx": "MIT",
+    "copyright": "Copyright (c) 2026 DeepSeek",
+    "upstreamPath": "LICENSE",
+    "localPath": "licenses/DeepSeek-Harness-MIT.txt",
+    "scope": "Official DeepSeek-authored source; third-party components retain their own licenses."
+  },
+  "sourceTree": {
+    "algorithm": "sha256(sorted JSON [relativePosixPath, bytes, fileSha256] rows + LF)",
+    "files": 10205,
+    "sha256": "9a48370a344b55f348693efe1b317d05c40ab2ceb38aa334ca51424898539843"
+  },
+  "materializedSymlinks": [
+    {
+      "path": ".agents/notes/implemented/CLAUDE.md",
+      "target": "AGENTS.md"
+    },
+    {
+      "path": ".claude/skills",
+      "target": "../.agents/skills"
+    },
+    {
+      "path": "CLAUDE.md",
+      "target": "AGENTS.md"
+    },
+    {
+      "path": "apps/cli/tests/profiles/acp/cordis.yml",
+      "target": "../../../../../snapshots/acp/escalation-approved/cordis.yml"
+    },
+    {
+      "path": "packages/CLAUDE.md",
+      "target": "AGENTS.md"
+    },
+    {
+      "path": "snapshots/acp/escalation-approved/system-prompt.expected.md",
+      "target": "../../session/text-turn/system-prompt.expected.md"
+    },
+    {
+      "path": "snapshots/acp/escalation-approved/tool-schemas.expected.json",
+      "target": "../../session/text-turn/tool-schemas.expected.json"
+    },
+    {
+      "path": "snapshots/acp/image-compaction/system-prompt.expected.md",
+      "target": "../../session/read-image/system-prompt.expected.md"
+    },
+    {
+      "path": "snapshots/session/agent-instructions/workspace/AGENTS.md",
+      "target": "AGENTS.canonical.md"
+    },
+    {
+      "path": "snapshots/session/agent-instructions/workspace/nested/AGENTS.md",
+      "target": "AGENTS.canonical.md"
+    },
+    {
+      "path": "vendor/CLAUDE.md",
+      "target": "AGENTS.md"
+    }
+  ],
+  "files": {
+    "LICENSE": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+    "package.json": "cc9dbff36d169b085d78b88b4663cbbc64529cdfaa14219796dd8ab741adbf33",
+    "pnpm-lock.yaml": "a6515566578a26c29b5faddaf94abb5ec452ce6e533f8957e813328ebd4b3c27",
+    "apps/desktop/package.json": "d4e66fd9d68666ed95fce3ba491aefde3f2664b53734ef8fa36824537ef7b433",
+    "apps/desktop/src/main.ts": "a0626b1b3ea34a3384b6951ca688b78f9edbc992b7981ab2466d9d70ae8adb8d",
+    "apps/desktop/src/host-process.ts": "9bc9bce5de490b100db053066f248983d5faa2027a89b209c8f4a1704b263acf",
+    "apps/desktop/src/host-protocol.ts": "ef608222e30a4976d3d93e9f0e7fcc004161b346fa8b0cd005a370dc44824065",
+    "apps/desktop/scripts/dev.ts": "38ed6aa768de1f92c24b22113c42b5a0adb826bc9c7df8b18ff7caa3e6659b50",
+    "apps/desktop/scripts/prepare-runtime.ts": "ef153c754b630772023b0745d0b04c97f12b995d1654bedd76eb9c890f530fb3",
+    "apps/desktop/electron-builder.config.mjs": "dafc9f332e269551166bbc2005e11b892502c222e4068f4049ff60950a414f10",
+    "apps/desktop-host/package.json": "af242e7e539f0850e8e254b39dbbbfbbce331cfe09a8bcf155508f4a1607eeee",
+    "apps/desktop-host/src/index.ts": "7e7583f07800f6c257809d1dfb328d3942e84e6df97a78dd8af877b5e3bc27f3",
+    "apps/desktop-host/src/wire.ts": "887589acaa7df830fd559e2b9abbc69b667ccfb68df2670731db83a59b33a4df",
+    "apps/desktop-host/config/desktop.cordis.patch.yml": "28b57c998d65fa7f028a2db097e0f19ac79c8f5525ccfa7cc6ad8b886442f852",
+    "apps/web/package.json": "77215965d5f37a121630be4d10221740d7b54793a37fdd6b5b906f09b6a712ae",
+    "apps/web/vite.config.ts": "0ee886e510d7676d810f05beb2f3a0b592ffc0e19173d41e2cd67d8514fc5814",
+    "packages/client/modules/package.json": "e623afe174da7aabe7ec58c4ae1cf2182e67cbaa7ca8232c73507b0db0461186"
+  },
+  "components": {
+    "desktop": "apps/desktop",
+    "desktopHost": "apps/desktop-host",
+    "webFrontend": "apps/web",
+    "clientUi": "packages/client",
+    "clientModules": "packages/client/modules"
+  },
+  "dependencyPins": {
+    "officialDshPackages": "0.1.5-rc.2",
+    "upstreamNodeRuntime": "24.17.0",
+    "packageManager": "pnpm@11.7.0",
+    "electron": "44.0.0",
+    "electronBuilder": "26.15.3",
+    "electronUpdater": "6.8.9",
+    "react": "18.3.1",
+    "vite": "6.4.3",
+    "authority": "pnpm-lock.yaml"
+  },
+  "acquisition": {
+    "runsUpstreamCode": false,
+    "cachePath": ".cache/upstream/fb2c4b9e698e30edb738bca4cf0618587db7d203",
+    "symlinkPolicy": "Materialize only the listed repository-internal links as copies on every platform.",
+    "network": "Public official GitHub source archive only; curl may use the calling process proxy settings."
+  },
+  "retainedNotices": [
+    {
+      "upstreamPath": "THIRD_PARTY_NOTICES.md",
+      "localPath": "licenses/DeepSeek-Harness-THIRD_PARTY_NOTICES.md",
+      "sha256": "33cef3c1707e1443c8919116b70b5b116519c7117d00b8d05475b31458ac9991"
+    },
+    {
+      "upstreamPath": "vendor/README.md",
+      "localPath": "licenses/DeepSeek-Harness-VENDOR.md",
+      "sha256": "22f54b831450f4712c2eadd4c6de302ab81b2f926e7e6055a06d6e28003b4f39"
+    },
+    {
+      "upstreamPath": "vendor/cordis/LICENSE",
+      "localPath": "licenses/vendor/cordis-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/cosmokit/LICENSE",
+      "localPath": "licenses/vendor/cosmokit-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/group/LICENSE",
+      "localPath": "licenses/vendor/group-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/hmr/LICENSE",
+      "localPath": "licenses/vendor/hmr-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/include/LICENSE",
+      "localPath": "licenses/vendor/include-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/loader/LICENSE",
+      "localPath": "licenses/vendor/loader-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/logger-console/LICENSE",
+      "localPath": "licenses/vendor/logger-console-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/schemastery/LICENSE",
+      "localPath": "licenses/vendor/schemastery-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    },
+    {
+      "upstreamPath": "vendor/timer/LICENSE",
+      "localPath": "licenses/vendor/timer-LICENSE.txt",
+      "sha256": "034fb52b1d57360ecbae6cb1632a88f86fd7c3d3f5631a5f082710203dda0be7"
+    }
+  ]
+}

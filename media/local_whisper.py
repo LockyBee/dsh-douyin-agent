@@ -6,7 +6,8 @@ import sys
 
 if "--probe" in sys.argv:
     selected = sys.argv[sys.argv.index("--model") + 1] if "--model" in sys.argv else "tiny"
-    cache = Path(__file__).parent / ".models" / ("models--Systran--faster-whisper-" + selected) / "snapshots"
+    models_dir = Path(sys.argv[sys.argv.index("--models-dir") + 1]) if "--models-dir" in sys.argv else Path(__file__).parent / ".models"
+    cache = models_dir / ("models--Systran--faster-whisper-" + selected) / "snapshots"
     cached = any((directory / "model.bin").is_file() and (directory / "tokenizer.json").is_file() for directory in cache.glob("*"))
     dependency = importlib.util.find_spec("faster_whisper") is not None
     print(json.dumps({"available": dependency and cached, "dependencyAvailable": dependency, "modelCached": cached}))
@@ -15,8 +16,8 @@ if "--probe" in sys.argv:
 request = json.load(sys.stdin)
 from faster_whisper import WhisperModel
 
-cache = Path(__file__).parent / ".models"
-cache.mkdir(exist_ok=True)
+cache = Path(request["modelsDir"]) if request.get("modelsDir") else Path(__file__).parent / ".models"
+cache.mkdir(parents=True, exist_ok=True)
 model = WhisperModel(request.get("model", "tiny"), device="cpu", compute_type="int8", download_root=str(cache), local_files_only=True)
 language = request.get("language") or None
 if language == "auto":

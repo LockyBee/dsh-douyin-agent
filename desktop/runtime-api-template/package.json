@@ -1,0 +1,13 @@
+{
+  "name": "douyin-api-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "独立抖音助手的纯 Node API 运行资源",
+  "engines": { "node": "24.17.0" },
+  "dependencies": {
+    "playwright-core": "1.64.0-alpha-1790635538000",
+    "yaml": "2.9.0"
+  }
+}

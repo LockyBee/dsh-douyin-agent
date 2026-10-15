@@ -1,12 +1,14 @@
 # DSH 抖音助手
 
-在专用 Edge 中浏览电脑网页版抖音，向模型提供实际视频采样画面。提供 DSH 原生工具和独立 DeepSeek 本机控制台，后者无需启动 DSH 或 QQ 服务。当前源码工具目录共 22 项；普通视频 API 模型不接收聊天和转发工具，私信由独立许可名单服务处理，转发由本人明确点击或执行可信 CLI 命令触发。
+在专用 Edge 中浏览电脑网页版抖音，向模型提供实际视频采样画面。提供 DSH 原生插件、独立 API 桌面软件和旧版本机控制台。当前源码工具目录共 22 项；普通视频 API 模型不接收聊天和转发工具，私信由独立许可名单服务处理，转发由本人明确点击或执行可信 CLI 命令触发。
 
-2026-10-15 实机复验通过：当前 DSH 工具目录完整 22 项，视频时限与音频状态、两位许可联系人的会话、指定表情图片和转发人工授权分支均完成真实调用。本机控制台在线，私信自动回复和音频仍关闭，本轮没有向真人发送消息或转发。
+Windows 桌面软件直接输入 API Key 即可配置模型，使用随包 Node 后台，无需安装或运行 DSH、Cordis、QQ 服务。界面复用官方 MIT React 基础组件、主题和布局样式，软件自己的请求与业务交互独立实现。密钥可只用于本次运行，也可选择使用系统加密记住。软件与新版 DSH 插件共用本地记忆文件夹及精确数据库路径；源码构建、配置和验收范围见 [desktop/README.md](desktop/README.md)。
+
+2026-10-15 原插件实机复验通过：DSH 工具目录完整 22 项，视频时限与音频状态、两位许可联系人的会话、指定表情图片和转发人工授权分支均完成真实调用。该轮私信自动回复和音频关闭，没有向真人发送消息或转发。这些结果不等于新独立软件已经完成打包和真实模型联调。
 
 ## 启动与时间限制
 
-需要 Windows、Microsoft Edge、Node.js 22.13+，安装依赖后启动：
+独立桌面软件的构建与使用见 [desktop/README.md](desktop/README.md)。以下命令用于保留的旧版本机 HTTP 控制台，需要 Windows、Microsoft Edge、Node.js 22.13+：
 
 ```powershell
 pnpm install --frozen-lockfile
@@ -17,7 +19,7 @@ pnpm install --frozen-lockfile
 
 每日可设多个允许窗口，按北京时间计算，支持 `23:00-01:00` 等跨午夜窗口；全天可用 `00:00-24:00`。单轮默认 10 分钟，可设为 1 至 1440 分钟的整数，不能设无穷时长或关闭全部上限。API 与 DSH 共用一轮时钟，连续调用、开页面或保存更长上限不会重置当前轮。到点、窗口结束或本人结束当前轮时，视频会实际暂停，继续切换和视频模型任务受阻；私信 worker 使用独立运行状态和预算。
 
-凭据只从当前进程环境变量或 `DOUYIN_QQ_ROOT` 指定项目的 `.env` 在内存读取 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`。默认 QQ 项目路径为 `D:/codex分局/聊天机器人`；不需要运行 QQ 项目，不向 QQ 发消息。配置和预算见 [API-README.md](API-README.md)。
+旧控制台兼容从当前进程环境变量或 `DOUYIN_QQ_ROOT` 指定项目的 `.env` 在内存读取 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`。默认 QQ 项目路径为 `D:/codex分局/聊天机器人`；不需要运行 QQ 项目，不向 QQ 发消息。独立桌面软件只使用本人输入或本机加密保存的 API 设置，不借用此兼容配置。旧入口说明和预算见 [API-README.md](API-README.md)。
 
 DSH 安装、当前进程热加载和工具验收范围见 [PLUGIN-README.md](PLUGIN-README.md)。本机维护命令 `douyin.ps1` 使用同一 CDP 底座；`session-start`、`session-end`、`video-policy` 是本人手动命令，模型没有任意续时或改设置的工具。写入安装配置不等于当前 DSH 已加载。
 
@@ -35,11 +37,11 @@ DSH 安装、当前进程热加载和工具验收范围见 [PLUGIN-README.md](PL
 
 转发入口只允许本人选定许可好友和当前或指定作品。普通视频 API 模型没有转发工具；DSH 模型入口只提示使用本机按钮，实机已核对返回 `requiresUserAction=true`、`sent=false`。页面按钮或手动 `forward` CLI 命令才带可信授权；未确认不自动重试，暂不支持的平台界面不会自动改发文本 URL。一次真人作品卡片转发已通过随后只读回查核实；初始自动确认暴露了真实 DOM 消息逆序问题。逆序适配后的只读检查确认两人会话消息 ID 稳定，自动回复目前仍停止。
 
-共享记忆接口由 `memory.mjs` 提供，默认中央库为 `D:/codex分局/大肥鱼/memory/shared.sqlite`，可用 `DEEPSEEK_SHARED_MEMORY_DB` 覆盖。QQ 与视频双向互通另有专项验收；视频或私信工具通过不代表该部分全部完成。
+共享记忆接口由 `memory.mjs` 提供。新版插件和独立软件通过 `%USERPROFILE%/.dsh/douyin-browser/runtime-location.json` 共用同一 `memoryDir` 与精确 `memoryDbPath`；首次登记保留已存在的旧中央库 `D:/codex分局/大肥鱼/memory/shared.sqlite`，不复制或迁移数据库。新机器默认库为 `%USERPROFILE%/.dsh/douyin-browser/memory/shared.sqlite`。独立软件发现显式 `DEEPSEEK_SHARED_MEMORY_DB` 与既有登记冲突时拒绝切库；损坏记录也不会静默回落。QQ 与视频双向互通另有专项验收，视频或私信工具通过不代表该部分全部完成。
 
 ## 复用与来源
 
-复用 Microsoft Playwright CLI/MCP 的浏览器库及 `connectOverCDP` 接口、DSH 已安装的原生 runtime、Loader 和附件接口，以及 Node.js 内置的 fetch、parseEnv 和 SQLite。包版本由锁文件保留。已研究的相关抖音插件未覆盖本项目全部需求，因此补了网页适配、受限工具与本机入口；不宣称首创。CDP 能力、网页 DOM 变化和登录验证仍会限制操作。
+原生插件使用 Microsoft Playwright CLI/MCP 的浏览器库及 `connectOverCDP`、本机 DSH runtime、Loader 和附件接口。独立软件直接安装锁定的 `playwright-core`，复用官方 MIT React 基础组件与主题，使用 Electron、随包 Node 的 fetch、HTTP、IPC 和 SQLite；完整来源见 [desktop/UPSTREAM.md](desktop/UPSTREAM.md)。已研究的相关抖音插件未覆盖本项目全部需求，因此补了网页适配、受限工具与本机入口；不宣称首创。CDP 能力、网页 DOM 变化和登录验证仍会限制操作。
 
 媒体模块实际保留三个社区项目的源码和 MIT LICENSE，固定 commit 及 SHA256 见 `media/PROVENANCE.json`：`ch1bug/dsh-mimo-agent-tools`、`GooDAnDReaDY/dsh-voice`、`moluyao/dsh-minimax-asr`。它们不是 DeepSeek 官方媒体插件；本项目补了独立开关、后端选择、预算、进程调用和配置去敏。具体复用文件及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -55,7 +57,9 @@ DSH 安装、当前进程热加载和工具验收范围见 [PLUGIN-README.md](PL
 
 自动测试包含替身模型/控制器、真实 HTTP、临时 Edge 页面、真实 DSH SDK 与本地媒体运行；这些与真人发送、真实模型调用分别记录：
 
-2026-10-15 全套测试共 197 项，194 项通过、0 项失败，3 项按配置跳过可选媒体实测；其中原生 SDK 适配测试 23 项全部通过。本地 Whisper 的单独真实转写记录见上文，跳过项不计作本次通过。
+2026-10-15 本次源码测试共 201 项，194 项通过、0 项失败，7 项按配置跳过可选实测。原生 SDK 适配上一次单独验证为 23 项通过。本地 Whisper 的单独真实转写记录见上文，跳过项不计作本次通过。
+
+独立软件新增的 HTTP、真实 Node IPC、共享位置与临时 SQLite 验证另有记录：相关 23 项通过，包含软件及插件解析同一文件、原记忆库内容不变、密钥不回读、异常启动及退出清理；界面合成与许可检查 9 项通过。本机打包 EXE 另已验证启动、合成 Key 加密保存、重启恢复、清除和自有后台退出。没有调用真实模型或真人联系人，完整范围见 [desktop/VERIFICATION.md](desktop/VERIFICATION.md)。
 
 ```powershell
 pnpm test

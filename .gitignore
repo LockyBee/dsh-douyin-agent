@@ -13,6 +13,7 @@ verification/native-rich-workdir/
 verification/*-test.txt
 verification/*-tests.txt
 verification/*-job-id.txt
+verification/api-software-regression.txt
 暂停交接_*.md
 # 旧 CLI 调试片段只留本机，当前受限控制器不依赖这些文件。
 /mcp-options.mjs
