@@ -39,7 +39,7 @@ test('原生失败或截断返回不当作成功决策，block-end正文也能�
   const f=fixture({async *stream(){yield{type:'block-end',index:0,block:{type:'text',text:JSON.stringify(decision())}};yield{type:'finish',reason:{kind:'stop'}};}});
   assert.deepEqual(JSON.parse((await f.provider({system:WATCH_SYSTEM_PROMPT,messages:watchDecisionMessages(observation())})).text),decision());
 });
-test('原生自主循环用同一人格文件记录兴趣，另一入口可读，整个过程无需独立API Key',async t=>{
+test('原生自主循环把观察写入同一人格文件，停止前的有限画面不直接学成喜欢',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'native-watch-shared-'));
   t.after(()=>{assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});});
   const memoryDir=path.join(root,'memory'),personaMemory=new PersonaMemory({memoryDir}),videoLimits=new VideoLimits({stateDir:path.join(root,'state')});personaMemory.initialize();videoLimits.markSession('dsh',{explicit:true});
@@ -48,5 +48,5 @@ test('原生自主循环用同一人格文件记录兴趣，另一入口可读�
   const watch=new AutonomousWatch({controller,config:{},videoLimits,personaMemory,source:'dsh',stateDir:videoLimits.stateDir,decisionProvider:f.provider});
   t.after(()=>watch.close());watch.start({maxRequests:2},{explicit:true});await watch.completion;
   assert.equal(watch.state().running,false);assert.equal(watch.state().counts.requests,1);assert.equal(paused,1);assert.equal(f.requests.length,1);
-  const apiPersona=new PersonaMemory({memoryDir}).snapshot();assert.equal(apiPersona.interests[0].topic,'科普动画');assert.equal(apiPersona.interests[0].signal,'like');assert.equal(apiPersona.interests[0].evidenceCount,1);assert.match(apiPersona.personaText,/科普动画/);
+  const apiPersona=new PersonaMemory({memoryDir}).snapshot();assert.equal(apiPersona.interests.length,0);assert.equal(apiPersona.recentObservations.length,1);assert.equal(apiPersona.recentObservations[0].signal,'neutral');assert.match(apiPersona.personaText,/科普动画/);
 });

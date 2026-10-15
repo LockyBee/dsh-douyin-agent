@@ -4,7 +4,7 @@ import { watchIsActive, watchStartInput } from './api.mjs';
 
 const LABELS = { code: { copyLabel: '复制代码', copiedLabel: '已复制' }, footnotes: '注释' };
 const states = { running: '自主观看中', stopping: '正在停止', stopped: '未运行', limited: '达到限制', failed: '运行中断', needs_user: '等待手动操作' };
-const actions = { search: '搜索作品', skip: '换一条', stay: '继续观察', stop: '结束观看' };
+const actions = { search: '搜索作品', skip: '换一条', stay: '继续观察', share: '分享当前作品', stop: '结束观看' };
 const firstText = (...values) => values.find(value => typeof value === 'string' && value) || '';
 const textOf = value => typeof value === 'string' ? value : firstText(value?.summary, value?.observation, value?.text, value?.content);
 const topicOf = value => typeof value === 'string' ? value : firstText(value?.topic, value?.name, value?.label);
@@ -18,7 +18,7 @@ export function WatchControls({ state, video, configured, connected, otherBusy, 
   useEffect(() => { if (counts?.maxRequests && !dirty.current) setBudget(counts.maxRequests); }, [counts?.maxRequests]);
   return <div className="watch-controls">
     <div className="panel-title"><h3>自主观看</h3><Tag>{states[state?.status] || '正在读取状态'}</Tag></div>
-    <p className="muted">大肥鱼会按人格和兴趣挑片，在本轮剩余时间内观察、记录偏好。</p>
+    <p className="muted">大肥鱼会按人格和兴趣挑片，用实际观看与已确认行为积累偏好依据。</p>
     <label className="field"><span>本轮模型请求上限</span><Input aria-label="自主观看请求上限" type="number" min={1} max={100} step={1} value={budget} disabled={active} onChange={event => { dirty.current = true; setBudget(event.target.value); }} /><small>默认 30 次；停止后再开不会清零本轮已用预算。</small></label>
     <div className="actions"><Button size="sm" variant="primary" disabled={!state || active || otherBusy || !connected || !configured || video?.allowed !== true || video?.session?.status !== 'active' || busy.has('watchStart') || busy.has('watchStop')} onClick={() => { void run('watchStart', async () => { await api('/api/watch/start', watchStartInput(budget)); dirty.current = false; }); }}>开始自主观看</Button><Button size="sm" disabled={!active || busy.has('watchStop')} onClick={() => { void run('watchStop', () => api('/api/watch/stop', {})); }}>停止自主观看</Button><Button size="sm" variant="ghost" onClick={onView}>查看观看记录</Button></div>
     <p className="notice">请先亲自开始新一轮。到时或预算用尽都会结束，不会自动续时或预约下一轮。</p>
@@ -28,9 +28,37 @@ export function WatchControls({ state, video, configured, connected, otherBusy, 
   </div>;
 }
 
+function BehaviorEvidence({ value }) {
+  const ratio = value?.watchRatio ?? value?.ratio, actual = value?.actions;
+  return <div className="behavior-evidence"><div className="interest-list">
+    {Number.isFinite(value?.watchedSeconds) && <Tag>已核实观看 {value.watchedSeconds} 秒</Tag>}
+    {Number.isFinite(ratio) && <Tag>观看比例 {Math.round(Math.min(1, Math.max(0, ratio)) * 100)}%</Tag>}
+    {actual && ['stay', 'skip', 'share'].map(action => Number.isFinite(actual[action]) && <Tag key={action}>{{ stay: '继续停留', skip: '跳过', share: '已确认分享' }[action]} {actual[action]} 次</Tag>)}
+  </div><p className="muted">{value?.basis || '只有画面或主题记录，尚无足够的实际观看与行为依据。'}</p>
+    {value?.counts && <p className="muted">正向 {value.counts.like ?? 0} · 负向 {value.counts.dislike ?? 0} · 待观察 {value.counts.neutral ?? 0}</p>}
+  </div>;
+}
+
 export function InterestRecords({ snapshot }) {
-  return <><section className="persona-records"><h2>正在形成的兴趣</h2><div className="interest-records">{(snapshot?.interests || []).map((interest, index) => <article className="interest-card" key={interest?.key || interest?.id || `${topicOf(interest)}-${index}`}><div className="interest-list"><Tag>{topicOf(interest) || '未命名兴趣'}</Tag><Tag>{signalLabel(interest?.signal)}</Tag></div><small>{Number.isSafeInteger(interest?.evidenceCount) ? interest.evidenceCount : Array.isArray(interest?.evidence) ? interest.evidence.length : 0} 条作品依据{dateLabel(interest?.updatedAt) ? ` · 更新于 ${dateLabel(interest.updatedAt)}` : ''}</small>{(interest?.evidence || []).slice(-2).reverse().map((evidence, evidenceIndex) => <p className="interest-reflection" key={evidence?.evidenceId || evidenceIndex}>{evidence.reflection || '已记录作品依据，暂无文字反思。'}<small>{evidence.source === 'dsh' ? '插件' : evidence.source === 'api' ? '独立软件' : evidence.source || ''}{dateLabel(evidence.at) ? ` · ${dateLabel(evidence.at)}` : ''}</small></p>)}</article>)}</div>{!snapshot?.interests?.length && <p className="muted">还没有兴趣记录，观察到的内容会逐步积累在共用记忆中。</p>}</section>
-    <section className="persona-records"><h2>最近观察与兴趣变化</h2>{(snapshot?.recentObservations || []).slice(-30).reverse().map((item, index) => <article className="observation-entry" key={item?.id || index}>{dateLabel(item?.observedAt || item?.createdAt || item?.at) && <small>{dateLabel(item.observedAt || item.createdAt || item.at)}</small>}<p>{item?.title || textOf(item) || '未读取到作品标题'}</p>{item?.author && <small>作者：{item.author}</small>}<div className="interest-list">{item?.kind && <Tag>{{ dom: '页面状态', visual: '画面采样', audio: '音频转写' }[item.kind] || item.kind}</Tag>}{Number.isFinite(item?.frameCount) && item.kind === 'visual' && <Tag>{item.frameCount} 帧</Tag>}{Number.isFinite(item?.playback?.time) && <Tag>播放位置 {Math.round(item.playback.time)} 秒</Tag>}</div>{textOf(item?.interestChange) && <p className="muted">兴趣变化：{textOf(item.interestChange)}</p>}</article>)}{!snapshot?.recentObservations?.length && <p className="muted">还没有观察记录。</p>}</section></>;
+  return <><section className="persona-records"><h2>正在形成的兴趣</h2>
+    <p className="muted">画面主题只是选题线索，喜好依据来自实际观看时长、比例及已确认行为，不从识别到的像素主题直接判断喜欢。</p>
+    <div className="interest-records">{(snapshot?.interests || []).map((interest, index) => <article className="interest-card" key={interest?.key || interest?.id || `${topicOf(interest)}-${index}`}>
+      <div className="interest-list"><Tag>{topicOf(interest) || '未命名兴趣'}</Tag><Tag>{signalLabel(interest?.basis || interest?.counts ? interest.signal : 'neutral')}</Tag></div>
+      <small>{Number.isSafeInteger(interest?.evidenceCount) ? interest.evidenceCount : Array.isArray(interest?.evidence) ? interest.evidence.length : 0} 条作品依据{dateLabel(interest?.updatedAt) ? ` · 更新于 ${dateLabel(interest.updatedAt)}` : ''}</small>
+      <BehaviorEvidence value={interest} />
+      {(interest?.evidence || []).slice(-2).reverse().map((evidence, evidenceIndex) => <div className="interest-reflection" key={evidence?.evidenceId || evidenceIndex}>
+        <p>选题反思：{evidence.reflection || '暂无文字反思。'}</p><BehaviorEvidence value={evidence} />
+        <small>{evidence.source === 'dsh' ? '插件' : evidence.source === 'api' ? '独立软件' : evidence.source || ''}{dateLabel(evidence.at) ? ` · ${dateLabel(evidence.at)}` : ''}</small>
+      </div>)}
+    </article>)}</div>{!snapshot?.interests?.length && <p className="muted">还没有兴趣记录，实际观看与行为证据会逐步积累在共用记忆中。</p>}
+  </section><section className="persona-records"><h2>最近观察与兴趣变化</h2>
+    {(snapshot?.recentObservations || []).slice(-30).reverse().map((item, index) => <article className="observation-entry" key={item?.id || index}>
+      {dateLabel(item?.observedAt || item?.createdAt || item?.at) && <small>{dateLabel(item.observedAt || item.createdAt || item.at)}</small>}
+      <p>{item?.title || textOf(item) || '未读取到作品标题'}</p>{item?.author && <small>作者：{item.author}</small>}
+      <div className="interest-list">{item?.kind && <Tag>{{ dom: '页面状态', visual: '画面采样', audio: '音频转写' }[item.kind] || item.kind}</Tag>}{Number.isFinite(item?.frameCount) && item.kind === 'visual' && <Tag>{item.frameCount} 帧</Tag>}{Number.isFinite(item?.playback?.time) && <Tag>播放位置 {Math.round(item.playback.time)} 秒</Tag>}</div>
+      <BehaviorEvidence value={item} />
+    </article>)}{!snapshot?.recentObservations?.length && <p className="muted">还没有观察记录。</p>}
+  </section></>;
 }
 
 export function WatchView({ state, video, browser, snapshot, onSettings }) {

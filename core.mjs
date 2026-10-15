@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from './playwright-runtime.mjs';
 import { MemoryStore } from './memory.mjs?v=2';
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=6';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=8';
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
-import { PersonaMemory } from './persona-memory.mjs';
+import { PersonaMemory } from './persona-memory.mjs?v=8';
 import { BrowserLauncher, connectDedicatedBrowser } from './browser-launcher.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -201,7 +201,7 @@ export class BrowserController {
   }
   limits() { return this.videoLimits ??= new VideoLimits(); }
   getMediaAdapter() { return this.mediaPromise??=import('./media/index.mjs?v=7').then(({MediaAdapter})=>new MediaAdapter()); }
-  getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
+  getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs?v=8').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
   watchVideoLimits() {
     if (!this.limitsEnabled || this.cancelLimitsWatch) return;
     this.cancelLimitsWatch = this.limits().watch({ sources:[this.source], pause:()=>this.pauseForLimits() });
@@ -375,7 +375,7 @@ export class BrowserController {
       if (name==='douyin_recall') return this.store().recall({query:args.query??'',limit:args.limit??10});
       if (name==='douyin_persona_status') return this.getPersonaMemory().snapshot();
       if (name==='douyin_watch_status') {
-        const {AutonomousWatch}=await import('./autonomous-watch.mjs');
+        const {AutonomousWatch}=await import('./autonomous-watch.mjs?v=8');
         this.watchStatusReader??=new AutonomousWatch({controller:this,config:{},videoLimits:this.limits(),personaMemory:this.getPersonaMemory(),source:this.source==='dsh'?'dsh':'api',stateDir:this.limits().stateDir});
         return this.watchStatusReader.state();
       }
@@ -414,12 +414,12 @@ export class BrowserController {
             else throw new Error('搜索结果卡片已变化，请重新搜索。');
           }
         }
-        if (name==='douyin_next'||name==='douyin_previous') return await this.switchVideo(name==='douyin_next'?1:-1,signal);
+        if (name==='douyin_next'||name==='douyin_previous') return await this.switchVideo(name==='douyin_next'?1:-1,signal,{recordLearning:!autonomousRunId});
         if (name==='douyin_play'||name==='douyin_pause') {
           await (await this.currentVideo()).evaluate(async(video, play)=>{ if(play) await video.play();else video.pause(); },name==='douyin_play');
           if (name==='douyin_play') await wait(600,signal);
         }
-        if (name==='douyin_observe'||name==='douyin_screenshot') return await this.capture(name==='douyin_observe'?args.seconds??3:0,signal);
+        if (name==='douyin_observe'||name==='douyin_screenshot') return await this.capture(name==='douyin_observe'?args.seconds??3:0,signal,{recordLearning:!autonomousRunId});
         if(name==='douyin_listen') return await this.listen(args.seconds??8,signal);
         aborted(signal);
         return this.state();
@@ -436,10 +436,20 @@ export class BrowserController {
     if(index===undefined) throw new Error('没有在视口内找到视频。');
     return this.page.locator('video').nth(index);
   }
-  async switchVideo(direction,signal) {
+  async switchVideo(direction,signal,{recordLearning=true}={}) {
     const before = await this.state();
     if (!before.video) throw new Error('当前没有可见视频，请先打开推荐或搜索作品。');
     if(before.loginRequired||before.verificationRequired) return {changed:false,before:before.video,state:before};
+    let skipEvidenceId=null;
+    if(recordLearning && direction>0 && this.lastObservationVideoId===before.video.id && this.lastObservationEvidenceId && this.lastObservationState?.video?.id===before.video.id) {
+      const wallSeconds=(Date.now()-this.lastObservationAt)/1000;
+      if(Number.isFinite(wallSeconds) && wallSeconds>0 && wallSeconds<=30) {
+        try {
+          const viewing=this.getPersonaMemory().recordViewing?.({evidenceId:this.lastObservationEvidenceId,from:this.lastObservationState,to:before,wallSeconds,sampleId:randomUUID()},{source:this.source});
+          if(viewing?.accepted===true) skipEvidenceId=this.lastObservationEvidenceId;
+        }catch{/* 不能核实等待期间的进度时不补记快划偏好，换片仍按原操作执行。 */}
+      }
+    }
     const arrow=this.page.locator(`[data-e2e="video-switch-${direction>0?'next':'prev'}-arrow"]`).filter({visible:true});
     if(await arrow.count()) await arrow.first().click();
     else {
@@ -452,16 +462,20 @@ export class BrowserController {
       await wait(300,signal); after=await this.state();
       if(after.video?.id&&before.video.id&&after.video.id!==before.video.id&&after.video.readyState>=2) break;
     }
+    if(skipEvidenceId && after.video?.id && after.video.id!==before.video.id && after.video.readyState>=2) {
+      try {this.getPersonaMemory().recordBehavior?.({evidenceId:skipEvidenceId,action:'skip',sampleId:randomUUID(),confirmed:true},{source:this.source});}catch{/* 学习失败不改变已确认的切片结果。 */}
+    }
     return {changed:before.video.id&&after.video?.id?before.video.id!==after.video.id:null,
       before:before.video,after:after.video,state:after};
   }
-  async capture(seconds,signal) {
+  async capture(seconds,signal,{recordLearning=true}={}) {
+    const captureStarted=Date.now();
     let state=await this.state();
     if(state.loginRequired||state.verificationRequired||state.privateChatVisible) return {state,frames:[],note:'登录、验证或私信面板遮挡画面，本次没有采集图片。'};
     if(!state.video) return {state,frames:[],note:'没有可见视频画面，请先打开作品。'};
     const frames=[],samples=seconds?3:1;
-    const before={...state.video};
-    let sampledState=state,stoppedReason=null;
+    const before={...state.video}, firstState=structuredClone(state);
+    let sampledState=state,sampledAt=captureStarted,stoppedReason=null;
     for(let index=0;index<samples;index++) {
       aborted(signal);
       if(index) await wait(seconds*1000/(samples-1),signal);
@@ -471,17 +485,29 @@ export class BrowserController {
       if(state.video?.id!==before.id) {stoppedReason='采样期间切换作品，保留的画面只属于此前作品。';break;}
       const {x,y,width,height}=state.video.viewport;
       if(width<2||height<2) break;
-      const data=await this.page.screenshot({type:'jpeg',quality:65,clip:{x,y,width,height},timeout:10_000});
+      // 采样保留动画和光标，避免截图期间改写播放器页面的样式。
+      const data=await this.page.screenshot({type:'jpeg',quality:65,clip:{x,y,width,height},animations:'allow',caret:'initial',timeout:10_000});
+      aborted(signal);
       const checked=await this.state();
       if(checked.loginRequired||checked.verificationRequired||checked.unsupportedPage||checked.privateChatVisible) return {state:checked,frames:[],note:'截图期间出现登录、验证、私信面板或离开抖音，已丢弃本次画面。'};
       if(checked.video?.id!==before.id) {stoppedReason='截图期间切换作品，本帧已丢弃。';break;}
       frames.push({mimeType:'image/jpeg',data:data.toString('base64'),time:state.video.time,videoId:state.video.id});
-      sampledState=checked;
+      sampledState=checked;sampledAt=Date.now();
     }
-    const result={state:sampledState,frames,observation:{seconds,videoId:before.id,stoppedReason,beforeTime:before.time,afterTime:sampledState.video?.time,paused:sampledState.video?.paused,
+    const result={state:sampledState,frames,observation:{seconds,videoId:before.id,stoppedReason,beforeTime:before.time,beforePaused:before.paused,afterTime:sampledState.video?.time,paused:sampledState.video?.paused,
       note:'采集的是实际视频视口画面；没有音频，只能说明这些采样时刻。'}};
     if (frames.length && ['api','dsh'].includes(this.source)) {
-      try { result.personaEvidenceId=this.getPersonaMemory().recordObservation(result,{source:this.source,kind:'visual'}).evidenceId; }
+      try {
+        const persona=this.getPersonaMemory(),origin={source:this.source};
+        result.personaEvidenceId=persona.recordObservation(result,{...origin,kind:'visual'}).evidenceId;
+        const wallSeconds=(sampledAt-captureStarted)/1000,sampleId=randomUUID();
+        if(persona.recordViewing && wallSeconds<=30) {
+          result.viewing={evidenceId:result.personaEvidenceId,sampleId,...persona.recordViewing({evidenceId:result.personaEvidenceId,from:firstState,to:sampledState,wallSeconds,sampleId},origin)};
+          if(recordLearning && this.lastObservationVideoId===before.id && result.viewing.creditedSeconds>0) persona.recordBehavior?.({evidenceId:result.personaEvidenceId,action:'stay',sampleId,confirmed:true},origin);
+        }
+        this.lastObservationVideoId=before.id;this.lastObservationEvidenceId=result.personaEvidenceId;
+        this.lastObservationState=structuredClone(sampledState);this.lastObservationAt=sampledAt;
+      }
       catch { result.personaWarning='本次画面未登记为兴趣证据，不能据此更新人格兴趣。'; }
     }
     return result;

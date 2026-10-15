@@ -12,7 +12,7 @@ export async function prepareApiRuntime({ seedDir, userData, manifestFile }) {
   if (!/^[a-f0-9]{64}$/.test(manifest.runtimeId)) throw new Error('软件资源摘要无效。');
   const runtime = path.join(userData, 'runtimes', manifest.runtimeId.slice(0, 20));
   const ready = path.join(runtime, '.runtime-ready.json');
-  const required = ['api-worker.mjs', 'app.mjs', 'api-agent.mjs', 'core.mjs', 'runtime-paths.mjs', 'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'public/index.html', 'node_modules/playwright-core/package.json', 'node_modules/yaml/package.json'];
+  const required = ['api-worker.mjs', 'app.mjs', 'api-agent.mjs', 'core.mjs', 'runtime-paths.mjs', 'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'public/index.html', 'node_modules/playwright-core/package.json', 'node_modules/yaml/package.json'];
   if (await exists(ready)) {
     if (JSON.parse(await fs.readFile(ready, 'utf8')).runtimeId !== manifest.runtimeId) throw new Error('软件资源版本不匹配。');
     for (const file of required) if (!await exists(path.join(runtime, file))) throw new Error('已安装的软件资源不完整，请重新准备此版本。');

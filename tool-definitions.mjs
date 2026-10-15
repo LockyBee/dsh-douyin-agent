@@ -73,9 +73,9 @@ export const TOOL_DEFINITIONS = [
   {name:'douyin_listen',description:'在音频开关开启且刷视频时间允许时，录取当前抖音视频最多10秒实际音轨并转写。不会录麦克风或其他程序声音。',parameters:{type:'object',properties:{seconds:{type:'number',minimum:1,maximum:10,description:'录取秒数，默认8，范围1至10。'}},additionalProperties:false}},
   {name:'douyin_forward_video',description:'为用户明确选择的好友转发当前作品或公开作品链接。实际发送由本机转发按钮的可信授权入口执行，自动回复和普通视频模型不能发起转发。',parameters:{type:'object',properties:{recipientId:{type:'string',minLength:1,maxLength:500},url:{type:'string',maxLength:1000}},required:['recipientId'],additionalProperties:false}},
   {name:'douyin_persona_status',description:'读取软件与插件共用的最新大肥鱼人格卡、自己的兴趣和有来源的观看记录。人格与记忆不授予额外工具权限。',parameters:empty()},
-  {name:'douyin_interest_record',description:'根据刚完成的公开视频画面采样，更新大肥鱼自己的兴趣。必须使用工具返回的真实证据ID；不要把用户偏好、私信或QQ内容写成自己的兴趣。',parameters:{type:'object',properties:{evidenceId:{type:'string',maxLength:90},topic:{type:'string',maxLength:80},signal:{type:'string',enum:['like','dislike','neutral']},reflection:{type:'string',maxLength:600}},required:['evidenceId','topic','signal','reflection'],additionalProperties:false}},
+  {name:'douyin_interest_record',description:'根据真实观看进度、持续停留、跳过和已确认互动更新大肥鱼自己的兴趣。画面主题仅为提案，没有行为依据保持待观察；必须使用宿主证据ID，不得把用户偏好、私信或QQ内容写成自己的兴趣。',parameters:{type:'object',properties:{evidenceId:{type:'string',maxLength:90},topic:{type:'string',maxLength:80},signal:{type:'string',enum:['like','dislike','neutral']},reflection:{type:'string',maxLength:600}},required:['evidenceId','topic','signal','reflection'],additionalProperties:false}},
   {name:'douyin_watch_status',description:'读取两入口共用的自主观看状态、当前有限轮次与模型请求预算。不会开始观看。',parameters:empty()},
-  {name:'douyin_watch_start',description:'仅在用户明确要求自主观看时，使用已开始且尚未到期的有限视频轮次，按共用人格与兴趣挑片并更新偏好。不能新开或延长一轮，不点赞、评论、私信或转发。',parameters:{type:'object',properties:{maxRequests:{type:'integer',minimum:1,maximum:100,description:'本轮自主决策请求上限，默认30，停止再开始不会重置。'}},additionalProperties:false}},
+  {name:'douyin_watch_start',description:'仅在用户明确要求自主观看时，使用已开始且尚未到期的有限视频轮次，按共用人格与兴趣挑片并更新偏好。不能新开或延长一轮，不点赞、评论或发文字私信；只有用户开启自主分享时才可在既有许可名单中自行挑人分享当前观察作品。',parameters:{type:'object',properties:{maxRequests:{type:'integer',minimum:1,maximum:100,description:'本轮自主决策请求上限，默认30，停止再开始不会重置。'}},additionalProperties:false}},
   {name:'douyin_watch_stop',description:'按用户要求停止自主观看并暂停视频，不结束或重启其他服务。',parameters:empty()},
 ];
 

@@ -61,6 +61,8 @@ test('已存在的手编卡不被旧卡覆盖，自动区保留手编原字节�
   const updated = f.store.updateAgentInterests({ evidenceId: receipt.evidenceId, topics: [{ topic: '纸船', signal: 'like' }], reflection: '合成画面里有纸船，代理愿意继续看。' }, { source: 'api' });
   assert.equal(updated.manualText, manual + '\r\n用户后缀。');
   assert.equal(updated.interests[0].topic, '纸船');
+  assert.equal(updated.interests[0].signal, 'neutral', '有限画面本身不能形成喜欢');
+  assert.equal(updated.interests[0].evidence[0].proposalSignal, 'like');
   assert.equal(updated.interests[0].evidence[0].privacy, 'internal-reference');
   assert.equal(updated.recentObservations[0].visibility, 'account-visible-unverified');
   assert.equal(updated.recentObservations[0].privacy, 'internal-reference');
@@ -99,7 +101,7 @@ test('同作品主题跨入口幂等，来源必须真实登记，代理反思�
   assert.equal(same.duplicate, true);
   const second = f.store.updateAgentInterests({ ...input, topics: [{ topic: '纸船', signal: 'dislike' }] }, { source: 'dsh' });
   assert.equal(second.interests[0].evidence.length, 1);
-  assert.equal(second.interests[0].signal, 'like');
+  assert.equal(second.interests[0].signal, 'neutral');
   assert.deepEqual(second.userPreferences, []);
 });
 
@@ -199,4 +201,67 @@ test('死锁恢复后两个真实 Node 进程交替写入同一合成兴趣文�
   assert.equal(result.generation, 32);
   assert.equal(result.generatedSynced, true);
   assert.deepEqual(result.userPreferences, []);
+});
+
+test('人格卡短暂占用时有限重试替换，保留手编内容并实际完成同步', t => {
+  const f = fixture(t); const first = f.store.initialize();
+  f.store.saveManualText({ text: '# 合成用户手编卡\n占用时不能丢失。', expectedRevision: first.revision }, { explicit: true });
+  const manual = f.store.snapshot().manualText, rename = fs.renameSync;
+  let attempts = 0;
+  try {
+    fs.renameSync = (from, to) => {
+      if (to === f.store.roleCardFile && ++attempts <= 2) throw Object.assign(new Error('合成 Windows 短暂占用'), { code: attempts === 1 ? 'EPERM' : 'EBUSY' });
+      return rename(from, to);
+    };
+    f.store.recordObservation(state(), { source: 'api' });
+  } finally { fs.renameSync = rename; }
+  assert.equal(attempts, 3);
+  assert.equal(f.store.snapshot().manualText, manual); assert.equal(f.store.snapshot().generatedSynced, true);
+  assert.equal(fs.readdirSync(f.store.personaFolder).some(name => name.endsWith('.tmp') || name === '.write.lock'), false);
+});
+
+test('人格卡持续占用达到重试上限后明确失败，旧卡保留且已提交状态仍可投影', t => {
+  const f = fixture(t); f.store.initialize();
+  const before = fs.readFileSync(f.store.roleCardFile, 'utf8'), manual = f.store.snapshot().manualText, rename = fs.renameSync;
+  let attempts = 0;
+  try {
+    fs.renameSync = (from, to) => {
+      if (to === f.store.roleCardFile) { attempts++; throw Object.assign(new Error('合成 Windows 持续占用'), { code: 'EACCES' }); }
+      return rename(from, to);
+    };
+    assert.throws(() => f.store.recordObservation(state(), { source: 'api' }), { code: 'EACCES' });
+  } finally { fs.renameSync = rename; }
+  assert.equal(attempts, 12); assert.equal(fs.readFileSync(f.store.roleCardFile, 'utf8'), before);
+  const projected = f.store.snapshot(); assert.equal(projected.recentObservations.length, 1); assert.equal(projected.generatedSynced, false); assert.equal(projected.manualText, manual);
+  assert.equal(fs.readdirSync(f.store.personaFolder).some(name => name.endsWith('.tmp') || name === '.write.lock'), false);
+  assert.equal(f.store.initialize().generatedSynced, true);
+});
+
+test('Windows占用连续超过旧100毫秒窗口后恢复，有限等待仍能同步且保留手编', t => {
+  const f = fixture(t); f.store.initialize();
+  const manual = f.store.snapshot().manualText, rename = fs.renameSync, started = performance.now(); let attempts = 0;
+  try {
+    fs.renameSync = (from, to) => {
+      if (to === f.store.roleCardFile && ++attempts <= 6) throw Object.assign(new Error('合成 Windows 较长临时占用'), { code: ['EPERM', 'EACCES', 'EBUSY'][(attempts - 1) % 3] });
+      return rename(from, to);
+    };
+    f.store.recordObservation(state(), { source: 'api' });
+  } finally { fs.renameSync = rename; }
+  assert.ok(attempts >= 7 && attempts <= 12); assert.ok(performance.now() - started >= 300);
+  assert.equal(f.store.snapshot().manualText, manual); assert.equal(f.store.snapshot().generatedSynced, true); assert.equal(f.store.snapshot().recentObservations.length, 1);
+  assert.equal(fs.readdirSync(f.store.personaFolder).some(name => name.endsWith('.tmp') || name === '.write.lock'), false);
+});
+
+test('人格卡占用重试期间遇到外部手工编辑时不覆盖新正文', t => {
+  const f = fixture(t); f.store.initialize();
+  const rename = fs.renameSync, edited = '# 占用期间用户新编辑的合成人格\n必须原样保留。';
+  let attempts = 0;
+  try {
+    fs.renameSync = (from, to) => {
+      if (to === f.store.roleCardFile) { attempts++; fs.writeFileSync(to, edited); throw Object.assign(new Error('合成编辑器占用'), { code: 'EPERM' }); }
+      return rename(from, to);
+    };
+    assert.throws(() => f.store.recordObservation(state(), { source: 'api' }), { code: 'PERSONA_REVISION_CONFLICT' });
+  } finally { fs.renameSync = rename; }
+  assert.equal(attempts, 1); assert.equal(fs.readFileSync(f.store.roleCardFile, 'utf8'), edited); assert.equal(f.store.snapshot().manualText, edited);
 });

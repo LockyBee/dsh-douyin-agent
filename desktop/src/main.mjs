@@ -2,23 +2,24 @@ import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electro
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { ApiProcess } from './api-process.mjs';
 import { ensureSharedLocation, prepareApiRuntime, verifyNode } from './prepare-api-runtime.mjs';
 import { saveSharedMediaKey } from './media-key-store.mjs';
+import { createStartupTimeline, navigateStartup } from './startup-navigation.mjs';
 
 app.setName('大肥鱼抖音助手');
 app.commandLine.appendSwitch('lang', 'zh-CN');
 const override = process.env.DOUYIN_DESKTOP_USER_DATA;
 if (override && !path.isAbsolute(override)) throw new Error('软件用户目录必须是绝对路径。');
 app.setPath('userData', override || path.join(app.getPath('appData'), 'DafeiyuDouyinAPI'));
-let window, backend, memoryFolder, current, normalize;
-let remember = false, quitting = false;
+let window, backend, memoryFolder, current, normalize, startup;
+let remember = false, quitting = false, startupReady = false;
 const sensitive = new Set();
 const settingsFile = path.join(app.getPath('userData'), 'api-settings.json');
 function redact(value) { let text = String(value); for (const key of sensitive) text = text.split(key).join('[凭据已隐藏]'); return text.replace(/Bearer\s+[^\s,;"']+/gi, 'Bearer [凭据已隐藏]').slice(0, 12000); }
-function focus() { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } }
-async function quit(code = 0) { if (quitting) return; quitting = true; try { await backend?.stop(); } finally { app.exit(code); } }
+function focus() { if (window && !window.isDestroyed()) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } }
+async function quit(code = 0) { if (quitting) return; quitting = true; startup?.record('exit.requested', { exitCode: code }); try { await backend?.stop(); } finally { startup?.record('exit.finished', { exitCode: code }); await startup?.flush().catch(() => {}); app.exit(code); } }
 function authorized(event) {
   if (!window || event.sender.id !== window.webContents.id || new URL(event.senderFrame.url).origin !== backend.origin) throw new Error('设置请求来源无效。');
 }
@@ -50,8 +51,12 @@ else {
     const nodeRoot = path.join(resources, app.isPackaged ? 'runtime/node' : 'generated/node');
     const node = path.join(nodeRoot, 'node.exe');
     await fs.mkdir(userData, { recursive: true });
+    startup = await createStartupTimeline(userData);
+    startup.record('startup.started');
     await verifyNode(node, path.join(nodeRoot, 'provenance.json'));
+    startup.record('startup.stage', { stage: 'node-verified' });
     const runtime = await prepareApiRuntime({ seedDir: path.join(resources, 'api-runtime'), userData, manifestFile: path.join(appRoot, 'app', 'build-manifest.json') });
+    startup.record('startup.stage', { stage: 'runtime-prepared' });
     const pathsModule = await import(pathToFileURL(path.join(runtime, 'runtime-paths.mjs')).href);
     const shared = await ensureSharedLocation({ resolve: pathsModule.resolveRuntimePaths });
     memoryFolder = shared.paths.memoryDir;
@@ -70,6 +75,14 @@ else {
     if (current.apiKey) sensitive.add(current.apiKey);
     backend = new ApiProcess(node, runtime, { env: { ...process.env, ...shared.env, DOUYIN_NODE_EXECUTABLE: node } });
     await backend.start(current);
+    startup.record('backend.ready');
+    backend.exited.then(() => {
+      startup.record('backend.exited', { exitCode: backend.exitCode, signal: backend.exitSignal });
+      if (startupReady && !quitting) {
+        const message = '本机后台已退出，软件已停止。请查看启动诊断后重新打开。';
+        void startup.fail(message).catch(() => {}).finally(() => { if (!quitting) { dialog.showErrorBox('抖音助手后台已退出', message); void quit(1); } });
+      }
+    });
     ipcMain.handle('douyin:save-media-key', async (event, input) => {
       authorized(event);
       if (typeof input?.apiKey === 'string' && input.apiKey) sensitive.add(input.apiKey);
@@ -105,15 +118,26 @@ else {
     ipcMain.handle('douyin:open-persona', async event => { authorized(event); const folder=path.join(memoryFolder,'persona'); await fs.mkdir(folder,{recursive:true}); const error=await shell.openPath(folder); if(error)throw new Error('无法打开共用人格文件夹。'); return {opened:true}; });
     window = new BrowserWindow({ title: '大肥鱼抖音助手 · 独立 API 版', width: 1320, height: 880, minWidth: 920, minHeight: 640, autoHideMenuBar: true, backgroundColor: '#10141d', webPreferences: { preload: path.join(appRoot, 'app', 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
     window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    window.webContents.on('will-navigate', (event, url) => { if (new URL(url).origin !== backend.origin) event.preventDefault(); });
+    window.webContents.on('will-navigate', (event, url) => { try { if (new URL(url).origin !== backend.origin) event.preventDefault(); } catch { event.preventDefault(); } });
     window.on('page-title-updated', event => event.preventDefault());
-    window.webContents.on('did-finish-load', () => window.setTitle('大肥鱼抖音助手 · 独立 API 版'));
-    await window.loadURL(`${backend.origin}/`);
+    window.on('closed', () => startup.record('window.closed'));
+    window.webContents.on('did-finish-load', () => { if (!window.isDestroyed()) window.setTitle('大肥鱼抖音助手 · 独立 API 版'); });
+    const expectedSha256 = createHash('sha256').update(await fs.readFile(path.join(runtime, 'public', 'index.html'))).digest('hex');
+    await navigateStartup({ window, backend, url: `${backend.origin}/`, expectedSha256, record: startup.record,
+      checkRenderer: () => window.webContents.executeJavaScript("new Promise(resolve => { const end = Date.now() + 2500; const check = () => { const ready = document.readyState !== 'loading' && document.getElementById('root')?.childElementCount > 0 && typeof window.douyinDesktop?.getSettings === 'function' && typeof window.douyinDesktop?.saveSettings === 'function'; if (ready || Date.now() >= end) resolve(Boolean(ready)); else setTimeout(check, 50); }; check(); })"),
+    });
+    await startup.success();
+    if (quitting || window.isDestroyed()) return;
+    if (!backend.child.connected || backend.child.exitCode !== null || backend.child.signalCode) throw Object.assign(new Error('本机后台已退出，无法完成软件启动。'), { code: 'STARTUP_BACKEND_EXITED' });
+    startupReady = true;
     if (process.env.DOUYIN_DESKTOP_SMOKE === '1') await fs.writeFile(path.join(userData, 'desktop-smoke.json'), JSON.stringify({ ready: true, packaged: app.isPackaged, origin: backend.origin, appPid: process.pid, backendPid: backend.child.pid, memoryFolder, configured: Boolean(current.apiKey), time: new Date().toISOString() }, null, 2) + '\n');
   }).catch(async error => {
+    if (quitting || error?.code === 'STARTUP_WINDOW_CLOSED') { startup?.record('startup.cancelled', { code: error?.code }); await startup?.flush().catch(() => {}); if (!quitting) await quit(); return; }
     const message = redact(error?.message || error);
     await fs.mkdir(app.getPath('userData'), { recursive: true });
-    await fs.writeFile(path.join(app.getPath('userData'), 'startup-error.txt'), message + '\n');
+    startup?.record('startup.rejected', { code: typeof error?.code === 'string' ? error.code : 'STARTUP_FAILED' });
+    if (startup) await startup.fail(message).catch(() => {});
+    else await fs.writeFile(path.join(app.getPath('userData'), 'startup-error.txt'), message + '\n');
     await backend?.stop().catch(() => {});
     dialog.showErrorBox('抖音助手启动失败', message);
     await quit(1);

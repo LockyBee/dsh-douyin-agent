@@ -7,6 +7,8 @@ import { ApiAgent, DEFAULT_LIMITS, loadApiConfig, normalizeApiConfig, publicApiC
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { AutonomousWatch } from './autonomous-watch.mjs';
+import { AutonomousShare } from './autonomous-share.mjs';
+import { TaskLimits } from './task-limits.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -61,7 +63,7 @@ async function staticAsset(root, pathname) {
   } catch (error) { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return null; throw error; }
 }
 
-export function createApiServer({ controller, config, personaMemory, watchService, agent = new ApiAgent({ controller, config, personaMemory }), chatService, videoLimits, pauseVideoSources, mediaAdapter, port = 3218, htmlFile = path.join(ROOT, 'public/index.html'), staticRoot } = {}) {
+export function createApiServer({ controller, config, personaMemory, watchService, shareService, taskLimits, agent = new ApiAgent({ controller, config, personaMemory }), chatService, videoLimits, pauseVideoSources, mediaAdapter, port = 3218, htmlFile = path.join(ROOT, 'public/index.html'), staticRoot } = {}) {
   if (staticRoot !== undefined && (typeof staticRoot !== 'string' || !path.isAbsolute(staticRoot))) throw new Error('静态资源目录必须是绝对路径。');
   const token = randomBytes(32).toString('hex');
   const events = [];
@@ -101,7 +103,7 @@ export function createApiServer({ controller, config, personaMemory, watchServic
       if (request.method === 'GET' && url.pathname === '/') return reply(response, 200, await fs.readFile(htmlFile), 'text/html; charset=utf-8');
       if (request.method === 'GET' && url.pathname === '/api/bootstrap') {
         const memory = resolveRuntimePaths();
-        return reply(response, 200, { service: 'douyin-api-local', version: 1, token, videoTime: { enabled: Boolean(videoLimits) }, media: { available: Boolean(mediaAdapter) }, watch: { available: Boolean(watchService) }, persona: { available: Boolean(personaMemory) }, forward: { available: Boolean(chatService && videoLimits) }, config: redact(publicApiConfig(config), [config.apiKey]), limits: { maxSteps: agent.maxSteps ?? DEFAULT_LIMITS.maxSteps, maxToolCalls: agent.maxToolCalls ?? DEFAULT_LIMITS.maxToolCalls, taskTimeoutSeconds: (agent.taskTimeoutMs ?? DEFAULT_LIMITS.taskTimeoutMs) / 1_000, apiTimeoutSeconds: (agent.apiTimeoutMs ?? DEFAULT_LIMITS.apiTimeoutMs) / 1_000, maxTokens: agent.maxTokens ?? DEFAULT_LIMITS.maxTokens, maxFrames: agent.maxFrames ?? DEFAULT_LIMITS.maxFrames }, memory: { description: '与 QQ 机器人共享的记忆 / 视频笔记。具体连通状态以检索结果为准。', folder: memory.memoryDir, database: memory.memoryDbPath } });
+        return reply(response, 200, { service: 'douyin-api-local', version: 1, token, videoTime: { enabled: Boolean(videoLimits) }, media: { available: Boolean(mediaAdapter) }, watch: { available: Boolean(watchService) }, share: { available: Boolean(shareService) }, persona: { available: Boolean(personaMemory) }, forward: { available: Boolean(chatService && videoLimits) }, config: redact(publicApiConfig(config), [config.apiKey]), limits: { maxSteps: agent.maxSteps ?? DEFAULT_LIMITS.maxSteps, maxToolCalls: agent.maxToolCalls ?? DEFAULT_LIMITS.maxToolCalls, taskTimeoutSeconds: (agent.taskTimeoutMs ?? DEFAULT_LIMITS.taskTimeoutMs) / 1_000, apiTimeoutSeconds: (agent.apiTimeoutMs ?? DEFAULT_LIMITS.apiTimeoutMs) / 1_000, maxTokens: agent.maxTokens ?? DEFAULT_LIMITS.maxTokens, maxFrames: agent.maxFrames ?? DEFAULT_LIMITS.maxFrames }, memory: { description: '与 QQ 机器人共享的记忆 / 视频笔记。具体连通状态以检索结果为准。', folder: memory.memoryDir, database: memory.memoryDbPath } });
       }
       if (request.method === 'GET' && !url.pathname.startsWith('/api/') && staticRoot) {
         const asset = await staticAsset(staticRoot, url.pathname);
@@ -109,6 +111,29 @@ export function createApiServer({ controller, config, personaMemory, watchServic
       }
       if (!url.pathname.startsWith('/api/')) return reply(response, 404, { error: '地址不存在。' });
       if (!tokenMatches(request.headers['x-session-token'], token)) return reply(response, 403, { error: '控制台会话校验失败，请刷新页面。' });
+      if (url.pathname === '/api/task/limits') {
+        if (!taskLimits) return reply(response, 503, { error: '手动任务预算尚未就绪。' });
+        if (request.method === 'GET') return reply(response, 200, taskLimits.state());
+        if (request.method === 'POST') {
+          const body = await readJson(request);
+          if (active || forwardAbort || shareService?.active || watchService?.state().running) return reply(response, 409, { error: '请先停止当前视频任务、自主观看或转发，再修改手动任务预算。' });
+          const updated = taskLimits.configure(body, { explicit: true });
+          Object.assign(agent, { maxSteps: updated.policy.maxSteps, maxToolCalls: updated.policy.maxToolCalls, taskTimeoutMs: updated.policy.timeoutSeconds * 1000 });
+          return reply(response, 200, updated);
+        }
+        return reply(response, 405, { error: '手动任务预算只支持读取和保存。' });
+      }
+      if (url.pathname.startsWith('/api/share/')) {
+        if (!shareService) return reply(response, 503, { error: '自主分享模块尚未就绪。' });
+        if (request.method === 'GET' && url.pathname === '/api/share/state') return reply(response, 200, redact(shareService.state(), [config.apiKey]));
+        if (request.method === 'POST' && url.pathname === '/api/share/configure') return reply(response, 200, redact(shareService.configure(await readJson(request), { explicit: true }), [config.apiKey]));
+        if (request.method === 'POST' && url.pathname === '/api/share/resolve') {
+          const body = await readJson(request);
+          if (Object.keys(body).some(key => !['operationId', 'outcome'].includes(key))) return reply(response, 400, { error: '核对记录只接受记录编号和实际发送结果。' });
+          return reply(response, 200, redact(shareService.resolve(body, { explicit: true }), [config.apiKey]));
+        }
+        return reply(response, 404, { error: '自主分享接口不存在。' });
+      }
       if (url.pathname === '/api/browser/open' && request.method === 'POST') {
         const body = await readJson(request);
         if (Object.keys(body).length) return reply(response, 400, { error: '打开抖音不接受额外参数。' });
@@ -276,7 +301,7 @@ export function createApiServer({ controller, config, personaMemory, watchServic
   server.apiConfig = () => publicApiConfig(config);
   server.configureApi = value => {
     if (stopping) throw new Error('本机服务正在退出，不能修改 API 设置。');
-    if (active || forwardAbort || watchService?.state().running || chatService?.running || chatService?.starting || chatService?.busy || chatService?.worker?.()?.alive) throw new Error('请先停止视频任务、自主观看、转发和私信自动回复，再修改 API 设置。');
+    if (active || forwardAbort || shareService?.active || watchService?.state().running || chatService?.running || chatService?.starting || chatService?.busy || chatService?.worker?.()?.alive) throw new Error('请先停止视频任务、自主观看、转发和私信自动回复，再修改 API 设置。');
     const updated = normalizeApiConfig(value);
     Object.assign(config, updated);
     agent.config = config;
@@ -298,6 +323,7 @@ export function createApiServer({ controller, config, personaMemory, watchServic
     const results = await Promise.allSettled([
       ...(pending ? [pending] : []),
       ...(watchService ? [Promise.resolve().then(() => watchService.close())] : []),
+      ...(shareService ? [Promise.resolve().then(() => shareService.close())] : []),
       ...(chatService ? [Promise.resolve().then(() => chatService.close())] : []),
       ...(typeof controller.close === 'function' ? [Promise.resolve().then(async () => { if (controller.source === protectedSource) controller.limitsEnabled = false; await controller.close(); })] : []),
       ...shutdownHooks.map(hook => Promise.resolve().then(hook)),
@@ -333,7 +359,7 @@ export function stopApiServer(server) {
   return server.stop();
 }
 
-export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT || 3218), config = loadApiConfig(), controller, chatService, videoLimits = new VideoLimits(), mediaAdapter, personaMemory, watchService, htmlFile, staticRoot } = {}) {
+export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT || 3218), config = loadApiConfig(), controller, chatService, videoLimits = new VideoLimits(), mediaAdapter, personaMemory, watchService, shareService, taskLimits, htmlFile, staticRoot } = {}) {
   if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535) throw new Error('端口须为 0，或 1024 至 65535 的整数。');
   if (!controller) {
     const { BrowserController } = await import('./core.mjs');
@@ -347,11 +373,15 @@ export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT
   if (!mediaAdapter) { const { MediaAdapter } = await import('./media/index.mjs'); mediaAdapter = new MediaAdapter(); }
   if (!personaMemory) { const { PersonaMemory } = await import('./persona-memory.mjs'); personaMemory = new PersonaMemory(); personaMemory.initialize({ importLegacy: false }); }
   if (chatService?.agent) chatService.agent.personaMemory = personaMemory;
-  const agent = new ApiAgent({ controller, config, personaMemory });
+  taskLimits ??= new TaskLimits({ stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir });
+  const taskPolicy = taskLimits.state().policy;
+  const agent = new ApiAgent({ controller, config, personaMemory, maxSteps: taskPolicy.maxSteps, maxToolCalls: taskPolicy.maxToolCalls, taskTimeoutMs: taskPolicy.timeoutSeconds * 1000 });
+  if (!shareService) shareService = new AutonomousShare({ controller, videoLimits, personaMemory, stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir, source: 'api' });
   if (!watchService) watchService = new AutonomousWatch({ controller, config, personaMemory, videoLimits, agent });
+  watchService.shareService = shareService;
   const dshVideoController = new BrowserController({ source: 'dsh' });
   const pauseVideoSources = async (source) => { const target = source === 'api' ? controller : dshVideoController; if (typeof target.pauseForLimits !== 'function') throw new Error('浏览器底座尚未提供 pauseForLimits，到点暂停未验收。'); return target.pauseForLimits(); };
-  const server = createApiServer({ controller, config, chatService, videoLimits, pauseVideoSources, mediaAdapter, personaMemory, watchService, agent, port, htmlFile, staticRoot });
+  const server = createApiServer({ controller, config, chatService, videoLimits, pauseVideoSources, mediaAdapter, personaMemory, watchService, shareService, taskLimits, agent, port, htmlFile, staticRoot });
   server.addShutdownHook(() => { const state = watchService.state(); if (state.worker?.alive && !state.owned && state.worker.source === 'dsh') dshVideoController.limitsEnabled = false; return dshVideoController.close(); });
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });

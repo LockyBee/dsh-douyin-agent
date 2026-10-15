@@ -11,6 +11,8 @@ import '@dsh/theme/shiki.css';
 import './style.css';
 import { createApiClient, publicSettings, saveNativeSettings, saveNativeMediaKey, createForwardGate, mergeEvents, watchIsActive } from './api.mjs';
 import { WatchControls, WatchView, PersonaPanel } from './watch-persona.jsx';
+import { TaskBudgetPanel } from './task-budget.jsx';
+import { AutoSharePanel } from './autonomous-share.jsx';
 
 const MARKDOWN_LABELS = { code: { copyLabel: '复制代码', copiedLabel: '已复制' }, footnotes: '注释' };
 const EVENT_LABELS = { 'model.request': '请求模型', 'model.usage': '本次用量', 'model.answer': '模型答复', 'tool.start': '调用工具', 'tool.result': '工具返回', 'tool.error': '工具出错', 'task.started': '开始任务', 'task.completed': '任务完成', 'task.stopped': '任务停止', 'task.failed': '任务失败', 'task.limited': '达到限制', 'task.needs_user': '需要手动操作', 'video.started': '开始新一轮', 'video.limited': '视频时间已结束' };
@@ -134,13 +136,13 @@ function ForwardPanel({ api, run, busy, allowed, running, suggestedUrl }) {
   </Panel>;
 }
 
-function BrowserPanel({ browser, onPick }) {
+function BrowserPanel({ browser, onPick, manualForward = true }) {
   if (!browser) return <Panel title="专用浏览器"><Note>首次视频任务会打开专用浏览器。登录和验证码请在浏览器内手动完成。</Note></Panel>;
   const video = browser.video;
   return <Panel title="专用浏览器" badge={<Tag>{video?.paused === true ? '已暂停' : video?.paused === false ? '播放中' : '已连接'}</Tag>}>
-    {video && <><strong>{video.title || '当前作品'}</strong><p className="muted">{video.author || '作者未读取'}{Number.isFinite(video.time) ? ` · ${Math.round(video.time)} 秒` : ''}</p><Button size="sm" onClick={() => onPick(video.url || browser.url)}>选择此作品转发</Button></>}
+    {video && <><strong>{video.title || '当前作品'}</strong><p className="muted">{video.author || '作者未读取'}{Number.isFinite(video.time) ? ` · ${Math.round(video.time)} 秒` : ''}</p>{manualForward && <Button size="sm" onClick={() => onPick(video.url || browser.url)}>选择此作品转发</Button>}</>}
     {(browser.loginRequired || browser.verificationRequired) && <Note error>请在专用浏览器手动完成{browser.loginRequired ? '登录' : '验证'}。</Note>}
-    {(browser.searchResults || []).slice(0, 8).map((item, index) => <button type="button" className="result-link" key={item.url || index} onClick={() => onPick(item.url)}>{index + 1}. {item.title || item.text || '公开作品'}</button>)}
+    {(browser.searchResults || []).slice(0, 8).map((item, index) => manualForward ? <button type="button" className="result-link" key={item.url || index} onClick={() => onPick(item.url)}>{index + 1}. {item.title || item.text || '公开作品'}</button> : <p className="muted" key={item.url || index}>{index + 1}. {item.title || item.text || '公开作品'}</p>)}
     <Data label="浏览器回读" value={browser} />
   </Panel>;
 }
@@ -168,13 +170,14 @@ export function App() {
   const [settings, setSettings] = useState(() => publicSettings()), [settingsOpen, setSettingsOpen] = useState(false), [boot, setBoot] = useState(null), [connected, setConnected] = useState(false);
   const [video, setVideo] = useState(null), [audio, setAudio] = useState(null), [chat, setChat] = useState(null), [browser, setBrowser] = useState(null);
   const [watch, setWatch] = useState(null), [watchSynced, setWatchSynced] = useState(false), [persona, setPersona] = useState(null);
+  const [taskLimits, setTaskLimits] = useState(null), [share, setShare] = useState(null);
   const [tasks, setTasks] = useState([]), [selectedTask, setSelectedTask] = useState(null), [events, setEvents] = useState([]), [running, setRunning] = useState(false), [instruction, setInstruction] = useState('');
   const [view, setView] = useState('chat'), [rightOpen, setRightOpen] = useState(true), [error, setError] = useState(''), [busy, setBusy] = useState(new Set()), [suggestedUrl, setSuggestedUrl] = useState('');
   const lock = useRef(new Set()), revision = useRef(0), bootRef = useRef(null), currentTask = useRef(null), pollRef = useRef(null), submitLock = useRef(false), restoredSelection = useRef(false);
   const configured = settings.configured && boot?.config?.configured === true;
   const allowed = boot?.videoTime?.enabled !== true || video?.allowed === true;
   const watchActive = watchIsActive(watch), watchReady = boot?.watch?.available !== true || watchSynced;
-  const manualBusy = running || busy.has('task') || busy.has('forward');
+  const manualBusy = running || busy.has('task') || busy.has('forward') || share?.busy === true;
   const operationActive = manualBusy || watchActive || busy.has('watchStart') || busy.has('chatStart') || chat?.running || chat?.starting || chat?.busy || chat?.worker?.alive;
   const run = useCallback(async (name, action) => {
     if (lock.current.has(name)) return;
@@ -203,7 +206,7 @@ export function App() {
         }
         setEvents(old => mergeEvents(old, value.events, currentTask.current)); revision.current = value.revision || revision.current;
         if (value.browser) setBrowser(value.browser);
-        const reads = [bootRef.current.videoTime?.enabled ? ['/api/video/status', setVideo] : null, ['/api/chat/state', setChat], bootRef.current.media?.available ? ['/api/media/state', setAudio] : null, bootRef.current.watch?.available ? ['/api/watch/state', setWatch] : null, bootRef.current.persona?.available ? ['/api/persona', setPersona] : null].filter(Boolean);
+        const reads = [bootRef.current.videoTime?.enabled ? ['/api/video/status', setVideo] : null, ['/api/task/limits', setTaskLimits], ['/api/chat/state', setChat], bootRef.current.media?.available ? ['/api/media/state', setAudio] : null, bootRef.current.watch?.available ? ['/api/watch/state', setWatch] : null, bootRef.current.share?.available ? ['/api/share/state', setShare] : null, bootRef.current.persona?.available ? ['/api/persona', setPersona] : null].filter(Boolean);
         await Promise.allSettled(reads.map(async ([route, setter]) => { try { const state = await client.request(route); if (alive) { setter(state); if (route === '/api/watch/state') setWatchSynced(true); } } catch (failure) { if (alive && route === '/api/watch/state') setWatchSynced(false); throw failure; } }));
       } catch (failure) { if (alive) { setConnected(false); setWatchSynced(false); bootRef.current = null; setError(failure.message || '正在重新连接本机服务。'); } }
       finally { polling = false; }
@@ -214,7 +217,7 @@ export function App() {
   const api = (route, body) => client.request(route, body);
   const openDouyin = () => { void run('browserOpen', () => api('/api/browser/open', {})); };
   async function submit(event) {
-    event.preventDefault(); if (submitLock.current || watchActive || !watchReady || lock.current.has('watchStart') || !configured || !allowed || !connected || !instruction.trim() || busy.has('forward')) return;
+    event.preventDefault(); if (submitLock.current || watchActive || share?.busy || !watchReady || lock.current.has('watchStart') || !configured || !allowed || !connected || !instruction.trim() || busy.has('forward')) return;
     submitLock.current = true;
     await run('task', async () => {
       try { const result = await api('/api/task', { instruction: instruction.trim() }); currentTask.current = result.id; setSelectedTask(result.id); setView('chat'); setTasks(old => [{ id: result.id, instruction: instruction.trim(), status: 'running' }, ...old]); setInstruction(''); setRunning(true); }
@@ -239,10 +242,10 @@ export function App() {
       {watchActive && <div className="watch-running-strip" role="status"><span>{statusLabel(watch?.status)} · 自主观看剩余 {Math.max(0, Math.floor(video?.remainingSeconds ?? watch?.remainingSeconds ?? 0))} 秒</span><Button size="sm" disabled={busy.has('watchStop')} onClick={stopWatch}>停止当前自主观看</Button></div>}
       {view === 'memory' ? <MemoryView api={api} run={run} settings={settings} bridge={bridge} busy={busy} persona={persona} onPersona={setPersona} personaAvailable={boot?.persona?.available} watchState={watch} watchReady={watchReady} /> : view === 'watch' ? <WatchView state={watch} video={video} browser={browser} snapshot={persona} onSettings={() => setRightOpen(true)} /> : <>
         <div className="conversation" aria-live="polite">{!task ? <div className="welcome"><div className="welcome-symbol">◉</div><h1>今天想看些什么？</h1><p>搜索作品、观察视频，把值得记住的内容留下来。</p><div className="suggestions">{EXAMPLES.slice(0, 4).map(([label, value]) => <Button variant="outline" key={label} onClick={() => setInstruction(value)}>{label} ↗</Button>)}</div></div> : <><div className="user-message">{task.instruction}</div><div className="assistant-message"><div className="assistant-avatar">鱼</div><div className="assistant-content">{answer ? <MarkdownText text={answer} labels={MARKDOWN_LABELS} streaming={false} /> : <p className="muted">{running && task.id === currentTask.current ? '正在查看与操作专用浏览器…' : '还没有模型答复。'}</p>}{task.partialMessage && <MarkdownText text={task.partialMessage} labels={MARKDOWN_LABELS} />}{task.status && <small className="task-status">{statusLabel(task.status)}</small>}<details className="activity" open={running && task.id === currentTask.current}><summary>运行过程 · {selectedEvents.length} 条</summary>{selectedEvents.map(item => <EventItem key={item.revision} event={item} />)}</details></div></div></>}</div>
-        <div className="composer-area"><div className="quick-actions">{EXAMPLES.map(([label, value]) => <button key={label} type="button" onClick={() => setInstruction(value)}>{label}</button>)}</div><form className="composer" onSubmit={submit}><textarea aria-label="视频任务" placeholder={configured ? '告诉大肥鱼这次想看什么…' : '先在设置中连接 API Key'} maxLength={4000} value={instruction} onChange={event => setInstruction(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form.requestSubmit(); } }} /><div className="composer-footer"><span>{boot?.limits ? `最多 ${boot.limits.maxToolCalls} 次工具 · ${boot.limits.taskTimeoutSeconds} 秒` : 'Enter 发送 · Shift + Enter 换行'}</span>{running ? <Button variant="outline" disabled={busy.has('stop')} onClick={() => { void run('stop', () => api('/api/stop', {})); }}>■ 停止任务</Button> : <Button variant="primary" type="submit" disabled={watchActive || !watchReady || busy.has('watchStart') || !configured || !connected || !allowed || !instruction.trim() || busy.has('task') || busy.has('forward')}>开始任务 ↑</Button>}</div></form>{watchActive && <p className="composer-hint">自主观看正在运行。停止后可手动下达视频任务。</p>}{!allowed && <p className="composer-hint">{video?.reason || '请先在右侧开始新一轮视频。'}</p>}</div>
+        <div className="composer-area"><div className="quick-actions">{EXAMPLES.map(([label, value]) => <button key={label} type="button" onClick={() => setInstruction(value)}>{label}</button>)}</div><form className="composer" onSubmit={submit}><textarea aria-label="视频任务" placeholder={configured ? '告诉大肥鱼这次想看什么…' : '先在设置中连接 API Key'} maxLength={4000} value={instruction} onChange={event => setInstruction(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form.requestSubmit(); } }} /><div className="composer-footer"><span>{boot?.limits ? `最多 ${taskLimits?.policy?.maxSteps ?? boot.limits.maxSteps ?? 20} 步 · ${taskLimits?.policy?.maxToolCalls ?? boot.limits.maxToolCalls} 次工具 · ${taskLimits?.policy?.timeoutSeconds ?? boot.limits.taskTimeoutSeconds} 秒` : 'Enter 发送 · Shift + Enter 换行'}</span>{running ? <Button variant="outline" disabled={busy.has('stop')} onClick={() => { void run('stop', () => api('/api/stop', {})); }}>■ 停止任务</Button> : <Button variant="primary" type="submit" disabled={watchActive || share?.busy || !watchReady || busy.has('watchStart') || !configured || !connected || !allowed || !instruction.trim() || busy.has('task') || busy.has('forward')}>开始任务 ↑</Button>}</div></form>{watchActive && <p className="composer-hint">自主观看正在运行。停止后可手动下达视频任务。</p>}{!watchActive && <p className="composer-hint">手动任务的次数、步骤和超时独立于视频时段与自主观看预算，任一预算先到会停止。持续看可用自主观看，不会自动续时。</p>}{!allowed && <p className="composer-hint">{video?.reason || '请先在右侧开始新一轮视频。'}</p>}</div>
       </>}
     </main>
-    {rightOpen && <aside className="business-sidebar" aria-label="业务设置"><div className="business-heading"><strong>业务设置</strong><small>由你明确控制</small></div>{boot?.videoTime?.enabled ? <VideoPanel state={video} api={api} run={run} busy={busy}>{watchControls}</VideoPanel> : watchControls}<BrowserPanel browser={browser} onPick={pick} />{boot?.media?.available && <AudioPanel state={audio} api={api} run={run} busy={busy} bridge={bridge} operationActive={operationActive} />}<ChatPanel state={chat} api={api} run={run} busy={busy} configured={configured} />{boot?.forward?.available && <ForwardPanel api={api} run={run} busy={busy} allowed={allowed && configured && connected && watchReady} running={manualBusy || watchActive || busy.has('watchStart')} suggestedUrl={suggestedUrl} />}</aside>}
+    {rightOpen && <aside className="business-sidebar" aria-label="业务设置"><div className="business-heading"><strong>业务设置</strong><small>由你明确控制</small></div>{boot?.videoTime?.enabled ? <VideoPanel state={video} api={api} run={run} busy={busy}>{watchControls}</VideoPanel> : watchControls}<TaskBudgetPanel state={taskLimits} api={api} run={run} busy={busy} operationActive={operationActive} /><BrowserPanel browser={browser} onPick={pick} manualForward={boot?.share?.available !== true} />{boot?.media?.available && <AudioPanel state={audio} api={api} run={run} busy={busy} bridge={bridge} operationActive={operationActive} />}<ChatPanel state={chat} api={api} run={run} busy={busy} configured={configured} />{boot?.share?.available ? <AutoSharePanel state={share} api={api} run={run} busy={busy} connected={connected} /> : boot?.forward?.available && <ForwardPanel api={api} run={run} busy={busy} allowed={allowed && configured && connected && watchReady} running={manualBusy || watchActive || busy.has('watchStart')} suggestedUrl={suggestedUrl} />}</aside>}
     {(!settings.configured || settingsOpen) && <ApiSettings settings={settings} bridge={bridge} onSaved={saved} onClose={() => setSettingsOpen(false)} run={run} busy={busy.has('settings') || busy.has('clearKey')} operationActive={operationActive || !watchReady} watchActive={watchActive} onStopWatch={stopWatch} onOpenDouyin={openDouyin} openingDouyin={busy.has('browserOpen')} connected={connected} operationError={error} />}
   </div>;
 }

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from '../playwright-runtime.mjs';
-import { readPageState } from '../core.mjs?v=5';
+import { readPageState } from '../core.mjs?v=8';
 import { VideoForwarder, canonicalVideoUrl, forwardAvatarIdentity, readForwardPanelDom } from '../video-forward.mjs';
 
 let browser;

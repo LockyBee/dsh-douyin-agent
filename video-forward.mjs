@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
-import { BrowserController, readPageState } from './core.mjs?v=5';
+import { BrowserController, readPageState } from './core.mjs?v=8';
 import { ChatBrowser } from './chat-browser.mjs?v=5';
 import { VideoLimits } from './video-limits.mjs';
 
@@ -54,6 +54,23 @@ function assertVideo(state, videoId) {
   if (state.loginRequired || state.verificationRequired || state.unsupportedPage || state.privateChatVisible) throw new Error('当前页面需要登录、验证或仍有私信遮挡，未转发。');
   if (!state.video?.id || state.video.readyState < 2 || (videoId && state.video.id !== videoId)) throw new Error('目标作品未就绪或已切换，未转发。');
   return canonicalVideoUrl(state.video.url ?? `https://www.douyin.com/video/${state.video.id}`);
+}
+
+function readMarkedRecipientDom(element) {
+  const r = element.getBoundingClientRect(), s = getComputedStyle(element);
+  const button = element.querySelector('.xu0OjnsQ,[data-e2e="share-friend-send"]');
+  return { displayName: element.querySelector('.EnYt_IKl,[data-e2e="share-friend-name"]')?.textContent.trim() ?? '',
+    avatar: element.querySelector('img')?.getAttribute('src') ?? '', sendLabel: button?.textContent.trim() ?? '',
+    disabled: !element.isConnected || r.width <= 0 || r.height <= 0 || s.visibility === 'hidden' || s.display === 'none' || !button || button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true' };
+}
+
+function installInputWitness(button, token) {
+  const entries = window.__deepseekForwardInputs ??= Object.create(null);
+  const entry = { dispatched: false };
+  const witness = event => { if (event.isTrusted && (event.target === button || button.contains(event.target))) entry.dispatched = true; };
+  document.addEventListener('click', witness, true);
+  entry.cleanup = () => document.removeEventListener('click', witness, true);
+  entries[token] = entry;
 }
 
 export class VideoForwarder {
@@ -112,8 +129,23 @@ export class VideoForwarder {
     for (let i = 0; i < 12; i += 1) { stop(signal); if ((await page.evaluate(readForwardPanelDom)).rows.length) return true; await page.waitForTimeout(150); }
     return false;
   }
-  async forward({ recipientId, url, expectedVideoId } = {}, { signal, humanAuthorized = false } = {}) {
+  async forward(input = {}, { signal, humanAuthorized = false } = {}) {
     if (humanAuthorized !== true) return { confirmed: false, deliveryUncertain: false, humanActionRequired: true, reason: '请在本机转发界面选择作品和好友，再点击转发。' };
+    return this.#forward(input, { signal });
+  }
+  async forwardAutonomous({ recipientId, expectedVideoId, ...extra } = {}, { signal, authorize, autonomousRunId } = {}) {
+    if (typeof authorize !== 'function') return { confirmed: false, deliveryUncertain: false, reason: '自主分享缺少可信的本机许可检查，未发送。' };
+    if (Object.keys(extra).length || typeof expectedVideoId !== 'string' || !/^\d{1,64}$/.test(expectedVideoId)) throw new TypeError('自主分享只接受已观察的当前作品和已验证好友，不能指定其他链接或正文。');
+    if (typeof authorize.beginDispatch !== 'function') return { confirmed: false, deliveryUncertain: false, reason: '自主分享缺少与本机设置互斥的最终输入许可，未发送。' };
+    return this.#forward({ recipientId, expectedVideoId }, { signal, authorize, autonomousRunId });
+  }
+  async #forward({ recipientId, url, expectedVideoId } = {}, { signal: parentSignal, authorize, autonomousRunId } = {}) {
+    const interrupt = new AbortController(), signal = AbortSignal.any([interrupt.signal, ...(parentSignal ? [parentSignal] : [])]);
+    const authorized = async phase => {
+      if (authorize && await authorize({ phase, recipientId, videoId: expectedVideoId }) !== true) throw new Error('自主分享许可已撤回或检查未通过，未发送。');
+      stop(signal);
+    };
+    await authorized('prepare');
     if (expectedVideoId !== undefined && (typeof expectedVideoId !== 'string' || !/^\d+$/.test(expectedVideoId))) throw new TypeError('目标作品 ID 格式不正确。');
     const target = url ? canonicalVideoUrl(url) : null;
     if (target && expectedVideoId && target.videoId !== expectedVideoId) throw new Error('链接与目标作品 ID 不一致，未转发。');
@@ -134,6 +166,7 @@ export class VideoForwarder {
         if (target) { await page.goto(target.url, { waitUntil: 'domcontentloaded' }); await this.controller.settle(signal, { kind: 'video', videoId: target.videoId }); }
         const video = assertVideo(await page.evaluate(readPageState), expectedVideoId ?? target?.videoId);
         operation.videoId = video.videoId;
+        if (authorize && this.receipts().operations.some(item => item.recipientId === recipientId && item.videoId === video.videoId && item.status === 'confirmed')) throw new Error('这位好友已收到同一作品的已确认卡片，未自主重复分享。');
         if (this.receipts().operations.some(item => item.recipientId === recipientId && item.videoId === video.videoId && ['clicking', 'uncertain'].includes(item.status))) throw new Error('该好友与作品存在未确认的转发记录，请先人工核对，未再次发送。');
         if (!await this.openPanel(page, signal)) return { confirmed: false, deliveryUncertain: false, needsFallback: true, deliveryType: 'native-card', reason: '当前网页没有可核对的好友分享面板，可明确选择发送公开链接。' };
         const selected = selectForwardRecipient((await page.evaluate(readForwardPanelDom)).rows, contact);
@@ -152,22 +185,59 @@ export class VideoForwarder {
         stop(signal);
         assertVideo(await page.evaluate(readPageState), video.videoId);
         const latest = selectForwardRecipient((await page.evaluate(readForwardPanelDom)).rows, contact);
-        const markedIdentity = await marked.evaluate(element => {
-          const r = element.getBoundingClientRect(), s = getComputedStyle(element);
-          const button = element.querySelector('.xu0OjnsQ,[data-e2e="share-friend-send"]');
-          return { displayName: element.querySelector('.EnYt_IKl,[data-e2e="share-friend-name"]')?.textContent.trim() ?? '',
-            avatar: element.querySelector('img')?.getAttribute('src') ?? '', sendLabel: button?.textContent.trim() ?? '',
-            disabled: !element.isConnected || r.width <= 0 || r.height <= 0 || s.visibility === 'hidden' || s.display === 'none' || !button || button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true' };
-        });
+        const markedIdentity = await marked.evaluate(readMarkedRecipientDom);
         selectForwardRecipient([markedIdentity], contact);
         if (markedIdentity.displayName !== latest.displayName || forwardAvatarIdentity(markedIdentity.avatar) !== forwardAvatarIdentity(latest.avatar)) throw new Error('带标记的分享行身份发生变化，未点击发送。');
-        stop(signal);
-        operation.status = 'clicking'; operation.sendClicks = 1; this.record(operation);
-        clicked = true;
-        // 点击只有一次；点击期间报错也按结果未确认处理，不自动重试。
-        await send.click({ timeout: 3000 });
+        await send.evaluate(installInputWitness, operation.operationId);
+        const inputDispatched = () => page.evaluate(token => window.__deepseekForwardInputs?.[token]?.dispatched === true, operation.operationId);
+        const checkPendingInput = async () => {
+          if (await inputDispatched()) return;
+          await authorized('monitor');
+          const time = this.videoLimits.state?.();
+          if (time && !time.allowed) throw new Error(time.reason || '视频时限已结束，未继续输入。');
+          this.policyContact(recipientId);
+          assertVideo(await page.evaluate(readPageState), video.videoId);
+          if (await marked.count() !== 1 || await send.count() !== 1) throw new Error('待发送好友或按钮已变化，未继续输入。');
+          const latest = selectForwardRecipient((await page.evaluate(readForwardPanelDom)).rows, contact);
+          const identity = await marked.evaluate(readMarkedRecipientDom);
+          selectForwardRecipient([identity], contact);
+          if (identity.displayName !== latest.displayName || forwardAvatarIdentity(identity.avatar) !== forwardAvatarIdentity(latest.avatar)) throw new Error('等待期间带标记的好友身份变化，未继续输入。');
+          stop(signal);
+        };
+        let polling, monitoring = true, releaseDispatch;
+        const monitor = setInterval(() => {
+          if (!monitoring || polling) return;
+          polling = checkPendingInput().catch(async error => {
+            if (monitoring && !await inputDispatched().catch(() => false)) interrupt.abort(error);
+          }).finally(() => { polling = null; });
+        }, 40);
+        try {
+          await checkPendingInput();
+          // 先等待真实按钮可操作；等待期间仍持续核对共享许可和当前 DOM。
+          await send.click({ trial: true, timeout: 3000 });
+          stop(signal);
+          await checkPendingInput();
+          await authorized('before-click');
+          if (authorize) releaseDispatch = await authorize.beginDispatch();
+          stop(signal);
+          operation.status = 'clicking'; operation.sendClicks = 1; this.record(operation);
+          clicked = true;
+          // 真实输入只有一次；短最终输入仍受监测，结果不明时保留 uncertain 收据。
+          await send.click({ timeout: 350, noWaitAfter: true });
+          releaseDispatch?.(); releaseDispatch = null;
+          stop(signal);
+          if (!await inputDispatched()) throw new Error('没有核对到真实浏览器输入事件，分享结果待核对。');
+        } finally {
+          monitoring = false; clearInterval(monitor);
+          releaseDispatch?.();
+          await page.evaluate(token => {
+            const entry = window.__deepseekForwardInputs?.[token];
+            entry?.cleanup();
+            if (window.__deepseekForwardInputs) delete window.__deepseekForwardInputs[token];
+          }, operation.operationId).catch(() => {});
+        }
         return { videoId: video.videoId };
-      }, { signal });
+      }, { signal, autonomousRunId });
       if (sendResult.needsFallback) return sendResult;
       for (let attempt = 0; attempt < 8; attempt += 1) {
         stop(signal);

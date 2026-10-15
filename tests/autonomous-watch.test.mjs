@@ -11,6 +11,12 @@ import { MemoryStore } from '../memory.mjs';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGDkAAAAASUVORK5CYII=';
 const choice = (action = 'stop', extra = {}) => ({ action, reason: '根据当前合成画面选择。', reflection: '有限采样显示猫咪，这是代理兴趣。', topics: [{ topic: '猫咪', signal: 'like' }], ...extra });
+async function waitForProvider(watch, entered) {
+  await Promise.race([
+    entered,
+    watch.completion.then(() => { throw new Error(`自主观看在进入合成模型前提前结束：${JSON.stringify(watch.state())}`); }),
+  ]);
+}
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-watch-')); let clock = Date.parse('2026-10-15T02:00:00Z'), id = '7579432563794584933', time = 0;
   const stateDir = path.join(root, 'state'), memoryDir = path.join(root, 'memory');
@@ -27,7 +33,7 @@ function fixture(t) {
     if (name === 'douyin_observe') { time += 3; clock += 3000; const current = state(); memory.recordVideo(current, 'api'); return { state: current, frames: [{ mimeType: 'image/png', data: PNG, videoId: id, time }], observation: { videoId: id, seconds: 3 } }; }
     return state();
   }, pauseForLimits: async () => { paused++; return { paused: 1 }; } };
-  const options = { controller, config: { apiKey: 'synthetic-key', baseUrl: 'https://synthetic.example', model: 'synthetic' }, videoLimits, personaMemory, stateDir, now: () => clock, decisionProvider: input => provider(input), delayImpl: async (ms, signal) => { signal.throwIfAborted(); clock += ms; }, onEvent: event => events.push(event) };
+  const options = { controller, config: { apiKey: 'synthetic-key', baseUrl: 'https://synthetic.example', model: 'synthetic' }, videoLimits, personaMemory, stateDir, now: () => clock, decisionProvider: input => provider(input), delayImpl: async (ms, signal) => { signal.throwIfAborted(); clock += ms; time += ms / 1000; }, onEvent: event => events.push(event) };
   const watch = new AutonomousWatch(options), instances = [watch];
   t.after(async () => { for (const instance of instances) await instance.close(); memory.close(); const target = path.resolve(root); if (!target.startsWith(path.resolve(os.tmpdir()) + path.sep)) throw new Error('测试目录越界。'); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, watch, options, controller, videoLimits, personaMemory, memory, calls, events, state, paused: () => paused, now: () => clock, advance: ms => { clock += ms; }, provider: value => { provider = value; }, other: source => { const instance = new AutonomousWatch({ ...options, source }); instances.push(instance); return instance; } };
@@ -50,7 +56,7 @@ test('真实采样结果先进入共同证据，再结构化选择搜索/停留/
   assert.ok(f.calls.every(call => typeof call.options.autonomousRunId === 'string'));
   assert.ok(requests[0].messages[1].content.some(item => item.type === 'image_url')); assert.equal(requests[0].messages.some(message => message.role === 'tool'), false);
   assert.match(requests[1].messages[1].content[0].text, /猫咪/);
-  const learned = f.personaMemory.snapshot(); assert.equal(learned.interests[0].topic, '猫咪'); assert.equal(learned.interests[0].evidence.length, 3); assert.equal(learned.userPreferences.length, 0);
+  const learned = f.personaMemory.snapshot(); assert.equal(learned.interests[0].topic, '猫咪'); assert.equal(learned.interests[0].evidence.length, 1); assert.equal(learned.interests[0].signal, 'like'); assert.equal(learned.interests[0].evidence[0].watchedSeconds, 8); assert.equal(learned.userPreferences.length, 0);
   assert.ok(f.memory.recall({ query: '猫咪' }).entries.length >= 1); assert.equal(JSON.stringify(f.events).includes(PNG), false);
 });
 
@@ -74,7 +80,7 @@ test('时限会中止后续模型动作，超过180秒不靠新任务续跑，�
 test('API与DSH互斥，外部close不停止owner，合作stop在心跳内取消请求', { timeout: 5000 }, async t => {
   const f = fixture(t), entered = Promise.withResolvers();
   f.provider(({ signal }) => new Promise((resolve, reject) => { entered.resolve(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); }));
-  f.watch.start({ startSession: true }, { explicit: true }); await entered.promise;
+  f.watch.start({ startSession: true }, { explicit: true }); await waitForProvider(f.watch, entered.promise);
   const other = f.other('dsh'); assert.equal(other.state().owned, false); assert.throws(() => other.start({}, { explicit: true }), /另一个入口/);
   await other.close(); assert.equal(other.state().running, true);
   const stopping = await other.stop({ explicit: true }); assert.equal(stopping.status, 'stopping'); await f.watch.completion;
@@ -85,8 +91,21 @@ test('手动任务共享lease与循环互斥，owner停止会立即取消模型�
   const f = fixture(t), other = f.other('dsh'), entered = Promise.withResolvers();
   const release = f.watch.claimManual('task'); assert.throws(() => other.start({ startSession: true }, { explicit: true }), /手动任务/); await release();
   f.provider(({ signal }) => new Promise((resolve, reject) => { entered.resolve(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); }));
-  f.watch.start({ startSession: true }, { explicit: true }); await entered.promise; assert.throws(() => other.claimManual('forward'), /先停止共享/);
+  f.watch.start({ startSession: true }, { explicit: true }); await waitForProvider(f.watch, entered.promise); assert.throws(() => other.claimManual('forward'), /先停止共享/);
   const stopped = await f.watch.stop({ explicit: true }); assert.equal(stopped.running, false); assert.equal(stopped.status, 'stopped'); assert.equal(f.paused(), 1);
+});
+
+test('模型前采样失败时门闩立即报告实际状态与错误，不等待尚未进入的模型', async t => {
+  const f = fixture(t), entered = Promise.withResolvers();
+  f.controller.execute = async () => { throw new Error('合成模型前采样故障'); };
+  f.provider(async () => { entered.resolve(); return { text: JSON.stringify(choice()) }; });
+  f.watch.start({ startSession: true }, { explicit: true });
+  await assert.rejects(waitForProvider(f.watch, entered.promise), error => {
+    assert.match(error.message, /"status":"failed"/);
+    assert.match(error.message, /"lastError":"合成模型前采样故障"/);
+    return true;
+  });
+  assert.equal(f.watch.state().counts.requests, 0);
 });
 
 test('无法识别的帧、登录页和模型任意动作都失败关闭，不写兴趣或执行外发', async t => {

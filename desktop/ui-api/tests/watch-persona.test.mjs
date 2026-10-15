@@ -13,7 +13,7 @@ test('自主观看与人格使用合成服务验证有限启动、跨入口互�
   let taskRunning = false, task = null, rejectSave = false, personaOpened = 0, watchReadFails = false;
   const video = { allowed: false, window: { expiresAt: Date.now() + 600_000 }, remainingSeconds: 0, session: { status: 'ended' }, policy: { windows: ['00:00-24:00'], sessionMinutes: 10 } };
   const watch = { protocol: 'autonomous-watch-v1', running: false, owned: false, worker: null, status: 'stopped', sessionId: 'synthetic-session-1', counts: { requests: 1, maxRequests: 30, dailyRequests: 2, dailyLimit: 200 }, remainingSeconds: 0, lastDecision: { action: 'search', reason: '合成选择理由：对轻松动物题材感兴趣。', query: '合成猫咪', topics: ['动物'] } };
-  let persona = { personaFolder: 'C:\\合成共享记忆\\persona', roleCardFile: 'C:\\合成共享记忆\\persona\\role-card.md', revision: 'r1', manualText: '合成手编人格原文', personaText: '合成当前生效人格，包含持续观察。', interests: [{ topic: '合成动物兴趣', key: 'synthetic-topic', signal: 'like', updatedAt: 1792058400000, evidence: [{ evidenceId: 'synthetic-evidence', videoId: '1234567890123', reflection: '合成反思：喜欢轻松的动物互动。', source: 'api', at: 1792058400000 }] }], recentObservations: [{ id: 'synthetic-observation', videoId: '1234567890123', title: '合成观察：小猫正在玩球。', author: '合成公开作者', kind: 'visual', playback: { time: 3, duration: 10, paused: true }, frameCount: 1, source: 'api', observedAt: 1792058400000 }] };
+  let persona = { personaFolder: 'C:\\合成共享记忆\\persona', roleCardFile: 'C:\\合成共享记忆\\persona\\role-card.md', revision: 'r1', manualText: '合成手编人格原文', personaText: '合成当前生效人格，包含持续观察。', interests: [{ topic: '合成动物兴趣', key: 'synthetic-topic', signal: 'neutral', counts: { like: 0, dislike: 0, neutral: 1 }, basis: '合成依据：仅有画面，待实际观看行为核实。', updatedAt: 1792058400000, evidence: [{ evidenceId: 'synthetic-evidence', videoId: '1234567890123', reflection: '合成反思：识别到动物互动主题，尚不代表喜欢。', watchedSeconds: 2, watchRatio: 0.2, actions: { stay: 0, skip: 0, share: 0 }, basis: '合成依据：观看不足以判断喜好。', source: 'api', at: 1792058400000 }] }], recentObservations: [{ id: 'synthetic-observation', videoId: '1234567890123', title: '合成观察：小猫正在玩球。', author: '合成公开作者', kind: 'visual', playback: { time: 3, duration: 10, paused: true }, watchedSeconds: 2, watchRatio: 0.2, actions: { stay: 0, skip: 0, share: 0 }, basis: '合成依据：观看不足以判断喜好。', frameCount: 1, source: 'api', observedAt: 1792058400000 }] };
   const prefs = () => ({ configured: true, baseUrl: 'https://api.example.invalid', model: '合成模型', remember: false, memoryFolder: 'C:\\合成共享记忆' });
   const server = http.createServer(async (request, response) => {
     try {
@@ -102,9 +102,10 @@ test('自主观看与人格使用合成服务验证有限启动、跨入口互�
   assert.deepEqual(JSON.parse(calls.filter(call => call.route === '/api/persona/card').at(-1).body), { text: '合成保留草稿，不夹带自动兴趣', expectedRevision: 'r3' });
   await page.getByRole('button', { name: '打开人格文件夹', exact: true }).click(); assert.equal(personaOpened, 1);
   await page.getByText('合成观察：小猫正在玩球。', { exact: true }).waitFor();
-  await page.locator('.interest-reflection').filter({ hasText: '合成反思：喜欢轻松的动物互动。' }).waitFor();
+  await page.locator('.interest-reflection').filter({ hasText: '合成反思：识别到动物互动主题，尚不代表喜欢。' }).waitFor();
   assert.match(await page.locator('.interest-card').innerText(), /1 条作品依据.*更新于/);
-  assert.equal(await page.getByText('感兴趣', { exact: true }).isVisible(), true);
+  assert.equal(await page.getByText('待观察', { exact: true }).isVisible(), true);
+  assert.equal(await page.getByText('感兴趣', { exact: true }).count(), 0);
   await page.screenshot({ path: path.join(shots, 'synthetic-persona.png'), fullPage: true });
   await page.getByRole('button', { name: /◉ 自主观看/ }).click();
   await page.getByText('合成选择理由：对轻松动物题材感兴趣。', { exact: true }).waitFor();

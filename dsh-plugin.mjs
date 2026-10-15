@@ -1,4 +1,4 @@
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=6';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=8';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
@@ -153,19 +153,19 @@ export async function apply(ctx, config = {}) {
   const getController = () => {
     if (disposed) throw new Error('抖音插件已卸载。');
     // 加载插件时只注册工具，首次调用时才创建控制器、启动浏览器。
-    controllerPromise ??= import('./core.mjs?v=7')
+    controllerPromise ??= import('./core.mjs?v=8')
       .then(({ BrowserController }) => new BrowserController({ ...config, source: 'dsh' }))
       .catch((error) => { controllerPromise = undefined; throw error; });
     return controllerPromise;
   };
-  const {PersonaMemory}=await import('./persona-memory.mjs');
+  const {PersonaMemory}=await import('./persona-memory.mjs?v=8');
   const sharedPersona=new PersonaMemory();
   const personaBinding=bindNativePersonaContext(ctx,{workspacePaths:[path.dirname(resolveRuntimePaths().memoryDir),path.dirname(fileURLToPath(import.meta.url))],getPersonaMemory:()=>{
     // 提示词读取不触发浏览器或模型，按每次生成时的文件内容刷新。
     return sharedPersona;
   }});
   const getWatch=async(exec,starting)=>{
-    if (!watchPromise) watchPromise=Promise.all([getController(),import('./autonomous-watch.mjs')]).then(([controller,{AutonomousWatch}])=>{
+    if (!watchPromise) watchPromise=Promise.all([getController(),import('./autonomous-watch.mjs?v=8')]).then(([controller,{AutonomousWatch}])=>{
       if(starting) sharedPersona.initialize({importLegacy:false});
       const route=exec.agent?.session?.requestHeader?.()?.config ?? exec.agent?.options ?? {};
       return new AutonomousWatch({controller,videoLimits:controller.limits(),personaMemory:sharedPersona,source:'dsh',config:{apiKey:'',baseUrl:'https://api.deepseek.com',model:route.model||'deepseek-flash'},...(starting?{decisionProvider:createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:exec.agent})}:{})});
