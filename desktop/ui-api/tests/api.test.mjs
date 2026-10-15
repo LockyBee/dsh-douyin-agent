@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createApiClient, createForwardGate, mergeEvents, publicSettings, saveNativeSettings, watchIsActive, watchStartInput } from '../src/api.mjs';
+import { createApiClient, createForwardGate, mergeEvents, publicSettings, saveNativeSettings, saveNativeMediaKey, watchIsActive, watchStartInput } from '../src/api.mjs';
 
 test('会话凭证只进入本机请求头，bootstrap返回状态不暴露token', async () => {
   const calls = [];
@@ -31,6 +31,15 @@ test('转发只接受真实用户事件，同一选择不重试，人工核对�
   assert.throws(() => gate.take({ isTrusted: true }), /已提交/);
   assert.throws(() => gate.reset({ isTrusted: false }), /亲自/); assert.equal(gate.locked, true);
   gate.reset({ isTrusted: true }); assert.equal(gate.locked, false);
+});
+
+test('音频 Key 仅交给窄桌面 IPC，收据不回显任何凭据', async () => {
+  let called;
+  const receipt = await saveNativeMediaKey({ saveMediaKey: async value => { called = value; return { ...value, configured: true, unexpected: '不回显' }; } }, { backend: 'mimo', apiKey: ' synthetic-mimo-key ', enabled: true });
+  assert.deepEqual(called, { backend: 'mimo', apiKey: 'synthetic-mimo-key' });
+  assert.deepEqual(receipt, { backend: 'mimo', configured: true, storage: 'shared-env' });
+  assert.doesNotMatch(JSON.stringify(receipt), /synthetic|不回显/);
+  await assert.rejects(saveNativeMediaKey(undefined, { backend: 'mimo', apiKey: 'synthetic' }), /新版/);
 });
 
 test('轮询按revision去重并限制保留数量，工具结果仍归属原任务', () => {

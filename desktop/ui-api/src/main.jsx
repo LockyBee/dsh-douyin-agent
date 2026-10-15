@@ -9,7 +9,7 @@ import '@dsh/theme/scrollbar.css';
 import '@dsh/theme/gradient-shadow-text.css';
 import '@dsh/theme/shiki.css';
 import './style.css';
-import { createApiClient, publicSettings, saveNativeSettings, createForwardGate, mergeEvents, watchIsActive } from './api.mjs';
+import { createApiClient, publicSettings, saveNativeSettings, saveNativeMediaKey, createForwardGate, mergeEvents, watchIsActive } from './api.mjs';
 import { WatchControls, WatchView, PersonaPanel } from './watch-persona.jsx';
 
 const MARKDOWN_LABELS = { code: { copyLabel: '复制代码', copiedLabel: '已复制' }, footnotes: '注释' };
@@ -24,7 +24,7 @@ function Panel({ title, badge, children }) { return <section className="panel"><
 function Note({ children, error = false }) { return <p className={error ? 'notice error' : 'notice'} role={error ? 'alert' : undefined}>{children}</p>; }
 function Data({ label = '查看返回数据', value }) { return <JsonBlock label={label} payload={value} truncatedLabel={truncated} />; }
 
-function ApiSettings({ settings, bridge, onSaved, onClose, run, busy, operationActive, watchActive, onStopWatch }) {
+function ApiSettings({ settings, bridge, onSaved, onClose, run, busy, operationActive, watchActive, onStopWatch, onOpenDouyin, openingDouyin, connected, operationError }) {
   const [key, setKey] = useState(''), [baseUrl, setBase] = useState(settings.baseUrl), [model, setModel] = useState(settings.model), [remember, setRemember] = useState(settings.remember);
   const [failure, setFailure] = useState('');
   const dirty = useRef(false);
@@ -39,6 +39,9 @@ function ApiSettings({ settings, bridge, onSaved, onClose, run, busy, operationA
   return <div className="settings-scrim"><section className="api-dialog" role="dialog" aria-modal="true" aria-labelledby="api-title">
     <div className="brand-icon">鱼</div><h1 id="api-title">{settings.configured ? '模型与共享记忆' : '先连接你的 DeepSeek'}</h1>
     <p className="muted">输入 API Key 后即可使用。软件独立运行，不需要启动 DSH。</p>
+    <Button size="sm" variant="outline" onClick={onOpenDouyin} disabled={!connected || openingDouyin}>{openingDouyin ? '正在打开抖音…' : '打开抖音'}</Button>
+    <p className="notice">可先打开专用抖音窗口登录。打开页面不开始视频计时。</p>
+    {operationError && <Note error>{operationError}</Note>}
     {operationActive && <Note>请先停止正在执行的任务、自主观看、自动回复或转发，再修改模型设置。{watchActive && <Button size="sm" onClick={onStopWatch}>停止当前自主观看</Button>}</Note>}
     <form onSubmit={event => { void run('settings', () => save(event)); }}>
       <Field title="API Key" hint="通过桌面进程交给模型接口，本机 HTTP 接口不接收或返回密钥。"><Input aria-label="API Key" type="password" autoComplete="off" value={key} onChange={event => setKey(event.target.value)} maxLength={4096} required={!settings.configured} placeholder={settings.configured ? '留空沿用现有 API Key' : ''} autoFocus /></Field>
@@ -68,14 +71,22 @@ function VideoPanel({ state, api, run, busy, children }) {
   </Panel>;
 }
 
-function AudioPanel({ state, api, run, busy }) {
+function AudioPanel({ state, api, run, busy, bridge, operationActive }) {
   const [enabled, setEnabled] = useState(false), [backend, setBackend] = useState('local-whisper');
+  const [mediaKey, setMediaKey] = useState(''), [keyNote, setKeyNote] = useState('');
   const dirty = useRef(false);
   useEffect(() => { if (state && !dirty.current) { setEnabled(state.enabled === true); setBackend(state.backend); } }, [state]);
   const info = state?.backends?.[backend] || state?.providers?.[backend];
   return <Panel title="音频理解" badge={<Tag>{state?.enabled ? '已开启' : '默认关闭'}</Tag>}>
     <div className="switch-row"><span>读取视频声音</span><Switch label="读取视频声音" checked={enabled} onChange={value => { dirty.current = true; setEnabled(value); }} /></div>
-    <Field title="音频后端"><select aria-label="音频后端" value={backend} onChange={event => { dirty.current = true; setBackend(event.target.value); }}><option value="local-whisper">本机 Whisper</option><option value="mimo">MiMo</option><option value="minimax">MiniMax</option></select></Field>
+    <Field title="音频后端"><select aria-label="音频后端" value={backend} onChange={event => { dirty.current = true; setBackend(event.target.value); setMediaKey(''); setKeyNote(''); }}><option value="local-whisper">本机 Whisper</option><option value="mimo">MiMo</option><option value="minimax">MiniMax</option></select></Field>
+    {backend !== 'local-whisper' && <form onSubmit={event => { event.preventDefault(); if (operationActive || !mediaKey.trim()) return; void run('mediaKey', async () => { await saveNativeMediaKey(bridge, { backend, apiKey: mediaKey }); setMediaKey(''); setKeyNote('已保存共享音频 Key。保存不会开启音频或发起云端请求。'); }); }}>
+      <Field title={`${backend === 'mimo' ? 'MiMo' : 'MiniMax'} API Key`} hint="保存在本机共享媒体 .env 中（明文），软件与插件共用；不回显已保存的 Key。"><Input aria-label={`${backend === 'mimo' ? 'MiMo' : 'MiniMax'} API Key`} type="password" autoComplete="off" maxLength={4096} value={mediaKey} onChange={event => { setMediaKey(event.target.value); setKeyNote(''); }} placeholder={info?.available ? '已配置；填写后替换' : '填写音频服务的 API Key'} /></Field>
+      <Button size="sm" type="submit" variant="outline" disabled={!bridge?.saveMediaKey || operationActive || busy.has('mediaKey') || !mediaKey.trim()}>{busy.has('mediaKey') ? '正在保存…' : '保存音频 Key'}</Button>
+      {!bridge?.saveMediaKey && <Note>此窗口不支持保存音频 Key，请使用新版软件，或在共享媒体 .env 填写 {backend === 'mimo' ? 'XIAOMI_API_KEY' : 'MINIMAX_API_KEY'}。</Note>}
+      {operationActive && <Note>停止当前任务、自主观看及自动回复后可更换音频 Key。</Note>}
+      {keyNote && <Note>{keyNote}</Note>}
+    </form>}
     <div className="actions"><Button size="sm" variant="outline" disabled={busy.has('audioSave')} onClick={() => { void run('audioSave', async () => { await api('/api/media/configure', { enabled, backend }); dirty.current = false; }); }}>保存音频设置</Button><Button size="sm" onClick={() => { dirty.current = false; void run('audioRefresh', () => api('/api/media/state')); }}>刷新</Button></div>
     <Note>{info?.available === true ? '后端依赖已就绪。' : info?.available === false ? '所选后端尚未就绪。' : '后端可用性尚未确认。'} 音频处理可能需要额外配置或费用。</Note>
   </Panel>;
@@ -201,6 +212,7 @@ export function App() {
     return () => { alive = false; clearInterval(timer); pollRef.current = null; };
   }, [client, bridge]);
   const api = (route, body) => client.request(route, body);
+  const openDouyin = () => { void run('browserOpen', () => api('/api/browser/open', {})); };
   async function submit(event) {
     event.preventDefault(); if (submitLock.current || watchActive || !watchReady || lock.current.has('watchStart') || !configured || !allowed || !connected || !instruction.trim() || busy.has('forward')) return;
     submitLock.current = true;
@@ -221,7 +233,7 @@ export function App() {
       <div className="sidebar-label">本次运行的任务</div><div className="task-list">{tasks.map(item => <button className={item.id === selectedTask && view === 'chat' ? 'task-item selected' : 'task-item'} key={item.id} onClick={() => { setSelectedTask(item.id); setView('chat'); }}><span>{item.instruction || '视频任务'}</span><small>{statusLabel(item.status)}</small></button>)}{!tasks.length && <p className="sidebar-empty">任务记录会出现在这里。</p>}</div>
       <div className="sidebar-bottom"><button className="nav-link" onClick={() => setSettingsOpen(true)}>⚙ 模型与记忆设置</button><div className="connection"><StateDot state={connected ? running ? 'ongoing' : 'done' : 'warning'} /><span>{connected ? running ? '正在执行任务' : '本机服务已连接' : '正在连接本机服务'}</span></div></div>
     </aside>
-    <main className={`${frame.centerCol} main-column`}><header className="topbar"><div><strong>{view === 'memory' ? '共享记忆与人格' : view === 'watch' ? '自主观看' : task?.instruction || '对话与视频'}</strong><small>{settings.model || boot?.config?.model}</small></div><Button size="sm" onClick={() => setRightOpen(old => !old)}>{rightOpen ? '收起设置' : '展开设置'}</Button></header>
+    <main className={`${frame.centerCol} main-column`}><header className="topbar"><div><strong>{view === 'memory' ? '共享记忆与人格' : view === 'watch' ? '自主观看' : task?.instruction || '对话与视频'}</strong><small>{settings.model || boot?.config?.model}</small></div><div className="actions">{settings.configured && !settingsOpen && <Button size="sm" variant="outline" disabled={!connected || busy.has('browserOpen')} onClick={openDouyin}>{busy.has('browserOpen') ? '正在打开抖音…' : '打开抖音'}</Button>}<Button size="sm" onClick={() => setRightOpen(old => !old)}>{rightOpen ? '收起设置' : '展开设置'}</Button></div></header>
       {error && <div className="global-error" role="alert"><span>{error}</span><button aria-label="关闭提示" onClick={() => setError('')}>×</button></div>}
       {boot?.watch?.available && !watchReady && <div className="watch-running-strip" role="status">自主观看状态尚未核实，请等待本机服务回读后再开始操作。</div>}
       {watchActive && <div className="watch-running-strip" role="status"><span>{statusLabel(watch?.status)} · 自主观看剩余 {Math.max(0, Math.floor(video?.remainingSeconds ?? watch?.remainingSeconds ?? 0))} 秒</span><Button size="sm" disabled={busy.has('watchStop')} onClick={stopWatch}>停止当前自主观看</Button></div>}
@@ -230,8 +242,8 @@ export function App() {
         <div className="composer-area"><div className="quick-actions">{EXAMPLES.map(([label, value]) => <button key={label} type="button" onClick={() => setInstruction(value)}>{label}</button>)}</div><form className="composer" onSubmit={submit}><textarea aria-label="视频任务" placeholder={configured ? '告诉大肥鱼这次想看什么…' : '先在设置中连接 API Key'} maxLength={4000} value={instruction} onChange={event => setInstruction(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form.requestSubmit(); } }} /><div className="composer-footer"><span>{boot?.limits ? `最多 ${boot.limits.maxToolCalls} 次工具 · ${boot.limits.taskTimeoutSeconds} 秒` : 'Enter 发送 · Shift + Enter 换行'}</span>{running ? <Button variant="outline" disabled={busy.has('stop')} onClick={() => { void run('stop', () => api('/api/stop', {})); }}>■ 停止任务</Button> : <Button variant="primary" type="submit" disabled={watchActive || !watchReady || busy.has('watchStart') || !configured || !connected || !allowed || !instruction.trim() || busy.has('task') || busy.has('forward')}>开始任务 ↑</Button>}</div></form>{watchActive && <p className="composer-hint">自主观看正在运行。停止后可手动下达视频任务。</p>}{!allowed && <p className="composer-hint">{video?.reason || '请先在右侧开始新一轮视频。'}</p>}</div>
       </>}
     </main>
-    {rightOpen && <aside className="business-sidebar" aria-label="业务设置"><div className="business-heading"><strong>业务设置</strong><small>由你明确控制</small></div>{boot?.videoTime?.enabled ? <VideoPanel state={video} api={api} run={run} busy={busy}>{watchControls}</VideoPanel> : watchControls}<BrowserPanel browser={browser} onPick={pick} />{boot?.media?.available && <AudioPanel state={audio} api={api} run={run} busy={busy} />}<ChatPanel state={chat} api={api} run={run} busy={busy} configured={configured} />{boot?.forward?.available && <ForwardPanel api={api} run={run} busy={busy} allowed={allowed && configured && connected && watchReady} running={manualBusy || watchActive || busy.has('watchStart')} suggestedUrl={suggestedUrl} />}</aside>}
-    {(!settings.configured || settingsOpen) && <ApiSettings settings={settings} bridge={bridge} onSaved={saved} onClose={() => setSettingsOpen(false)} run={run} busy={busy.has('settings') || busy.has('clearKey')} operationActive={operationActive || !watchReady} watchActive={watchActive} onStopWatch={stopWatch} />}
+    {rightOpen && <aside className="business-sidebar" aria-label="业务设置"><div className="business-heading"><strong>业务设置</strong><small>由你明确控制</small></div>{boot?.videoTime?.enabled ? <VideoPanel state={video} api={api} run={run} busy={busy}>{watchControls}</VideoPanel> : watchControls}<BrowserPanel browser={browser} onPick={pick} />{boot?.media?.available && <AudioPanel state={audio} api={api} run={run} busy={busy} bridge={bridge} operationActive={operationActive} />}<ChatPanel state={chat} api={api} run={run} busy={busy} configured={configured} />{boot?.forward?.available && <ForwardPanel api={api} run={run} busy={busy} allowed={allowed && configured && connected && watchReady} running={manualBusy || watchActive || busy.has('watchStart')} suggestedUrl={suggestedUrl} />}</aside>}
+    {(!settings.configured || settingsOpen) && <ApiSettings settings={settings} bridge={bridge} onSaved={saved} onClose={() => setSettingsOpen(false)} run={run} busy={busy.has('settings') || busy.has('clearKey')} operationActive={operationActive || !watchReady} watchActive={watchActive} onStopWatch={stopWatch} onOpenDouyin={openDouyin} openingDouyin={busy.has('browserOpen')} connected={connected} operationError={error} />}
   </div>;
 }
 

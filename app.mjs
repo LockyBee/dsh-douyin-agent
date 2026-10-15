@@ -70,6 +70,7 @@ export function createApiServer({ controller, config, personaMemory, watchServic
   let lastTask = null;
   let lastBrowserState = null;
   let forwardAbort = null;
+  let browserAbort = null;
   let stopping = false;
   let stopPromise;
   let cleanupPromise;
@@ -108,6 +109,17 @@ export function createApiServer({ controller, config, personaMemory, watchServic
       }
       if (!url.pathname.startsWith('/api/')) return reply(response, 404, { error: '地址不存在。' });
       if (!tokenMatches(request.headers['x-session-token'], token)) return reply(response, 403, { error: '控制台会话校验失败，请刷新页面。' });
+      if (url.pathname === '/api/browser/open' && request.method === 'POST') {
+        const body = await readJson(request);
+        if (Object.keys(body).length) return reply(response, 400, { error: '打开抖音不接受额外参数。' });
+        if (typeof controller.openBrowser !== 'function') return reply(response, 503, { error: '专用浏览器入口尚未就绪。' });
+        if (browserAbort) return reply(response, 409, { error: '专用浏览器正在打开，请等待当前操作完成。' });
+        const abort = new AbortController(); browserAbort = abort;
+        const closed = () => { if (!response.writableEnded) abort.abort(new Error('窗口已关闭，停止准备浏览器。')); };
+        response.once('close', closed);
+        try { return reply(response, 200, await controller.openBrowser({ signal: AbortSignal.any([abort.signal, AbortSignal.timeout(75_000)]) })); }
+        finally { response.removeListener('close', closed); if (browserAbort === abort) browserAbort = null; }
+      }
       if (url.pathname.startsWith('/api/watch/')) {
         if (!watchService) return reply(response, 503, { error: '自主观看模块尚未就绪。' });
         if (request.method === 'GET' && url.pathname === '/api/watch/state') return reply(response, 200, watchService.state());
@@ -272,7 +284,7 @@ export function createApiServer({ controller, config, personaMemory, watchServic
     if (watchService) { watchService.config = config; if (watchService.agent) watchService.agent.config = config; }
     return publicApiConfig(config);
   };
-  server.stopTask = () => { const error = new Error('控制台已关闭。'); active?.abort.abort(error); forwardAbort?.abort(error); watchService?.cancel(); };
+  server.stopTask = () => { const error = new Error('控制台已关闭。'); active?.abort.abort(error); forwardAbort?.abort(error); browserAbort?.abort(error); watchService?.cancel(); };
   server.enforceVideoLimits = enforceVideo;
   const cleanup = () => cleanupPromise ??= (async () => {
     stopping = true;

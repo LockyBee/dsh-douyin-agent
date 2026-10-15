@@ -21,7 +21,7 @@ export const DOMAIN_FILES = Object.freeze([
   'chat-message.mjs', 'chat-service.mjs', 'core.mjs', 'message-tracker.mjs', 'memory.mjs',
   'qq-sync.mjs', 'runtime-paths.mjs', 'tool-definitions.mjs', 'video-forward.mjs',
   'video-limits.mjs', 'playwright-runtime.mjs',
-  'persona-memory.mjs', 'autonomous-watch.mjs',
+  'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs',
 ]);
 const MEDIA_FILES = ['index.mjs', 'local_whisper.py', 'mimo_bridge.py', 'requirements.txt', 'setup_local.py', 'README.md', 'PROVENANCE.json'];
 const VENDOR_FILES = [

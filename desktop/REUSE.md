@@ -1,12 +1,16 @@
 # 独立软件复用记录
 
-独立软件 1.1.0 直接连接用户填写的模型接口，使用 Electron 桌面窗口和随包 Node 后台。无需安装、启动或捆绑 DSH Host、Cordis、QQ 服务或社区 Desktop 壳。原生 DSH 插件作为同仓库的另一个入口继续维护，当前源码为 v6／27 工具目录。
+独立软件 1.1.1 直接连接用户填写的模型接口，使用 Electron 桌面窗口和随包 Node 后台。无需安装、启动或捆绑 DSH Host、Cordis、QQ 服务或社区 Desktop 壳。原生 DSH 插件作为同仓库的另一个入口继续维护，当前源码为 v7／27 工具目录，另有无需 LLM 的 `/douyin-open` 命令。
 
 界面选择官方 `deepseek-ai/deepseek-harness` 固定提交 `fb2c4b9e698e30edb738bca4cf0618587db7d203` 的 MIT React 基础组件、主题和布局 CSS。它们可独立编译到前端，保留原许可证；软件自行实现任务、API 设置、时间限制、私信与转发表单的状态和交互。复用文件及来源校验见 [UPSTREAM.md](UPSTREAM.md)。
 
 业务层沿用本项目已有的 `BrowserController`、`ChatService`、`VideoLimits`、媒体适配及记忆存储。后台使用物理 Node 的 HTTP、SQLite 和 IPC，浏览器通过 Playwright 连接系统 Edge。新增桌面生命周期、API Key 输入及可选系统加密、静态资源服务、可信转发按钮和 Windows 打包入口。
 
 本次在这些领域对象上补 `PersonaMemory` 和 `AutonomousWatch`，没有引入整套 DSH UI、RPC 或社区资产。自主观看及人格页面继续使用已引入的官方 Button、Input、Tag 和 MarkdownText 等 React 组件，并接入现有视频设置与 REST 会话鉴权；没有新增运行依赖。原生插件另复用已装 DSH 的 SystemPrompt 动态变量／上下文、当前模型路由与附件能力，不把这套运行服务带进独立软件。
+
+1.1.1 继续复用现有 CDP 与媒体环境文件读取，只补打开窗口的宿主入口、音频 Key 表单和有字段白名单的本机 writer。首页及首次 Key 表单均可“打开抖音”，不需 Key、不开始计时，准备页暂停；活跃自主观看只聚焦现有页。原生命令复用 DSH commands SDK，不请求模型。Input 修复只调整本地 CSS，不改上游组件，不加外部依赖。
+
+MiMo／MiniMax 的 Key 从“业务设置 → 音频理解”选择后端后填写，经窄 Electron IPC 写入共享媒体 `.env`。该配置在本机明文保存，不经本机 HTTP、不回显、不自动启用音频；`MediaAdapter` 读取时刷新。Whisper 无需云 Key，音频默认关闭。主模型 Key 的可选系统加密保存与这份媒体配置分别处理。
 
 两种入口读取同一个全局位置记录，使用 `memoryDir` 与精确的 `memoryDbPath` 访问同一记忆文件夹和数据库。登记时保留旧库，不复制或迁移数据；发现路径冲突或损坏记录便停止，不静默创建另一套记忆。
 
@@ -18,6 +22,6 @@
 
 Node、依赖锁文件、来源与许可证在构建阶段分别核对；后台测试、界面合成测试、打包后的软件冷启动、真实模型和真人发送分开记录。新增软件不会重复原先已授权完成的真人私信或作品转发测试。当前验收范围见 [README.md](README.md)。
 
-本次 UI 合成与许可测试 12／12、v6 原生 SDK 临时测试 25／25 通过；根目录与 desktop 完整回归实际运行 237 项，230 项通过、0 项失败、7 项可选检查跳过，用时约 19.7 秒。1.1.0 的 `win-unpacked` 已实际打包回读，随包 Node 24.17.0、SQLite 3.53.0、27 项工具及 persona／watch 模块可导入，没有 DSH 运行包。
+1.1.0 的 UI 合成与许可测试 12／12、v6 原生 SDK 临时测试 25／25 通过；该阶段根目录与 desktop 完整回归实际运行 237 项，230 项通过、0 项失败、7 项可选检查跳过，用时约 19.7 秒。1.1.0 的 `win-unpacked` 已实际打包回读，随包 Node 24.17.0、SQLite 3.53.0、27 项工具及 persona／watch 模块可导入，没有 DSH 运行包。
 
-新界面能力在两个临时 Edge 合成流程通过，真实 Electron 新窗口尚未验收，便携包结果与最终哈希另记于 [VERIFICATION.md](VERIFICATION.md)。旧 v5 的 22 项真实工具和 1.0.1 包记录继续保留，不改写成新增能力已通过。
+1.1.1 当前 UI 完整测试 15／15 通过，包括新增输入外观 1／1、打开入口及音频 Key 合成流程 1／1。一键打开后端 6／6、相关回归 32／32，v7 原有与命令 SDK 测试合计 32／32 通过。最终完整测试数字及软件包结果另记于 [VERIFICATION.md](VERIFICATION.md)，不把合成页面当作真实抖音、云端 Key 或新 Electron 窗口验收。旧 v5 的 22 项真实工具、1.0.1 包与 1.1.0 结果分别保留，不混算为新增能力已通过。

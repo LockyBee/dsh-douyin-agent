@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { ApiProcess } from './api-process.mjs';
 import { ensureSharedLocation, prepareApiRuntime, verifyNode } from './prepare-api-runtime.mjs';
+import { saveSharedMediaKey } from './media-key-store.mjs';
 
 app.setName('大肥鱼抖音助手');
 app.commandLine.appendSwitch('lang', 'zh-CN');
@@ -69,6 +70,11 @@ else {
     if (current.apiKey) sensitive.add(current.apiKey);
     backend = new ApiProcess(node, runtime, { env: { ...process.env, ...shared.env, DOUYIN_NODE_EXECUTABLE: node } });
     await backend.start(current);
+    ipcMain.handle('douyin:save-media-key', async (event, input) => {
+      authorized(event);
+      if (typeof input?.apiKey === 'string' && input.apiKey) sensitive.add(input.apiKey);
+      return saveSharedMediaKey(input, { envFile: shared.paths.mediaEnvFile, explicit: true });
+    });
     ipcMain.handle('douyin:get-settings', async event => { authorized(event); return publicSettings(); });
     ipcMain.handle('douyin:save-settings', async (event, input) => {
       authorized(event);

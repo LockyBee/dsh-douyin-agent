@@ -10,6 +10,7 @@ import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
 import { PersonaMemory } from './persona-memory.mjs';
+import { BrowserLauncher, connectDedicatedBrowser } from './browser-launcher.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const VIDEO_ACTIONS=new Set(['douyin_open','douyin_search','douyin_open_video','douyin_next','douyin_previous','douyin_observe','douyin_screenshot','douyin_play','douyin_listen']);
@@ -199,7 +200,7 @@ export class BrowserController {
     this.limitsEnabled = ['api','dsh'].includes(source);
   }
   limits() { return this.videoLimits ??= new VideoLimits(); }
-  getMediaAdapter() { return this.mediaPromise??=import('./media/index.mjs').then(({MediaAdapter})=>new MediaAdapter()); }
+  getMediaAdapter() { return this.mediaPromise??=import('./media/index.mjs?v=7').then(({MediaAdapter})=>new MediaAdapter()); }
   getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
   watchVideoLimits() {
     if (!this.limitsEnabled || this.cancelLimitsWatch) return;
@@ -251,10 +252,23 @@ export class BrowserController {
       .catch(error=>{this.chatPromise=null;throw error;});
     return this.chatPromise;
   }
+  openBrowser({ signal } = {}) {
+    const operation = this.queue.catch(() => {}).then(async () => {
+      const release = await lock('browser-launcher', signal);
+      try {
+        this.browserLauncher ??= new BrowserLauncher({
+          getBrowser: async currentSignal => { if (!this.browser?.isConnected()) { this.browser = await connectDedicatedBrowser(await endpoint(currentSignal), { signal: currentSignal }); this.page = null; } return this.browser; },
+          getWatchState: () => { const worker = optionalRecord(path.join(this.limits().stateDir, 'watch-loop.lock')); if (!worker) return null; if (!Number.isSafeInteger(worker.pid) || worker.pid < 1 || !['api', 'dsh'].includes(worker.source) || typeof worker.runId !== 'string') throw new Error('自主观看锁无法核对，未打开或改动入口页。'); return alive(worker.pid) ? worker : null; },
+        });
+        return await this.browserLauncher.open({ signal });
+      } finally { release(); }
+    });
+    this.queue = operation; return operation;
+  }
   async connect(signal) {
     aborted(signal);
     if (this.browser?.isConnected() && this.page && !this.page.isClosed()) return this.page;
-    this.browser = await chromium.connectOverCDP(await endpoint(signal), { timeout: 7000 });
+    if (!this.browser?.isConnected()) { this.browser = await connectDedicatedBrowser(await endpoint(signal), { signal }); this.page = null; }
     const context = this.browser.contexts()[0];
     const label = `deepseek-douyin-${this.source}`;
     for (const candidate of context.pages()) {

@@ -125,8 +125,8 @@ async function cleanTemporary(directory) {
 }
 
 export class MediaAdapter {
-  constructor({ config, envFile, settingsFile = resolveRuntimePaths().mediaSettingsFile, fetchImpl = fetch, python, ffmpeg, ffprobe, limits = {} } = {}) {
-    this.configPromise = config ? Promise.resolve(config) : loadMediaConfig({ envFile });
+  constructor({ config, env, envFile, settingsFile = resolveRuntimePaths().mediaSettingsFile, fetchImpl = fetch, python, ffmpeg, ffprobe, limits = {} } = {}) {
+    this.configOverride = config; this.env = env; this.envFile = envFile;
     this.settingsFile=settingsFile;
     this.settingsWrite=Promise.resolve();
     this.fetch = fetchImpl; this.pythonOverride = python; this.ffmpegOverride = ffmpeg; this.ffprobeOverride = ffprobe;
@@ -151,7 +151,7 @@ export class MediaAdapter {
   }
   setEnabled(enabled,options={}) {return this.saveSettings({enabled},options);}
   async runtime() {
-    const config = await this.configPromise;
+    const config = this.configOverride ?? await loadMediaConfig({ env: this.env, envFile: this.envFile });
     if(config.DOUYIN_MEDIA_WHISPER_MODEL&&!LOCAL_MODELS.has(config.DOUYIN_MEDIA_WHISPER_MODEL))throw new Error('本地Whisper模型须从受支持的模型名称中选择。');
     const paths = resolveRuntimePaths();
     const localPython = path.join(paths.mediaRuntimeRoot,'.venv','Scripts','python.exe');

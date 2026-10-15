@@ -1,4 +1,4 @@
-const LONG = new Set(['/api/chat/contacts', '/api/chat/configure', '/api/chat/start', '/api/forward/contacts', '/api/forward', '/api/watch/start', '/api/watch/stop']);
+const LONG = new Set(['/api/browser/open', '/api/chat/contacts', '/api/chat/configure', '/api/chat/start', '/api/forward/contacts', '/api/forward', '/api/watch/start', '/api/watch/stop']);
 
 export function createApiClient(fetcher = globalThis.fetch.bind(globalThis)) {
   let token = '';
@@ -48,6 +48,14 @@ export async function saveNativeSettings(bridge, input) {
   const { apiKey, baseUrl, model, remember } = input;
   if (typeof apiKey !== 'string' || apiKey.length > 4096 || typeof baseUrl !== 'string' || typeof model !== 'string' || typeof remember !== 'boolean') throw new Error('模型设置格式不正确。');
   return publicSettings(await bridge.saveSettings({ apiKey, baseUrl, model, remember }));
+}
+
+export async function saveNativeMediaKey(bridge, input) {
+  if (!bridge?.saveMediaKey) throw new Error('请使用新版独立桌面软件填写音频 Key；插件可在共享媒体 .env 配置。');
+  if (!input || !['mimo', 'minimax'].includes(input.backend) || typeof input.apiKey !== 'string' || !input.apiKey.trim() || input.apiKey.length > 4096) throw new Error('请选择云端音频后端并填写 API Key。');
+  const result = await bridge.saveMediaKey({ backend: input.backend, apiKey: input.apiKey.trim() });
+  if (result?.configured !== true || result?.backend !== input.backend) throw new Error('音频 Key 未确认保存，请重试。');
+  return { backend: input.backend, configured: true, storage: 'shared-env' };
 }
 
 export function createForwardGate() {

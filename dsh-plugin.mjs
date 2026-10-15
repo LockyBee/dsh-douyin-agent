@@ -125,6 +125,27 @@ export function createNativeToolDefinitions({ ctx, getController, getWatch, atta
   }));
 }
 
+// 原生命令由人类界面直接分派，不进入模型或视频工具执行链。
+export function createNativeLaunchCommand({ getController, lifetimeSignal } = {}) {
+  return {
+    name: 'douyin-open',
+    description: '打开抖音专用窗口，不开始或延长刷视频轮次',
+    recordInput: false,
+    async handler({ rawInput, attachments, signal }) {
+      if (rawInput.trim() || attachments.length) return { kind: 'error', text: '/douyin-open 不接收参数或附件。' };
+      const signals = [signal, lifetimeSignal].filter(Boolean);
+      const currentSignal = signals.length ? AbortSignal.any(signals) : undefined;
+      currentSignal?.throwIfAborted();
+      const controller = await getController();
+      currentSignal?.throwIfAborted();
+      const result = await controller.openBrowser({ signal: currentSignal });
+      currentSignal?.throwIfAborted();
+      if (result?.opened !== true) return { kind: 'error', text: '未确认抖音专用窗口已打开，请稍后重试。' };
+      return { kind: 'success', text: typeof result.message === 'string' && result.message.length <= 1000 ? result.message : '已打开抖音专用窗口，未开始或延长刷视频轮次。' };
+    },
+  };
+}
+
 export async function apply(ctx, config = {}) {
   let controllerPromise;
   let watchPromise;
@@ -132,7 +153,7 @@ export async function apply(ctx, config = {}) {
   const getController = () => {
     if (disposed) throw new Error('抖音插件已卸载。');
     // 加载插件时只注册工具，首次调用时才创建控制器、启动浏览器。
-    controllerPromise ??= import('./core.mjs?v=6')
+    controllerPromise ??= import('./core.mjs?v=7')
       .then(({ BrowserController }) => new BrowserController({ ...config, source: 'dsh' }))
       .catch((error) => { controllerPromise = undefined; throw error; });
     return controllerPromise;
@@ -159,16 +180,34 @@ export async function apply(ctx, config = {}) {
   };
   const definitions = createNativeToolDefinitions({ ctx, getController, getWatch, attachPersona:personaBinding.attach });
   const disposers = [];
-  try { for (const tool of definitions) disposers.push(ctx.tools.register(tool)); }
-  catch (error) { for (const dispose of disposers.reverse()) dispose?.(); personaBinding.close(); throw error; }
-  ctx.effect?.(() => async () => {
+  const launchLifetime = new AbortController();
+  let commandFiber, cleanupPromise;
+  const teardown = () => cleanupPromise ??= (async () => {
     disposed = true;
+    launchLifetime.abort(new Error('抖音打开命令已卸载。'));
+    await commandFiber?.dispose();
     personaBinding.close();
     const sharedState=watchPromise?await watchPromise.then(watch=>watch.state()).catch(()=>null):null;
     if(watchPromise) await watchPromise.then(watch=>watch.close()).catch(()=>{});
     for (const dispose of disposers.reverse()) dispose?.();
     if (controllerPromise) await controllerPromise.then((controller) => {if(sharedState?.worker?.alive&&!sharedState.owned&&sharedState.worker.source==='dsh')controller.limitsEnabled=false;return controller.close?.();}).catch(() => {});
-  });
+  })();
+  try {
+    for (const tool of definitions) disposers.push(ctx.tools.register(tool));
+    if (typeof ctx.inject === 'function') {
+      // commands 只作为子作用域依赖；缺少该服务时仍注册完整视频工具目录。
+      commandFiber = ctx.inject(['commands'], commandCtx => {
+        const dependencyLifetime = new AbortController();
+        commandCtx.effect(() => () => dependencyLifetime.abort(new Error('原生命令服务已卸载。')));
+        commandCtx.commands.register(createNativeLaunchCommand({ getController, lifetimeSignal: AbortSignal.any([launchLifetime.signal, dependencyLifetime.signal]) }));
+      });
+      if (optionalService(ctx, 'commands')) await commandFiber.await();
+    } else {
+      const commands = optionalService(ctx, 'commands');
+      if (commands) disposers.push(commands.register(createNativeLaunchCommand({ getController, lifetimeSignal: launchLifetime.signal })));
+    }
+    ctx.effect?.(() => teardown);
+  } catch (error) { await teardown(); throw error; }
 }
 
 export default { name, inject, apply };

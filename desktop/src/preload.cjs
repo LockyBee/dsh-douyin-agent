@@ -5,4 +5,5 @@ contextBridge.exposeInMainWorld('douyinDesktop', Object.freeze({
   clearApiKey: () => ipcRenderer.invoke('douyin:clear-key'),
   openMemoryFolder: () => ipcRenderer.invoke('douyin:open-memory'),
   openPersonaFolder: () => ipcRenderer.invoke('douyin:open-persona'),
+  saveMediaKey: value => ipcRenderer.invoke('douyin:save-media-key', value),
 }));
