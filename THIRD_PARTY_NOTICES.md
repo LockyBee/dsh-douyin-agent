@@ -11,7 +11,7 @@
 
 参考 MIT 项目 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll/tree/a047fde1df2be1ec1d9d7551aa0b5eae6626b319) 的标准 bundle 安装声明、原生设置入口与 Markdown 日报流程，核对提交为 `a047fde1df2be1ec1d9d7551aa0b5eae6626b319`。本项目自行实现抖音设置、模型路由、报告汇总与手改保护，没有复制或打包其 Python、B 站 MCP、字幕获取、登录凭据和定时 headless 任务。
 
-续火花另核对 MIT 项目 [HRuiCcc/dy-xuhuohua](https://github.com/HRuiCcc/dy-xuhuohua) 及 MIT 与 NOTICE 项目 [dr-190/ScriptCat-Douyin-Fire-Helper](https://github.com/dr-190/ScriptCat-Douyin-Fire-Helper)；未复制其发送实现或新增其运行依赖。固定提交、未采用原因与本地复用范围见 [FEATURE-REUSE.md](FEATURE-REUSE.md)。来源核查不代表新版插件已实机加载，也不证明评论发布、平台火花或最小化持续播放已通过。
+续火花另核对 MIT 项目 [HRuiCcc/dy-xuhuohua](https://github.com/HRuiCcc/dy-xuhuohua) 及 MIT 与 NOTICE 项目 [dr-190/ScriptCat-Douyin-Fire-Helper](https://github.com/dr-190/ScriptCat-Douyin-Fire-Helper)；未复制其发送实现或新增其运行依赖。固定提交、未采用原因与本地复用范围见 [功能复用与来源](docs/reuse.md)。来源核查不代表新版插件已实机加载，也不证明评论发布、平台火花或最小化持续播放已通过。
 
 ## 实际保存的媒体源码
 

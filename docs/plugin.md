@@ -89,7 +89,7 @@ pnpm install --frozen-lockfile
 
 ## 可选音频与富媒体
 
-音频可不接入；关闭时无需 MiMo/MiniMax Key。本地 Whisper 是可选本地对白转写；MiMo、MiniMax 是可选云端后端，不是 DSH 主模型的必需配置。插件填写入口为“设置 → 刷抖音 → 音频与密钥”：分别填写 MiMo API Key 或 MiniMax API Key，点击对应保存按钮。留空沿用原有值；界面只显示已配置状态及配置来源，不回显 Key。保存共用本机媒体 `.env`（明文），与独立软件即时共用，不自动开启音频或调用云端；使用云后端还需本人选择后端并保存启用设置。进程同名环境变量优先，页面会提示覆盖状态。依赖与限制见 [media/README.md](media/README.md)，保存开关不下载模型或安装运行环境。
+音频可不接入；关闭时无需 MiMo/MiniMax Key。本地 Whisper 是可选本地对白转写；MiMo、MiniMax 是可选云端后端，不是 DSH 主模型的必需配置。插件填写入口为“设置 → 刷抖音 → 音频与密钥”：分别填写 MiMo API Key 或 MiniMax API Key，点击对应保存按钮。留空沿用原有值；界面只显示已配置状态及配置来源，不回显 Key。保存共用本机媒体 `.env`（明文），与独立软件即时共用，不自动开启音频或调用云端；使用云后端还需本人选择后端并保存启用设置。进程同名环境变量优先，页面会提示覆盖状态。依赖与限制见 [media/README.md](../media/README.md)，保存开关不下载模型或安装运行环境。
 
 表情和分享卡片可采样实际画面；分享视频仍受视频时限约束。封面不等于看完整条，少量帧不等于听懂声音。未支持的普通图片、收到的语音等类型不能假称已理解。
 
@@ -99,15 +99,15 @@ pnpm install --frozen-lockfile
 
 旧 CLI 的 video-policy、session-start、session-end 和 media-enable 等仍保留，仅用于本人维护；用法由本仓库 douyin.ps1 分派，不要求在 DSH 对话输入命令。旧热加载辅助包保留供维护，不能在标准bundle外另注册同名目录；前端模块发现与后端热加载分别检查。GPT/DSH 合作使用上级 bridge.ps1 并遵守轮数/尝试预算，不能新建任务绕过耗尽预算。
 
-安装与设置、日报流程参考 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll) 的MIT项目，具体固定版本、复用边界及续火花候选核查见 [FEATURE-REUSE.md](FEATURE-REUSE.md)。没有打包其B站MCP、Python或定时字幕阅读逻辑。浏览器复用Playwright；原生接口使用正确DSH已装SDK；三份实际内置的可选媒体社区源码及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+安装与设置、日报流程参考 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll) 的MIT项目，具体固定版本、复用边界及续火花候选核查见 [reuse.md](reuse.md)。没有打包其B站MCP、Python或定时字幕阅读逻辑。浏览器复用Playwright；原生接口使用正确DSH已装SDK；三份实际内置的可选媒体社区源码及许可证见 [../THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 ## 当前验收边界
 
-2026-10-16 完整回归共 443 项：436 通过、0 失败、7 项可选检查跳过；原生 SDK 定向检查 45／45 通过。在当前正确 DSH 2.0.17 中，原生设置页已实际挂载，能读取共享人格、时间、许可与媒体设置。本轮没有调用真实模型、打开抖音或执行任何发送，未改变既有设置。实际最小化播放、当前抖音评论 DOM 和收到新消息后的自动回复仍未验证；SDK 的 32 项目录检查不等于独立读取了当前进程的全部工具目录。详细命令、历史失败和边界见 [VERIFICATION-1.3.md](VERIFICATION-1.3.md)。下方历史实测只用于保留证据，不扩写为新版通过。
+2026-10-16 完整回归共 443 项：436 通过、0 失败、7 项可选检查跳过；原生 SDK 定向检查 45／45 通过。在当前正确 DSH 2.0.17 中，原生设置页已实际挂载，能读取共享人格、时间、许可与媒体设置。本轮没有调用真实模型、打开抖音或执行任何发送，未改变既有设置。实际最小化播放、当前抖音评论 DOM 和收到新消息后的自动回复仍未验证；SDK 的 32 项目录检查不等于独立读取了当前进程的全部工具目录。详细命令、历史失败和边界见 [verification/1.3.md](verification/1.3.md)。下方历史实测只用于保留证据，不扩写为新版通过。
 
 ## 验收记录
 
-历史 v8／1.2.0 的预算、行为偏好和自主分享按针对性测试记录，未将旧 17／22 项实机结果扩写为新版实测。软件启动新增受控本机导航的有限重试和去敏诊断，旧错误成功后归档，但真实 `ERR_FAILED(-2)` 成因仍未确定。caret 截图修复只在临时页面验证，不能称真实抖音所有截图故障已消失。完整结果以 [desktop/VERIFICATION.md](desktop/VERIFICATION.md) 为准。
+历史 v8／1.2.0 的预算、行为偏好和自主分享按针对性测试记录，未将旧 17／22 项实机结果扩写为新版实测。软件启动新增受控本机导航的有限重试和去敏诊断，旧错误成功后归档，但真实 `ERR_FAILED(-2)` 成因仍未确定。caret 截图修复只在临时页面验证，不能称真实抖音所有截图故障已消失。完整结果以 [desktop/VERIFICATION.md](../desktop/VERIFICATION.md) 为准。
 
 在 `douyin-browser` 仓库根目录运行：
 
@@ -119,7 +119,7 @@ node --test verification/dsh-plugin.test.mjs verification/native-launch-command.
 
 1.1.0 软件界面合成与许可证测试 12／12 通过，包含两个临时 Edge 流程；当时根目录与 desktop 完整回归实际运行 237 项，230 项通过、0 项失败、7 项可选检查跳过，用时约 19.7 秒。1.1.0 的 `win-unpacked` 已实际打包回读，随包 Node 24.17.0、SQLite 3.53.0、27 项工具及 persona／watch 模块可导入，没有 DSH 运行包。
 
-v7 原生 SDK 的原有 25 项与命令新增 7 项合计 32／32 通过，均使用独立测试 Context，不调用真实模型或当前 DSH 进程。1.1.1 UI 完整测试 15／15 通过，其中新增输入外观 1／1、打开入口及音频 Key 合成流程 1／1；一键打开后端 6／6、相关回归 32／32 通过。它们不代表真实抖音、云端凭据或 v7 原生命令实机可用性已验收；最终完整计数和软件包证据以 [desktop/VERIFICATION.md](desktop/VERIFICATION.md) 为准。下列 17／22 项历史实机结果不计为新增工具或自主模型循环已通过。
+v7 原生 SDK 的原有 25 项与命令新增 7 项合计 32／32 通过，均使用独立测试 Context，不调用真实模型或当前 DSH 进程。1.1.1 UI 完整测试 15／15 通过，其中新增输入外观 1／1、打开入口及音频 Key 合成流程 1／1；一键打开后端 6／6、相关回归 32／32 通过。它们不代表真实抖音、云端凭据或 v7 原生命令实机可用性已验收；最终完整计数和软件包证据以 [desktop/VERIFICATION.md](../desktop/VERIFICATION.md) 为准。下列 17／22 项历史实机结果不计为新增工具或自主模型循环已通过。
 
 真实视频联合验收通过，见 `verification/native-live-workdir/native-plugin-receipt.json`：模型搜索、开作品、收到图片附件并暂停。整体聊天热加载曾因旧动态包冲突失败，回执保留；追加授权验收通过了真实联系人、状态及两人会话读取，旧版原生 17 项工具范围已实际核对。
 

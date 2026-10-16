@@ -1,6 +1,6 @@
 # 大肥鱼 · 独立视频助手
 
-本文说明独立 API 服务，软件版可保留任务对话。插件日常操作使用 DSH“设置 → 刷抖音”的按钮，不需要输入聊天指令，安装与使用见 [PLUGIN-README.md](PLUGIN-README.md)。当前源码为 1.3.0、原生 v9 兼容目录 32 项工具；软件 1.3.0 尚未打包发布或实机验收，本轮保留已有 1.2.0 软件。以下真实 API 与旧版本记录不等于新增功能已实机通过。
+本文说明独立 API 服务，软件版可保留任务对话。插件日常操作使用 DSH“设置 → 刷抖音”的按钮，不需要输入聊天指令，安装与使用见 [plugin.md](plugin.md)。当前源码为 1.3.0、原生 v9 兼容目录 32 项工具；软件 1.3.0 尚未打包发布或实机验收，本轮保留已有 1.2.0 软件。以下真实 API 与旧版本记录不等于新增功能已实机通过。
 
 双击本目录的 `start-api.cmd`，或执行：
 
@@ -28,7 +28,7 @@ $env:DOUYIN_API_PORT = '3218'
 
 `DOUYIN_QQ_ROOT` 可指定另一个 QQ 机器人项目目录。也可以只设置当前进程的 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_BASE_URL`，无需读取 QQ 项目。不要把密钥写入此文档、命令参数或网页。
 
-浏览器控制与记忆读写复用 `core.mjs` 和 `tool-definitions.mjs`；普通视频 API 模型过滤聊天、续火花启停及手动转发等服务入口，没有直接评论工具。API 请求采用 Node.js 内置 `fetch`，不新增框架依赖。软件与插件按同一 `runtime-location.json` 读取 `memoryDir` 和 `memoryDbPath`，沿用既有数据库；新机器默认位置及迁移保护见 [desktop/README.md](desktop/README.md)。`douyin_recall` / `douyin_remember` 负责检索和笔记，QQ 连通状态应查看实际检索和专项验证，不能仅按目录推断。
+浏览器控制与记忆读写复用 `core.mjs` 和 `tool-definitions.mjs`；普通视频 API 模型过滤聊天、续火花启停及手动转发等服务入口，没有直接评论工具。API 请求采用 Node.js 内置 `fetch`，不新增框架依赖。软件与插件按同一 `runtime-location.json` 读取 `memoryDir` 和 `memoryDbPath`，沿用既有数据库；新机器默认位置及迁移保护见 [desktop/README.md](../desktop/README.md)。`douyin_recall` / `douyin_remember` 负责检索和笔记，QQ 连通状态应查看实际检索和专项验证，不能仅按目录推断。
 
 读取作品状态时会自动记录该作品的来源和文案，作为浏览记录；`douyin_remember` 另存用户指定的笔记。页面检索会显示来源和 QQ 是否可读，相关聊天历史保留“未确认为偏好”标记。
 
@@ -53,7 +53,7 @@ $env:DOUYIN_API_PORT = '3218'
 
 “可选音频理解”有独立开关和 `local-whisper`、`minimax`、`mimo` 后端选择。默认关闭，本机 Whisper 不需要云端密钥；两个云端后端需要独立配置凭据。软件在“业务设置 → 音频理解”选择 MiMo 或 MiniMax 后，通过密码框及桌面 IPC 保存 Key；插件在“设置 → 刷抖音 → 音频与密钥”填写，通过 DSH 自身同源设置接口保存。两者共用媒体 `.env`（本机明文），保存不启用音频、不发起云请求，状态仅显示配置是否生效及来源，不返回原值。独立 API 服务的 HTTP 页面仍不接收密钥。当前上层可录取视频短音轨并转写，收到的语音私信仍为未支持类型。本地 Whisper 已真实转写合成 WAV 和无容器时长 WebM。真实抖音已采到 3 秒音轨，但猫咪片段没有有效对白，未验收 ASR 准确性，也不能称听懂声音；见 `verification/audio-browser-live.json`。MiMo/MiniMax 尚未真实云联调。
 
-媒体源码随工具保存，实际复用三个社区项目的固定 commit 原文件及 MIT LICENSE：`ch1bug/dsh-mimo-agent-tools` 的 MiMo 请求正文驱动、`GooDAnDReaDY/dsh-voice` 的本机 Whisper HTTP provider、`moluyao/dsh-minimax-asr` 的 ASR 参数来源。来源、文件哈希和许可见 `media/PROVENANCE.json` 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，安装和开关说明见 [media/README.md](media/README.md)。这些社区源码不是 DeepSeek 官方媒体插件。
+媒体源码随工具保存，实际复用三个社区项目的固定 commit 原文件及 MIT LICENSE：`ch1bug/dsh-mimo-agent-tools` 的 MiMo 请求正文驱动、`GooDAnDReaDY/dsh-voice` 的本机 Whisper HTTP provider、`moluyao/dsh-minimax-asr` 的 ASR 参数来源。来源、文件哈希和许可见 `media/PROVENANCE.json` 与 [../THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)，安装和开关说明见 [media/README.md](../media/README.md)。这些社区源码不是 DeepSeek 官方媒体插件。
 
 旧版“转发作品给好友”手动入口保留，可留空使用当前作品，或输入标准 `https://www.douyin.com/video/数字` 链接，再选择许可好友并点击转发。普通手动视频模型没有可信发送入口。新版自主分享由单独总开关授权：大肥鱼在有限观看中自己选择当前已观察作品与现有许可好友，不要求逐次手选。两种路径均核对名单、关注关系及官方卡片回执，受本轮视频时限约束；结果不明不重试，也不改发文字链接。2026-10-15 旧 DSH 模型提示分支曾返回 `requiresUserAction=true`、`sent=false`，该历史结果不代表新版自主分享已实机。
 
@@ -82,7 +82,7 @@ $env:DOUYIN_API_PORT = '3218'
 | 静默观看 | `GET /api/mode/state`；`POST /api/mode/configure` 只接收 `{silent:boolean}`；无既有受管连接时返回待下一次视频动作应用，不为此打开浏览器 |
 | 自动续火花 | `GET /api/spark/state`；`POST /api/spark/configure` 保存许可策略；`POST /api/spark/start`、`/stop` 只接收 `{}`；`POST /api/spark/resolve` 仅记录核对结果 |
 
-安装、原生设置与日报流程参考 MIT 项目 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll)，没有引入其 Python 或 B 站 MCP。固定提交与适配边界见 [FEATURE-REUSE.md](FEATURE-REUSE.md)。
+安装、原生设置与日报流程参考 MIT 项目 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll)，没有引入其 Python 或 B 站 MCP。固定提交与适配边界见 [reuse.md](reuse.md)。
 
 ## 开发与验证
 

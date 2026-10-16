@@ -2,7 +2,7 @@
 
 Windows 独立桌面软件直接使用用户填写的 API Key 调用模型，控制本机专用 Edge 浏览抖音。基础运行资源随软件提供，使用时无需安装或启动 DSH、Cordis、QQ 服务及 Node.js。当前源码版本为 1.3.0，配套原生 v9 插件有 32 项兼容工具；两种入口共用本地记忆、大肥鱼人格与兴趣。软件 1.3.0 尚未打包发布或完成实机验收，本轮保留现有 1.2.0 软件。下方各旧版本验收记录只覆盖对应版本。
 
-目前优先使用[插件原生设置页](../PLUGIN-README.md)：在 DSH“设置 → 刷抖音”内选模型、设时间、打开抖音并点击启动，不需要输入聊天指令。软件版保留任务对话，使用自己的 API Key。
+目前优先使用[插件原生设置页](../docs/plugin.md)：在 DSH“设置 → 刷抖音”内选模型、设时间、打开抖音并点击启动，不需要输入聊天指令。软件版保留任务对话，使用自己的 API Key。
 
 界面复用 DeepSeek Harness 固定 MIT 源码中的 React 基础组件、主题和布局样式，任务、设置及业务状态由本软件实现。它不是 DeepSeek 官方发行版。来源及复用范围见 [UPSTREAM.md](UPSTREAM.md)、[API_REUSE.md](API_REUSE.md) 和 [REUSE.md](REUSE.md)。
 
@@ -48,7 +48,7 @@ MiMo 的填写位置为“业务设置 → 音频理解 → 音频后端选择 M
 
 共用静默开关对受管页面持续静音，保留用户音量设置，不主动抢焦点；核实整个窗口都是受管页且没有登录验证时才尝试最小化。关闭静默不自动弹出窗口，“打开抖音”可再次显示。浏览器仍是有窗口 Edge，静默不等于 headless；真实抖音最小化后的持续播放尚待验收，不能保证网站不暂停。
 
-安装、原生设置与日报流程参考 MIT 项目 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll)，未引入其 Python 或 B 站 MCP。固定版本、复用边界与测试限制见 [FEATURE-REUSE.md](../FEATURE-REUSE.md)。
+安装、原生设置与日报流程参考 MIT 项目 [c1overzz/dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll)，未引入其 Python 或 B 站 MCP。固定版本、复用边界与测试限制见 [功能复用与来源](../docs/reuse.md)。
 
 ## 与插件共用记忆
 
@@ -117,4 +117,4 @@ node --test tests/api-desktop.test.mjs tests/runtime-paths.test.mjs desktop/test
 node --test desktop/ui-api/tests/*.test.mjs
 ```
 
-历史 1.0.1 打包 EXE 已验证实际启动、合成 Key 加密保存、重启恢复、清除和自有后台退出，详见 [VERIFICATION.md](VERIFICATION.md)；该记录不覆盖 1.1.0 的人格与自主观看。新版本的真实模型、音频云服务、抖音发送及其他机器兼容性未在本次验收。原插件与旧本机 API 的实测记录保留在[主 README](../README.md)。
+历史 1.0.1 打包 EXE 已验证实际启动、合成 Key 加密保存、重启恢复、清除和自有后台退出，详见 [VERIFICATION.md](VERIFICATION.md)；该记录不覆盖 1.1.0 的人格与自主观看。新版本的真实模型、音频云服务、抖音发送及其他机器兼容性未在本次验收。原插件与旧本机 API 的实测记录保留在[主 README](../docs/details.md)。
