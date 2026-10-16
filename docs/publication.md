@@ -32,6 +32,6 @@
 | 目标 | 申请 | 2026-10-16 核对状态 |
 | --- | --- | --- |
 | awesome-dsh-plugin（本机 dshmarket 使用的目录） | [PR #7509](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/7509) | 单份 YAML 已提交，目录格式、README、lint 等检查已通过，完整站点构建仍在进行；之后还需 Submission gate 与维护者审核 |
-| DSH 1024Store | [PR #613](https://github.com/imsai-sh/awesome-deepseek-harness-plugins/pull/613) | static-review 与 merge 均成功，目录已自动合并；网站 Catalog sync 已启动，尚未独立核实线上列表同步完成 |
+| DSH 1024Store | [PR #613](https://github.com/imsai-sh/awesome-deepseek-harness-plugins/pull/613) | static-review、merge 和 Catalog sync 均成功；匿名请求线上 `/api/v2/plugins?q=LockyBee%2Fdsh-douyin-agent&limit=10` 返回 200，并已找到本插件 |
 
 两个 PR 均已独立核对差异，分别只有本插件的一份新增文件。目录审查没有代替插件运行测试或安全审查；npm 仍未发布，1024Store 按其规则先以浏览模式收录。
