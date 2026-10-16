@@ -16,13 +16,22 @@
 
 | 要求 | 本项目情况 |
 | --- | --- |
-| 公开且维护中的仓库，创建满 1 天 | 仓库创建于 2026-10-14；本次准备按用户授权公开 |
+| 公开且维护中的仓库，创建满 1 天 | 仓库创建于 2026-10-14；已按用户授权公开，匿名网页也可访问 |
 | 完整的 `dsh.bundle` | 根 manifest 指向 `./cordis.bundle.yml`，补丁已提交；同时提供客户端声明与导出 |
 | 真实代码、描述准确 | 原生设置和打开入口已有实测；未验收的自主外发、静默等在 README 单列，不声称全部真实可用 |
-| GitHub topic | 公开时添加 `dsh-plugin`，配合 `deepseek-harness`、`douyin` 等分类 |
+| GitHub topic | 已添加 `dsh-plugin`、`deepseek-harness`、`douyin` |
 | 单条 YAML、合理分类 | 只新增 `data/plugins/LockyBee__dsh-douyin-agent.yml`，分类 `browser`；不改他人条目或生成 README |
 | npm 可选 | 当前保留 `private:true` 防止意外 npm 发布；GitHub 公开状态独立于此字段 |
 
 另向 [DSH 1024Store 目录](https://github.com/imsai-sh/awesome-deepseek-harness-plugins/blob/main/CONTRIBUTING.md) 提交单份 JSON。它允许未发布 npm 的插件先以浏览模式收录；不据此宣称已有 npm 安装命令。
 
-两个目标均为社区目录，并非 DeepSeek 官方审批。申请、CI 通过、合并和市场同步分别确认；提交申请不代表已经收录。本文件记录准备依据，最终 PR 链接与状态在本次交付消息中报告。
+两个目标均为社区目录，并非 DeepSeek 官方审批。申请、CI 通过、合并和市场同步分别确认；提交申请不代表已经收录。
+
+## 已提交的申请
+
+| 目标 | 申请 | 2026-10-16 核对状态 |
+| --- | --- | --- |
+| awesome-dsh-plugin（本机 dshmarket 使用的目录） | [PR #7509](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/7509) | 单份 YAML 已提交，目录格式、README、lint 等检查已通过，完整站点构建仍在进行；之后还需 Submission gate 与维护者审核 |
+| DSH 1024Store | [PR #613](https://github.com/imsai-sh/awesome-deepseek-harness-plugins/pull/613) | static-review 与 merge 均成功，目录已自动合并；网站 Catalog sync 已启动，尚未独立核实线上列表同步完成 |
+
+两个 PR 均已独立核对差异，分别只有本插件的一份新增文件。目录审查没有代替插件运行测试或安全审查；npm 仍未发布，1024Store 按其规则先以浏览模式收录。

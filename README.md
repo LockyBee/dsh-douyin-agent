@@ -109,3 +109,5 @@ pnpm run test:native
 ## 许可证
 
 本项目原创代码采用 [MIT](LICENSE)。第三方源码和依赖的原许可证、版权及通知见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+公开准备、分发包检查与社区市场申请见 [发布记录](docs/publication.md)。
