@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from './playwright-runtime.mjs';
 import { MemoryStore } from './memory.mjs?v=2';
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=9';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=10';
 import { VideoLimits } from './video-limits.mjs';
-import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
-import { PersonaMemory } from './persona-memory.mjs?v=9';
+import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs?v=10';
+import { PersonaMemory } from './persona-memory.mjs?v=10';
 import { BrowserLauncher, connectDedicatedBrowser } from './browser-launcher.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -200,8 +200,8 @@ export class BrowserController {
     this.limitsEnabled = ['api','dsh'].includes(source);
   }
   limits() { return this.videoLimits ??= new VideoLimits(); }
-  getMediaAdapter() { return this.mediaPromise??=import('./media/index.mjs?v=7').then(({MediaAdapter})=>new MediaAdapter()); }
-  getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs?v=9').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
+  getMediaAdapter() { return this.mediaPromise??=import('./media/index.mjs?v=10').then(({MediaAdapter})=>new MediaAdapter()); }
+  getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs?v=10').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
   watchVideoLimits() {
     if (!this.limitsEnabled || this.cancelLimitsWatch) return;
     this.cancelLimitsWatch = this.limits().watch({ sources:[this.source], pause:()=>this.pauseForLimits() });
@@ -247,29 +247,29 @@ export class BrowserController {
     return this.personaMemory;
   }
   getChatService() {
-    this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=9'),import('./chat-service.mjs?v=9')])
+    this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=10'),import('./chat-service.mjs?v=10')])
       .then(([{ChatBrowser},{ChatService}])=>{const service=new ChatService({browser:new ChatBrowser({source:this.source==='dsh'?'dsh-chat':'api-chat'})});service.agent.personaMemory=this.getPersonaMemory();return service;})
       .catch(error=>{this.chatPromise=null;throw error;});
     return this.chatPromise;
   }
   getSparkService() {
-    this.sparkPromise ??= Promise.all([this.getChatService(), import('./spark-service.mjs?v=9')]).then(([chat, { SparkService }]) => new SparkService({ browser: chat.browser, config: chat.config, personaMemory: this.getPersonaMemory(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.sparkPromise = null; throw error; });
+    this.sparkPromise ??= Promise.all([this.getChatService(), import('./spark-service.mjs?v=10')]).then(([chat, { SparkService }]) => new SparkService({ browser: chat.browser, config: chat.config, personaMemory: this.getPersonaMemory(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.sparkPromise = null; throw error; });
     return this.sparkPromise;
   }
   getCommenter() {
-    this.commenterPromise ??= import('./comment-browser.mjs?v=9').then(({ CommentBrowser }) => new CommentBrowser({ source: this.source === 'dsh' ? 'dsh' : 'api', videoLimits: this.limits(), stateDir: this.limits().stateDir })).catch(error => { this.commenterPromise = null; throw error; });
+    this.commenterPromise ??= import('./comment-browser.mjs?v=10').then(({ CommentBrowser }) => new CommentBrowser({ source: this.source === 'dsh' ? 'dsh' : 'api', videoLimits: this.limits(), stateDir: this.limits().stateDir })).catch(error => { this.commenterPromise = null; throw error; });
     return this.commenterPromise;
   }
   getComments() {
-    this.commentsPromise ??= import('./autonomous-comments.mjs?v=9').then(({ AutonomousComments }) => new AutonomousComments({ controller: this, personaMemory: this.getPersonaMemory(), videoLimits: this.limits(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.commentsPromise = null; throw error; });
+    this.commentsPromise ??= import('./autonomous-comments.mjs?v=10').then(({ AutonomousComments }) => new AutonomousComments({ controller: this, personaMemory: this.getPersonaMemory(), videoLimits: this.limits(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.commentsPromise = null; throw error; });
     return this.commentsPromise;
   }
   getReport() {
-    this.reportPromise ??= import('./daily-report.mjs?v=9').then(({ DailyReport }) => new DailyReport({ personaMemory: this.getPersonaMemory() })).catch(error => { this.reportPromise = null; throw error; });
+    this.reportPromise ??= import('./daily-report.mjs?v=10').then(({ DailyReport }) => new DailyReport({ personaMemory: this.getPersonaMemory() })).catch(error => { this.reportPromise = null; throw error; });
     return this.reportPromise;
   }
   getWatchMode() {
-    this.modePromise ??= import('./watch-mode.mjs?v=9').then(({ WatchMode }) => new WatchMode({ stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' }));
+    this.modePromise ??= import('./watch-mode.mjs?v=10').then(({ WatchMode }) => new WatchMode({ stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' }));
     return this.modePromise;
   }
   async applyWatchMode({ minimize = false } = {}) {
@@ -425,7 +425,7 @@ export class BrowserController {
       if (name==='douyin_recall') return this.store().recall({query:args.query??'',limit:args.limit??10});
       if (name==='douyin_persona_status') return this.getPersonaMemory().snapshot();
       if (name==='douyin_watch_status') {
-        const {AutonomousWatch}=await import('./autonomous-watch.mjs?v=9');
+        const {AutonomousWatch}=await import('./autonomous-watch.mjs?v=10');
         this.watchStatusReader??=new AutonomousWatch({controller:this,config:{},videoLimits:this.limits(),personaMemory:this.getPersonaMemory(),source:this.source==='dsh'?'dsh':'api',stateDir:this.limits().stateDir});
         return this.watchStatusReader.state();
       }

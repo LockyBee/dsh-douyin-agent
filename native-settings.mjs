@@ -22,7 +22,7 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
       const controller = await getController();
       if (req.method === 'GET' && url.pathname === `${PREFIX}/state`) {
         const [spark, comments, reports] = await Promise.all([getSpark(), getComments(), getReport()]);
-        return send(res, 200, { token, video: controller.limits().state(), spark: spark.state(), comments: comments.state(), reports: await reports.state(), persona: controller.getPersonaMemory().snapshot(), mode: (await getMode()).state(), model: modelSettings.state(), watch: (await getWatch()).state(), ...(getShare ? { share: (await getShare()).state() } : {}), ...(getChat ? { chat: (await getChat()).state() } : {}), ...(getMedia ? { media: await (await getMedia()).status() } : {}), setup: { browser: 'Microsoft Edge', audioOptional: true, independentAppRequired: false, model: '使用 DSH 已配置提供商，不需要在这里填写 API Key。' } });
+        return send(res, 200, { token, video: controller.limits().state(), spark: spark.state(), comments: comments.state(), reports: await reports.state(), persona: controller.getPersonaMemory().snapshot(), mode: (await getMode()).state(), model: typeof modelSettings.catalog === 'function' ? await modelSettings.catalog() : modelSettings.state(), watch: (await getWatch()).state(), ...(getShare ? { share: (await getShare()).state() } : {}), ...(getChat ? { chat: (await getChat()).state() } : {}), ...(getMedia ? { media: await (await getMedia()).status() } : {}), setup: { browser: 'Microsoft Edge', audioOptional: true, independentAppRequired: false, model: '使用 DSH 已配置提供商；可选音频 Key 单独保存。' } });
       }
       if (req.method === 'GET' && url.pathname === `${PREFIX}/reports/read`) return send(res, 200, await (await getReport()).read({ date: url.searchParams.get('date') }));
       if (req.method !== 'POST') return send(res, 404, { error: '设置地址不存在。' });
@@ -76,6 +76,11 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
           const media = await getMedia(); await media.saveSettings(input, { explicit: true }); value = await media.status(); break;
         }
         case '/reports/generate': empty(input); value = await (await getReport()).generate({ reason: 'manual' }); break;
+        case '/media/credentials': {
+          if (!getMedia) throw Object.assign(new Error('音频设置尚未就绪。'), { status: 503 });
+          if (active((await getWatch()).state()) || active((await getSpark()).state()) || getChat && active((await getChat()).state())) throw Object.assign(new Error('请先停止自主观看、自动问候和私信回复，再修改音频密钥。'), { status: 409 });
+          value = await (await getMedia()).saveCredentials(input, { explicit: true }); break;
+        }
         default: return send(res, 404, { error: '设置地址不存在。' });
       }
       return send(res, 200, value);

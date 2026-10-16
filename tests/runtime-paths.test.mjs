@@ -45,11 +45,36 @@ test('损坏、未知版本和相对路径拒绝，不能静默退回另一套 w
   assert.throws(() => resolveRuntimePaths({ ...options, env: { ...options.env, DOUYIN_STATE_DIR: 'relative' } }), /绝对路径/);
   assert.throws(() => resolveRuntimePaths({ ...options, env: { DOUYIN_RUNTIME_LOCATION_FILE: 'relative' } }), /绝对路径/);
 });
-test('可信 Node 入口只接收绝对路径，Electron 未明确配置时不会误启动桌面 EXE', () => {
+test('可信 Node 入口只接收绝对路径，显式无效配置不会误启动桌面 EXE', t => {
+  const f = fixture(t);
   assert.equal(resolveNodeExecutable({ env: {}, executable: process.execPath, versions: {} }), process.execPath);
   assert.equal(resolveNodeExecutable({ env: { DOUYIN_NODE_EXECUTABLE: process.execPath }, executable: 'desktop.exe', versions: { electron: 'synthetic' } }), process.execPath);
-  assert.throws(() => resolveNodeExecutable({ env: {}, versions: { electron: 'synthetic' } }), /DOUYIN_NODE_EXECUTABLE/);
+  assert.throws(() => resolveNodeExecutable({ env: {}, sourceRoot: f.sourceRoot, resourcesPath: f.root, versions: { electron: 'synthetic' } }), /DOUYIN_NODE_EXECUTABLE/);
   assert.throws(() => resolveNodeExecutable({ env: { DOUYIN_NODE_EXECUTABLE: 'node.exe' } }), /绝对路径/);
+  assert.throws(() => resolveNodeExecutable({ env: { DOUYIN_NODE_EXECUTABLE: process.execPath }, executable: process.execPath, versions: { electron: 'synthetic' } }), /独立 Node/);
+  assert.throws(() => resolveNodeExecutable({ env: { DOUYIN_NODE_EXECUTABLE: path.join(f.root, 'missing-node.exe') } }), /独立 Node/);
+});
+
+function linkNodeDirectory(destination) {
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.symlinkSync(path.dirname(process.execPath), destination, process.platform === 'win32' ? 'junction' : 'dir');
+  return path.join(destination, path.basename(process.execPath));
+}
+test('DSH Electron 自动复用源码已有独立 Node，不要求用户配置环境变量', t => {
+  const f = fixture(t), cached = linkNodeDirectory(path.join(f.sourceRoot, 'desktop', '.cache', 'generated', 'node'));
+  const result = resolveNodeExecutable({ env: { NODE_OPTIONS: '--invalid-inherited-options' }, executable: path.join(f.root, 'DSH Desktop.exe'), versions: { electron: 'synthetic' }, sourceRoot: f.sourceRoot, resourcesPath: f.root });
+  assert.equal(result, cached);
+  assert.equal(fs.existsSync(path.join(f.root, 'DSH Desktop.exe')), false);
+});
+test('Electron 优先使用软件随包 Node，也可回落到 PATH 的现有 Node', t => {
+  const f = fixture(t), packaged = linkNodeDirectory(path.join(f.root, 'resources', 'runtime', 'node'));
+  const options = { env: { Path: path.dirname(process.execPath) }, executable: path.join(f.root, 'DSH Desktop.exe'), versions: { electron: 'synthetic' }, sourceRoot: f.sourceRoot };
+  assert.equal(resolveNodeExecutable({ ...options, resourcesPath: path.join(f.root, 'resources') }), packaged);
+  assert.equal(resolveNodeExecutable({ ...options, resourcesPath: undefined }), process.execPath);
+});
+test('PATH 中相对目录不会成为桌面浏览器的 Node 程序来源', t => {
+  const f = fixture(t);
+  assert.throws(() => resolveNodeExecutable({ env: { PATH: '.' }, executable: path.join(f.root, 'DSH Desktop.exe'), versions: { electron: 'synthetic' }, sourceRoot: f.sourceRoot, resourcesPath: f.root }), /未找到独立 Node/);
 });
 
 test('共享记忆按显式数据库、全用户定位器、已有旧库、同一用户默认目录选择', t => {

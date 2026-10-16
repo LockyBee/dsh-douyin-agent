@@ -25,12 +25,13 @@ const [{ Context }, { WebServer }, { LlmRuntime }, { default: Loader }, { Client
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-native-settings-sdk-'));
   const now = () => Date.parse('2026-10-15T04:00:00Z'), stateDir = path.join(root, 'state');
-  const ctx = new Context(), events = [], metadata = []; let waitForMetadata;
+  const ctx = new Context(), events = [], metadata = [], catalogQueries = []; let waitForMetadata;
   const serverFiber = ctx.plugin(WebServer, { host: '127.0.0.1', port: 0 }); await serverFiber.await();
   const llmFiber = ctx.plugin(LlmRuntime); await llmFiber.await();
   const llm = ctx.get('llm');
   llm.registerAdapter(['synthetic-native'], {
     providerInfo: id => ({ id, name: '合成 DSH 提供商' }), providerRetryPolicy() {},
+    async listModels(provider) { catalogQueries.push(provider); return ['visual-model', 'old-model', 'new-model', 'other-model'].map(id => ({ provider, id, name: id, inputModalities: ['text', 'image'] })); },
     async resolveModel(provider, id, signal) { metadata.push({ provider, id, cancelled: signal.aborted }); await waitForMetadata?.(); return { provider, id, name: '合成视觉模型', inputModalities: ['text', 'image'] }; },
     stream() { assert.fail('原生设置验收不能调用模型'); },
   });
@@ -62,7 +63,7 @@ async function fixture(t) {
   };
   const bootstrap = async () => { const result = await request('/state'); assert.equal(result.status, 200); token = result.body.token; return result.body; };
   t.after(async () => { unregister(); await ctx.fiber.dispose(); assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^douyin-native-settings-sdk-/); fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, ctx, llmFiber, llm, metadata, modelSettings, memory, limits, report, mode, flags, events, base, bootstrap, request, unregister, controllers: () => controllers, holdMetadata: hook => { waitForMetadata = hook; } };
+  return { root, ctx, llmFiber, llm, metadata, catalogQueries, modelSettings, memory, limits, report, mode, flags, events, base, bootstrap, request, unregister, controllers: () => controllers, holdMetadata: hook => { waitForMetadata = hook; } };
 }
 
 test('真实 WebServer 承载原生设置，读取共享人格和本机状态不调用模型或启动任务', async t => {
@@ -70,6 +71,7 @@ test('真实 WebServer 承载原生设置，读取共享人格和本机状态不
   assert.equal(data.persona.roleCardFile, f.memory.roleCardFile); assert.equal(data.persona.manualText, f.memory.snapshot().manualText);
   assert.equal(data.setup.independentAppRequired, false); assert.equal(data.setup.audioOptional, true);
   assert.equal(data.model.configured, false); assert.deepEqual(data.model.providers, [{ id: 'synthetic-native', name: '合成 DSH 提供商' }]);
+  assert.equal(data.model.catalogLoaded, true); assert.deepEqual(data.model.models.map(item => item.id), ['visual-model', 'old-model', 'new-model', 'other-model']);
   assert.equal(data.video.policy.timeZone, 'Asia/Shanghai'); assert.equal(data.mode.silent, false);
   assert.equal(data.reports.folder, path.join(f.root, 'memory', 'reports', 'videos'));
   assert.equal(data.chat.running, false); assert.equal(data.share.enabled, false); assert.equal(data.media.enabled, false);
@@ -77,13 +79,28 @@ test('真实 WebServer 承载原生设置，读取共享人格和本机状态不
   assert.equal(/apiKey|authorization|messages|sessionId/.test(JSON.stringify(data)), false);
 });
 
+test('真实 Cordis 追踪代理重复读取仍共用模型目录缓存并保留服务更换检查', async t => {
+  const f = await fixture(t);
+  assert.notEqual(f.ctx.get('llm'), f.ctx.get('llm'));
+  assert.equal(f.ctx.get('llm')[Symbol.for('cordis.original')], f.ctx.get('llm')[Symbol.for('cordis.original')]);
+  const [first, second] = await Promise.all([f.modelSettings.catalog(), f.modelSettings.catalog()]);
+  assert.deepEqual(first.models, second.models); assert.equal(first.models.length, 4); assert.deepEqual(f.catalogQueries, ['synthetic-native']);
+  await f.bootstrap(); assert.deepEqual(f.catalogQueries, ['synthetic-native']);
+  const invalid = await f.request('/model/configure', { provider: 'synthetic-native', model: '不在目录的模型' });
+  assert.equal(invalid.status, 400); assert.equal(f.metadata.length, 0);
+  const saved = await f.request('/model/configure', { provider: 'synthetic-native', model: 'visual-model' });
+  assert.equal(saved.status, 200, saved.body.error); assert.equal(saved.body.configured, true); assert.equal(f.metadata.length, 1);
+  assert.deepEqual(f.catalogQueries, ['synthetic-native', 'synthetic-native']);
+  await f.llmFiber.dispose(); assert.equal(f.modelSettings.state().configured, false);
+});
+
 test('真实 LlmRuntime 验证已配置模型，动态依赖晚挂载仍可用且不保存独立密钥', async t => {
   const f = await fixture(t); let available;
   const settings = new NativeModelSettings({ stateDir: path.join(f.root, 'late-model'), getLlm: () => available });
   assert.deepEqual(settings.state().providers, []); available = f.llm;
   assert.equal(settings.state().providers[0].id, 'synthetic-native');
-  await assert.rejects(settings.configure({ provider: 'synthetic-native', model: 'visual-model' }), /选择并填写/);
-  await assert.rejects(settings.configure({ provider: 'synthetic-native', model: 'visual-model', apiKey: 'synthetic-only' }, { explicit: true }), /选择并填写/);
+  await assert.rejects(settings.configure({ provider: 'synthetic-native', model: 'visual-model' }), /选择模型/);
+  await assert.rejects(settings.configure({ provider: 'synthetic-native', model: 'visual-model', apiKey: 'synthetic-only' }, { explicit: true }), /选择模型/);
   const result = await settings.configure({ provider: 'synthetic-native', model: ' visual-model ' }, { explicit: true });
   assert.equal(result.configured, true); assert.equal(f.metadata.length, 1);
   assert.equal(f.metadata[0].id, 'visual-model');
@@ -131,11 +148,15 @@ test('设置页模型选择通过真实 SDK 元数据验证，运行中的私信
 
 test('真实 SDK 元数据查询尚未结束时若启动服务，原生设置拒绝提交模型变更', async t => {
   const f = await fixture(t); await f.bootstrap();
-  await f.request('/model/configure', { provider: 'synthetic-native', model: 'old-model' });
+  const previous = await f.request('/model/configure', { provider: 'synthetic-native', model: 'old-model' });
+  assert.equal(previous.status, 200, previous.body.error);
   const entered = Promise.withResolvers(), finish = Promise.withResolvers();
   f.holdMetadata(async () => { entered.resolve(); await finish.promise; });
   const saving = f.request('/model/configure', { provider: 'synthetic-native', model: 'new-model' });
-  await entered.promise; f.flags.chat.running = true; finish.resolve();
+  try {
+    await Promise.race([entered.promise, saving.then(result => { throw new Error(`模型元数据查询前请求已结束：HTTP ${result.status}`); })]);
+    f.flags.chat.running = true;
+  } finally { finish.resolve(); }
   const result = await saving; assert.equal(result.status, 409); assert.equal(f.modelSettings.state().model, 'old-model');
 });
 
@@ -203,7 +224,7 @@ test('真实 ClientModuleRegistry 可从 file URI 找到最近插件 manifest �
 test('当前产品 manifest 与 client 在真实 SDK 图中可发现并先加载原生设置提供者', async t => {
   const f = await fixture(t);
   const loader = f.ctx.plugin(Loader, { baseUrl: pathToFileURL(path.join(f.root, 'cordis.yml')).href }); await loader.await(); f.ctx.loader.internal = undefined;
-  const productUri = new URL('../dsh-plugin.mjs?v=9', import.meta.url).href;
+  const productUri = new URL('../dsh-plugin.mjs?v=10', import.meta.url).href;
   await f.ctx.loader.create({ id: 'settings-general', name: pathToFileURL(path.join(sdk, '@deepseek-ai/dsh-client-ui-settings-general/lib/index.js')).href });
   await f.ctx.loader.create({ id: 'douyin-browser', name: productUri }); await f.ctx.loader.await();
   assert.equal(f.ctx.get('tools'), undefined, '不提供 tools，因此本测试不执行产品插件或创建浏览器控制器');

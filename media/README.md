@@ -1,6 +1,6 @@
 # 可选音频与视频读取
 
-媒体源码随刷视频工具保存，运行开关默认关闭。用户可以自己决定是否启用；模型工具不能更改开关。MiMo、MiniMax 都是可选后端，没有云 Key 也可以关闭能力，或在用户启用后使用本地 Whisper 转写对白。独立软件 1.1.1 新增云端 Key 表单，与 v7 插件共用本机媒体配置。
+媒体源码随刷视频工具保存，运行开关默认关闭。用户可以自己决定是否启用；模型工具不能更改开关。MiMo、MiniMax 都是可选后端，没有云 Key 也可以关闭能力，或在用户启用后使用本地 Whisper 转写对白。插件原生设置和独立软件均提供云端 Key 表单，共用本机媒体配置。
 
 ## 已内置的来源
 
@@ -41,13 +41,15 @@ await adapter.setEnabled(false,{explicit:true});
 
 软件 1.1.1 的 MiMo 填写路径为“业务设置 → 音频理解 → 音频后端选择 MiMo → MiMo API Key → 保存音频 Key”；MiniMax 选择对应后端后填写 MiniMax API Key。Whisper 不需要云 Key。
 
-表单调用窄 Electron IPC `saveMediaKey({backend,apiKey})`，只更新软件和插件共用媒体 `.env` 中的 `XIAOMI_API_KEY` 或 `MINIMAX_API_KEY`，保留其他配置。该文件以本机明文保存，不作加密承诺；已保存的 Key 不回传给界面、状态或工具结果，也不经本机 HTTP 保存。保存本身不启用音频、不改变已保存的运行后端、不发起云请求；需要使用时由本人另行保存音频开关与后端设置。
+插件填写路径为“设置 → 刷抖音 → 音频与密钥”，页面分别提供 MiMo API Key 与 MiniMax API Key 的密码输入框和保存按钮。留空沿用已有凭据，不表示清除；本轮未新增清除媒体 Key 的入口。两项均不必填，使用本机 Whisper 时不需要云 Key。
+
+软件表单调用窄 Electron IPC `saveMediaKey({backend,apiKey})`；插件表单调用 DSH 自身的同源设置接口 `POST /api/douyin-browser/media/credentials`，正文为 `{backend:'mimo'|'minimax',apiKey:string}`，沿用本机来源、同源与设置会话令牌检查。两条入口复用 `media/key-store.mjs` 的原子 writer，只更新共用媒体 `.env` 中的 `XIAOMI_API_KEY` 或 `MINIMAX_API_KEY`，保留其他配置。该文件以本机明文保存，不作加密承诺；输入值不放入 URL，也不回传给界面、状态或工具结果。保存本身不启用音频、不改变已保存的运行后端、不发起云请求；需要使用时由本人另行保存音频开关与后端设置。修改 Key 前须停止自主观看、自动问候和私信回复。
 
 源码或插件用户也可参照 `.env.example` 手动填写共享文件。实际位置为 `runtime-location.json` 登记的 `mediaEnvFile`，也可由显式 `DOUYIN_MEDIA_ENV_FILE` 指定；未使用位置登记的源码默认路径为本目录 `.env`。媒体只读取白名单字段及同名进程环境变量，不读取 QQ `.env`；同名环境变量优先于文件值。MiMo、MiniMax 两项 Key 均不必填。
 
 公开媒体下载可沿用进程已有的 `HTTPS_PROXY` / `HTTP_PROXY` 和 `NO_PROXY`，支持 HTTP CONNECT 代理。代理连接目标使用已核对的公网 IPv4，TLS 继续核对原域名证书；代理地址和凭据不出现在状态或错误结果里。其他代理协议会明确失败。
 
-运行时从配置读入 Key 到进程内存；软件的“保存音频 Key”会将其持久写入上述本机共享 `.env`，不能称为仅在内存保存。默认 `MediaAdapter` 在后续状态或处理调用中重新读取配置，文件更新后不必重建适配器；显式环境变量仍按原优先级生效。Key 不返回 `status()`、模型工具结果、网页或日志，云调用时才按相应协议发送给所选服务。云后端未配置时返回 `unavailable`，关闭时返回 `disabled`。本地默认只做语音转写；通用音乐、环境声、视频理解需要用户明确选用 MiMo，不能把 ASR 文本当作已理解所有声音。
+运行时从配置读入 Key 到进程内存；软件和插件的保存按钮会将其持久写入上述本机共享 `.env`，不能称为仅在内存保存。默认 `MediaAdapter` 在后续状态或处理调用中重新读取配置，文件更新后不必重建适配器；显式环境变量仍按原优先级生效。状态分别显示“文件已保存”及“当前已配置”，来源为共享文件、环境变量或显式注入；空的同名进程环境变量仍会覆盖已保存文件，此时会显示“已保存但当前未配置”，需本人在启动环境处理覆盖。状态只返回布尔和来源，不返回原值。Key 不返回 `status()`、模型工具结果、网页或日志，云调用时才按相应协议发送给所选服务。云后端未配置时返回 `unavailable`，关闭时返回 `disabled`。本地默认只做语音转写；通用音乐、环境声、视频理解需要用户明确选用 MiMo，不能把 ASR 文本当作已理解所有声音。
 
 `backend` 是用户选择的处理方式。模型请求里的 `backend` 必须与运行设置相同；选择本地 Whisper 时，即使进程存在云 Key，也不会被模型改成云端上传。需要切换时由用户在控制台保存设置，模型请求不匹配会返回 `backend-not-selected`。
 
@@ -77,7 +79,7 @@ await adapter.analyzeAudio({source,backend:'mimo',question:'这段音频有哪�
 await adapter.analyzeVideo({source,backend:'mimo',question:'这段视频发生了什么？',fps:1,durationSeconds:10},{signal});
 ```
 
-返回 `{ok,status?,backend,kind,text?,segments?,source?,interval?,limitations?,error?}`。`status()` 顶层包含 `enabled`、`backend`，各后端只显示可用状态，不含 Key、URL 或运行时路径。`available` 仅表示配置/依赖可用，云端仍需真实请求才能验证。
+返回 `{ok,status?,backend,kind,text?,segments?,source?,interval?,limitations?,error?}`。`status()` 顶层包含 `enabled`、`backend`；云后端另含 `credential:{configured,source,saved,environmentOverride}`，只显示配置是否生效及来源，不含 Key、URL 或运行时路径。`available` 仅表示配置/依赖可用，云端仍需真实请求才能验证。
 
 `interval` 含 `startSeconds`、`durationSeconds`、`requestedDurationSeconds`、`sourceDurationSeconds` 和 `durationVerifiedBy`。转写结果中每个 segment 的 `start` / `end` 是源音频时间，`relativeStart` / `relativeEnd` 是处理片段中的时间。无法核对的录音总时长保留为 `null`。
 

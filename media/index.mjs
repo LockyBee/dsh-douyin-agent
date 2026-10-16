@@ -13,6 +13,7 @@ import { Readable } from 'node:stream';
 import { parseEnv } from 'node:util';
 import { makeProviders } from './vendor/voice/lib/providers.js';
 import { resolveRuntimePaths } from '../runtime-paths.mjs';
+import { saveSharedMediaKey } from './key-store.mjs';
 
 // MiMo驱动、dsh-voice provider与MiniMax ASR参数的来源和MIT声明见README.md及vendor。
 
@@ -150,6 +151,29 @@ export class MediaAdapter {
     const pending=this.settingsWrite.then(write,write);this.settingsWrite=pending.then(()=>{},()=>{});return pending;
   }
   setEnabled(enabled,options={}) {return this.saveSettings({enabled},options);}
+  async credentialStatus(config) {
+    const env = this.env ?? process.env;
+    const envFile = this.envFile ?? resolveRuntimePaths({ env }).mediaEnvFile;
+    let saved = {};
+    try { saved = parseEnv(await fs.readFile(envFile, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw new Error('媒体配置文件无法解析。'); }
+    const effective = config ?? (this.configOverride ?? await loadMediaConfig({ env, envFile }));
+    return Object.fromEntries([['mimo', 'XIAOMI_API_KEY'], ['minimax', 'MINIMAX_API_KEY']].map(([backend, variable]) => {
+      const overridden = this.configOverride !== undefined && this.configOverride !== null;
+      const environmentOverride = !overridden && env[variable] !== undefined && env[variable] !== null;
+      return [backend, { configured: Boolean(effective[variable]), source: overridden ? 'override' : environmentOverride ? 'environment' : saved[variable] ? 'shared-env' : 'none', saved: Boolean(saved[variable]), environmentOverride }];
+    }));
+  }
+  async saveCredentials(input, { explicit = false } = {}) {
+    if (explicit !== true) throw Object.assign(new Error('音频密钥只能由用户明确保存。'), { status: 400 });
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['backend', 'apiKey'].includes(key)) || !['mimo', 'minimax'].includes(input.backend) || typeof input.apiKey !== 'string') throw Object.assign(new Error('请选择 MiMo 或 MiniMax 并填写对应 API Key。'), { status: 400 });
+    // 留空沿用现有凭据；保存凭据不会改动音频开关或所选后端。
+    if (input.apiKey.trim()) {
+      const envFile = this.envFile ?? resolveRuntimePaths({ env: this.env ?? process.env }).mediaEnvFile;
+      try { await saveSharedMediaKey(input, { envFile, explicit: true }); }
+      catch (error) { throw Object.assign(error, { status: 400 }); }
+    }
+    return this.status();
+  }
   async runtime() {
     const config = this.configOverride ?? await loadMediaConfig({ env: this.env, envFile: this.envFile });
     if(config.DOUYIN_MEDIA_WHISPER_MODEL&&!LOCAL_MODELS.has(config.DOUYIN_MEDIA_WHISPER_MODEL))throw new Error('本地Whisper模型须从受支持的模型名称中选择。');
@@ -160,9 +184,9 @@ export class MediaAdapter {
   }
   async status() {
     const settings=await this.settings();
-    const runtime = await this.runtime(); let local = { available: false, note: '本地 Whisper 依赖尚未就绪。' };
+    const runtime = await this.runtime(), credentials = await this.credentialStatus(runtime.config); let local = { available: false, note: '本地 Whisper 依赖尚未就绪。' };
     try { local = JSON.parse(await run(runtime.python,[path.join(ROOT,'local_whisper.py'),'--probe','--model',runtime.config.DOUYIN_MEDIA_WHISPER_MODEL||'tiny','--models-dir',runtime.modelsDir],{timeoutMs:10_000,maxOutputBytes:4096})); } catch {}
-    return { ...settings,backends: { mimo: { available: Boolean(runtime.config.XIAOMI_API_KEY), note: '云端音视频理解，需要独立 MiMo 凭据。' }, minimax: { available: Boolean(runtime.config.MINIMAX_API_KEY), note: '云端语音转写，需要独立 MiniMax 凭据。' }, 'local-whisper': { ...local, model: runtime.config.DOUYIN_MEDIA_WHISPER_MODEL || 'tiny', note: '依赖检查不等于模型已下载或转写已通过；真实验收另记录。' } }, limits: this.limits };
+    return { ...settings,backends: { mimo: { available: Boolean(runtime.config.XIAOMI_API_KEY), credential: credentials.mimo, note: '云端音视频理解，需要独立 MiMo 凭据。' }, minimax: { available: Boolean(runtime.config.MINIMAX_API_KEY), credential: credentials.minimax, note: '云端语音转写，需要独立 MiniMax 凭据。' }, 'local-whisper': { ...local, model: runtime.config.DOUYIN_MEDIA_WHISPER_MODEL || 'tiny', note: '依赖检查不等于模型已下载或转写已通过；真实验收另记录。' } }, limits: this.limits };
   }
   analyzeAudio(args, options = {}) { return this.execute('audio', args, options); }
   analyzeVideo(args, options = {}) { return this.execute('video', args, options); }

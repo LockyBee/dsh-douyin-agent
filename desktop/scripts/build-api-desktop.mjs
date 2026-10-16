@@ -8,7 +8,7 @@ const output = path.join(root, 'app');
 const runtime = path.join(root, '.cache', 'api-runtime');
 await fs.mkdir(output, { recursive: true });
 const entries = ['main.mjs', 'api-process.mjs', 'prepare-api-runtime.mjs', 'media-key-store.mjs', 'startup-navigation.mjs', 'preload.cjs'];
-for (const name of entries) await fs.copyFile(path.join(root, 'src', name), path.join(output, name));
+for (const name of entries) await fs.copyFile(name === 'media-key-store.mjs' ? path.join(root, '..', 'media', 'key-store.mjs') : path.join(root, 'src', name), path.join(output, name));
 const allowed = new Set([...entries, 'build-manifest.json']);
 for (const entry of await fs.readdir(output, { withFileTypes: true })) {
   if (!allowed.has(entry.name)) {

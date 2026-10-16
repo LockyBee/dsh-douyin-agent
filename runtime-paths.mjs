@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const SOURCE_ROOT = path.dirname(fileURLToPath(import.meta.url));
 export const LEGACY_SHARED_MEMORY_DB_PATH = 'D:/codex分局/大肥鱼/memory/shared.sqlite';
@@ -56,8 +57,36 @@ export function resolveRuntimePaths({ env = process.env, home = homedir(), sourc
   };
 }
 
-export function resolveNodeExecutable({ env = process.env, executable = process.execPath, versions = process.versions } = {}) {
-  if (env.DOUYIN_NODE_EXECUTABLE) return absolute(env.DOUYIN_NODE_EXECUTABLE, 'Node 运行程序');
-  if (versions.electron) throw new Error('桌面运行时须设置 DOUYIN_NODE_EXECUTABLE，不能将桌面 EXE 当作 Node 启动浏览器。');
-  return executable;
+function isIndependentNode(candidate, env, executable, versions) {
+  if (versions.electron && path.resolve(candidate).toLowerCase() === path.resolve(executable).toLowerCase()) return false;
+  try {
+    if (!fs.statSync(candidate).isFile()) return false;
+    const probeEnv = { ...process.env, ...env };
+    for (const key of Object.keys(probeEnv)) if (['NODE_OPTIONS', 'NODE_PATH', 'ELECTRON_RUN_AS_NODE'].includes(key.toUpperCase())) delete probeEnv[key];
+    // 误指向 Electron 时也只执行探针并拒绝，不打开另一个桌面窗口。
+    probeEnv.ELECTRON_RUN_AS_NODE = '1';
+    const result = JSON.parse(execFileSync(candidate, ['-e', 'process.stdout.write(JSON.stringify({node:process.versions.node,electron:process.versions.electron||null}))'], {
+      env: probeEnv, timeout: 3000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8', maxBuffer: 2048,
+    }));
+    const [major, minor] = String(result.node).split('.').map(Number);
+    return !result.electron && (major > 22 || major === 22 && minor >= 13);
+  } catch { return false; }
+}
+
+export function resolveNodeExecutable({ env = process.env, executable = process.execPath, versions = process.versions, sourceRoot = SOURCE_ROOT, resourcesPath = process.resourcesPath } = {}) {
+  if (env.DOUYIN_NODE_EXECUTABLE) {
+    const explicit = absolute(env.DOUYIN_NODE_EXECUTABLE, 'Node 运行程序');
+    if (!isIndependentNode(explicit, env, executable, versions)) throw new Error('DOUYIN_NODE_EXECUTABLE 未指向可用的独立 Node.js 22.13 或更高版本，请检查配置。');
+    return explicit;
+  }
+  if (!versions.electron) return executable;
+  const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
+  const searchPath = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] || '';
+  const candidates = [
+    ...(resourcesPath && path.isAbsolute(resourcesPath) ? [path.join(resourcesPath, 'runtime', 'node', nodeName)] : []),
+    path.join(sourceRoot, 'desktop', '.cache', 'generated', 'node', nodeName),
+    ...searchPath.split(path.delimiter).map(directory => directory.trim().replace(/^"(.*)"$/, '$1')).filter(directory => path.isAbsolute(directory)).map(directory => path.join(directory, nodeName)),
+  ];
+  for (const candidate of new Set(candidates)) if (isIndependentNode(candidate, env, executable, versions)) return candidate;
+  throw new Error('未找到独立 Node.js 22.13 或更高版本。请安装 Node.js，或将 DOUYIN_NODE_EXECUTABLE 设置为现有 node.exe 的绝对路径后重试。');
 }

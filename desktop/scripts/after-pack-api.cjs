@@ -4,7 +4,7 @@ const { createHash } = require('node:crypto');
 const execFile = require('node:util').promisify(require('node:child_process').execFile);
 module.exports = async function afterPack({ appOutDir }) {
   const resources = path.join(appOutDir, 'resources'), runtime = path.join(resources, 'api-runtime');
-  for (const file of ['api-worker.mjs', 'app.mjs', 'core.mjs', 'runtime-paths.mjs', 'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-service.mjs', 'spark-agent.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'daily-report.mjs', 'watch-mode.mjs', 'public/index.html', 'node_modules/playwright-core/package.json', 'node_modules/yaml/package.json']) await fs.access(path.join(runtime, file));
+  for (const file of ['api-worker.mjs', 'app.mjs', 'core.mjs', 'runtime-paths.mjs', 'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-service.mjs', 'spark-agent.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'daily-report.mjs', 'watch-mode.mjs', 'media/index.mjs', 'media/key-store.mjs', 'public/index.html', 'node_modules/playwright-core/package.json', 'node_modules/yaml/package.json']) await fs.access(path.join(runtime, file));
   for (const file of ['node_modules/@deepseek-ai', 'node_modules/@agents-anywhere', 'state', '.env']) {
     try { await fs.access(path.join(runtime, file)); throw new Error('独立软件含不应分发的资源：' + file); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }

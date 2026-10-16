@@ -6,7 +6,7 @@ return {
   async apply(ctx) {
     const expected = ['douyin_open', 'douyin_search', 'douyin_open_video', 'douyin_next', 'douyin_previous', 'douyin_status', 'douyin_observe', 'douyin_screenshot', 'douyin_pause', 'douyin_play', 'douyin_remember', 'douyin_recall','douyin_chat_contacts','douyin_chat_status','douyin_chat_start','douyin_chat_stop','douyin_chat_read','douyin_chat_observe','douyin_video_limits_status','douyin_media_status','douyin_listen','douyin_forward_video','douyin_persona_status','douyin_interest_record','douyin_watch_status','douyin_watch_start','douyin_watch_stop','douyin_spark_status','douyin_spark_start','douyin_spark_stop','douyin_report_status','douyin_report_generate'];
     const base = 'file:///D:/codex%E5%88%86%E5%B1%80/dsh%E9%85%8D%E7%BD%AE/douyin-browser/dsh-plugin.mjs';
-    const target = base + '?v=9';
+    const target = base + '?v=10';
     const ownEntries = () => {
       const entries = [];
       for (const entry of ctx.loader.entries()) if (typeof entry.options.name === 'string' && entry.options.name.split('?')[0] === base) entries.push(entry);
@@ -43,7 +43,7 @@ return {
       const id = owned[0].id, previousName = owned[0].options.name, previousFiber = owned[0].fiber;
       if (!active(owned[0])) throw new Error('本项目插件条目已停用或尚未处于活动状态，未更改其启用设置。');
       if (previousName === target && complete() && await matchesTarget(owned[0])) {
-        console.log(JSON.stringify({ nativePluginAlreadyLoaded: true, loaderEntryId: id, moduleVersion: 9, registeredToolNames: expected }));
+        console.log(JSON.stringify({ nativePluginAlreadyLoaded: true, loaderEntryId: id, moduleVersion: 10, registeredToolNames: expected }));
         return;
       }
       try {
@@ -63,7 +63,7 @@ return {
         throw error;
       }
       // 此条目由原配置或其他既有加载者管理，不随本次辅助包停止而移除。
-      console.log(JSON.stringify({ nativePluginLoaded: true, upgradedPreviousEntryId: id, loaderEntryId: id, managedEntryPreserved: true, moduleVersion: 9, registeredToolNames: expected }));
+      console.log(JSON.stringify({ nativePluginLoaded: true, upgradedPreviousEntryId: id, loaderEntryId: id, managedEntryPreserved: true, moduleVersion: 10, registeredToolNames: expected }));
       return;
     }
     if (expected.some((name) => existing.has(name))) {
@@ -85,6 +85,6 @@ return {
     await ctx.loader.await();
     const current = ownEntries().find((entry) => entry.id === id);
     if (!created || current !== created || current.options.name !== target || !active(current) || !complete() || !await matchesTarget(current)) throw new Error('原生抖音插件条目或完整工具目录未通过核对。');
-    console.log(JSON.stringify({ nativePluginLoaded: true, loaderEntryId: id, moduleVersion: 9, registeredToolNames: expected }));
+    console.log(JSON.stringify({ nativePluginLoaded: true, loaderEntryId: id, moduleVersion: 10, registeredToolNames: expected }));
   },
 };

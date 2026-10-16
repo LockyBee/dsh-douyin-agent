@@ -51,7 +51,7 @@ $env:DOUYIN_API_PORT = '3218'
 
 到单轮上限或允许窗口结束时，服务会实际暂停 API、DSH 的专用视频页面，并取消正在执行的视频模型任务与分享操作。点击“结束当前轮”也会暂停。私信回复 worker 使用自己的运行状态和预算，不受视频时限影响。
 
-“可选音频理解”有独立开关和 `local-whisper`、`minimax`、`mimo` 后端选择。默认关闭，本机 Whisper 不需要云端密钥；两个云端后端需要独立配置凭据。当前上层可录取视频短音轨并转写，收到的语音私信仍为未支持类型。页面只读回启用设置和依赖是否可用，不接收密钥。本地 Whisper 已真实转写合成 WAV 和无容器时长 WebM。真实抖音已采到 3 秒音轨，但猫咪片段没有有效对白，未验收 ASR 准确性，也不能称听懂声音；见 `verification/audio-browser-live.json`。MiMo/MiniMax 尚未真实云联调。
+“可选音频理解”有独立开关和 `local-whisper`、`minimax`、`mimo` 后端选择。默认关闭，本机 Whisper 不需要云端密钥；两个云端后端需要独立配置凭据。软件在“业务设置 → 音频理解”选择 MiMo 或 MiniMax 后，通过密码框及桌面 IPC 保存 Key；插件在“设置 → 刷抖音 → 音频与密钥”填写，通过 DSH 自身同源设置接口保存。两者共用媒体 `.env`（本机明文），保存不启用音频、不发起云请求，状态仅显示配置是否生效及来源，不返回原值。独立 API 服务的 HTTP 页面仍不接收密钥。当前上层可录取视频短音轨并转写，收到的语音私信仍为未支持类型。本地 Whisper 已真实转写合成 WAV 和无容器时长 WebM。真实抖音已采到 3 秒音轨，但猫咪片段没有有效对白，未验收 ASR 准确性，也不能称听懂声音；见 `verification/audio-browser-live.json`。MiMo/MiniMax 尚未真实云联调。
 
 媒体源码随工具保存，实际复用三个社区项目的固定 commit 原文件及 MIT LICENSE：`ch1bug/dsh-mimo-agent-tools` 的 MiMo 请求正文驱动、`GooDAnDReaDY/dsh-voice` 的本机 Whisper HTTP provider、`moluyao/dsh-minimax-asr` 的 ASR 参数来源。来源、文件哈希和许可见 `media/PROVENANCE.json` 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，安装和开关说明见 [media/README.md](media/README.md)。这些社区源码不是 DeepSeek 官方媒体插件。
 

@@ -29,7 +29,7 @@ const appRoot = path.join(executableRoot, 'resources', 'app'), appCode = path.jo
 await fs.mkdir(appRoot); await fs.mkdir(appCode);
 const sources = {};
 for (const name of productionFiles) {
-  const bytes = await fs.readFile(path.join(root, 'src', name));
+  const bytes = await fs.readFile(name === 'media-key-store.mjs' ? path.join(root, '..', 'media', 'key-store.mjs') : path.join(root, 'src', name));
   await fs.writeFile(path.join(appCode, name), bytes, { flag: 'wx' }); sources[name] = digest(bytes);
 }
 const runtime = path.join(executableRoot, 'resources', 'api-runtime');

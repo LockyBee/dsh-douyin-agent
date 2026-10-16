@@ -23,7 +23,7 @@ export const DOMAIN_FILES = Object.freeze([
   'video-limits.mjs', 'playwright-runtime.mjs',
   'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-agent.mjs', 'spark-service.mjs', 'daily-report.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'watch-mode.mjs',
 ]);
-const MEDIA_FILES = ['index.mjs', 'local_whisper.py', 'mimo_bridge.py', 'requirements.txt', 'setup_local.py', 'README.md', 'PROVENANCE.json'];
+const MEDIA_FILES = ['index.mjs', 'key-store.mjs', 'local_whisper.py', 'mimo_bridge.py', 'requirements.txt', 'setup_local.py', 'README.md', 'PROVENANCE.json'];
 const VENDOR_FILES = [
   'vendor/mimo/driver/mimo_driver.py', 'vendor/mimo/LICENSE', 'vendor/voice/lib/providers.js',
   'vendor/voice/lib/provider-http.js', 'vendor/voice/LICENSE', 'vendor/minimax/lib/index.js', 'vendor/minimax/LICENSE',

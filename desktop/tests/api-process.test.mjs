@@ -16,7 +16,7 @@ async function fixture(t) {
   await fs.mkdir(ui, { recursive: true }); await fs.mkdir(home);
   await fs.writeFile(path.join(ui, 'index.html'), '<html>合成软件界面</html>');
   await fs.writeFile(path.join(runtime, 'package.json'), JSON.stringify({ type: 'module' }));
-  for (const relative of [...DOMAIN_FILES, 'media/index.mjs', 'media/vendor/voice/lib/providers.js', 'media/vendor/voice/lib/provider-http.js']) {
+  for (const relative of [...DOMAIN_FILES, 'media/index.mjs', 'media/key-store.mjs', 'media/vendor/voice/lib/providers.js', 'media/vendor/voice/lib/provider-http.js']) {
     const target = path.join(runtime, relative); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(path.join(DOMAIN_ROOT, relative), target);
   }
   await fs.copyFile(fileURLToPath(new URL('../src/api-worker.mjs', import.meta.url)), path.join(runtime, 'api-worker.mjs'));
