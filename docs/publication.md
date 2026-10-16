@@ -31,7 +31,13 @@
 
 | 目标 | 申请 | 2026-10-16 核对状态 |
 | --- | --- | --- |
-| awesome-dsh-plugin（本机 dshmarket 使用的目录） | [PR #7509](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/7509) | 单份 YAML 已提交，目录格式、README、lint 等检查已通过，完整站点构建仍在进行；之后还需 Submission gate 与维护者审核 |
+| awesome-dsh-plugin（本机 dshmarket 使用的目录） | [PR #7509](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/7509) | PR check 与 Submission gate 均已通过，PR 仍为 OPEN，等待维护者合并；实时线上目录尚未包含本插件 |
 | DSH 1024Store | [PR #613](https://github.com/imsai-sh/awesome-deepseek-harness-plugins/pull/613) | static-review、merge 和 Catalog sync 均成功；匿名请求线上 `/api/v2/plugins?q=LockyBee%2Fdsh-douyin-agent&limit=10` 返回 200，并已找到本插件 |
 
 两个 PR 均已独立核对差异，分别只有本插件的一份新增文件。目录审查没有代替插件运行测试或安全审查；npm 仍未发布，1024Store 按其规则先以浏览模式收录。
+
+## 市场搜索说明
+
+本机两个市场入口使用不同目录。`dshmarket` 使用 awesome-dsh-plugin 目录；自动检查通过后仍须合并申请，再等待目录同步，刷新本机不能补入尚未合并的条目。
+
+`dsh-community-market` 的默认页面为“可安装”，会过滤没有可用 npm 包的条目。当前本插件未发布 npm，应在“发现”页选择“DSH 1024Store”来源，再搜索 `dsh-douyin-agent` 或 `LockyBee`。2026-10-16 匿名查询 1024Store 线上 API，搜索完整仓库名和“抖音”均能找到本插件；线上收录不代表本机已具备 npm 一键安装。
