@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
-import { BrowserController, readPageState } from './core.mjs?v=8';
-import { ChatBrowser } from './chat-browser.mjs?v=5';
+import { BrowserController, readPageState } from './core.mjs?v=9';
+import { ChatBrowser } from './chat-browser.mjs?v=9';
+import { OutboundCoordinator } from './outbound-send.mjs';
 import { VideoLimits } from './video-limits.mjs';
 
 const stop = signal => signal?.throwIfAborted();
@@ -82,6 +83,7 @@ export class VideoForwarder {
     this.chatBrowser = chatBrowser ?? new ChatBrowser({ source: this.source === 'dsh' ? 'dsh-chat' : 'api-chat' });
     this.ownsController = !controller; this.ownsChat = !chatBrowser;
     this.stateDir = stateDir; fs.mkdirSync(stateDir, { recursive: true });
+    this.outbound = new OutboundCoordinator({ stateDir, source: this.source });
     this.policyFile = path.join(stateDir, 'chat-policy.json');
     this.receiptsFile = path.join(stateDir, 'video-forward-receipts.json');
     this.guardFile = path.join(stateDir, 'video-forward.guard');
@@ -139,7 +141,10 @@ export class VideoForwarder {
     if (typeof authorize.beginDispatch !== 'function') return { confirmed: false, deliveryUncertain: false, reason: '自主分享缺少与本机设置互斥的最终输入许可，未发送。' };
     return this.#forward({ recipientId, expectedVideoId }, { signal, authorize, autonomousRunId });
   }
-  async #forward({ recipientId, url, expectedVideoId } = {}, { signal: parentSignal, authorize, autonomousRunId } = {}) {
+  async #forward(input = {}, options = {}) {
+    return this.outbound.run({ recipientId: input.recipientId, purpose: 'video', signal: options.signal }, () => this.#sendTransaction(input, options));
+  }
+  async #sendTransaction({ recipientId, url, expectedVideoId } = {}, { signal: parentSignal, authorize, autonomousRunId } = {}) {
     const interrupt = new AbortController(), signal = AbortSignal.any([interrupt.signal, ...(parentSignal ? [parentSignal] : [])]);
     const authorized = async phase => {
       if (authorize && await authorize({ phase, recipientId, videoId: expectedVideoId }) !== true) throw new Error('自主分享许可已撤回或检查未通过，未发送。');
@@ -191,7 +196,7 @@ export class VideoForwarder {
         await send.evaluate(installInputWitness, operation.operationId);
         const inputDispatched = () => page.evaluate(token => window.__deepseekForwardInputs?.[token]?.dispatched === true, operation.operationId);
         const checkPendingInput = async () => {
-          if (await inputDispatched()) return;
+          if (clicked && await inputDispatched()) return;
           await authorized('monitor');
           const time = this.videoLimits.state?.();
           if (time && !time.allowed) throw new Error(time.reason || '视频时限已结束，未继续输入。');
@@ -218,6 +223,7 @@ export class VideoForwarder {
           stop(signal);
           await checkPendingInput();
           await authorized('before-click');
+          if (await inputDispatched()) throw new Error('等待期间已发生分享输入，未再点击一次。');
           if (authorize) releaseDispatch = await authorize.beginDispatch();
           stop(signal);
           operation.status = 'clicking'; operation.sendClicks = 1; this.record(operation);

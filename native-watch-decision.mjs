@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 const IMAGE = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
 
 // 复用当前 DSH 模型路由和附件接口；不读取模型凭据或普通会话历史。
-export function createNativeWatchDecision({ llm, attachments, agent }) {
+export function createNativeWatchDecision({ llm, attachments, agent, maxTokens = 1200 }) {
+  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 1200) throw new Error('原生模型生成上限须在1至1200之间。');
   const header = agent?.session?.requestHeader?.()?.config;
   const provider = header?.provider ?? agent?.options?.provider;
   const model = header?.model ?? agent?.options?.model;
@@ -34,7 +35,7 @@ export function createNativeWatchDecision({ llm, attachments, agent }) {
       converted.push({id:randomUUID(),role:message.role,content:blocks,source:{kind:'plugin',plugin:'douyin-browser',form:'snapshot',sections:[]}});
     }
     let text = '', finish, usage = {}; const deltaIndexes=new Set();
-    for await (const chunk of llm.stream({provider,model,messages:converted,system,maxTokens:1200,signal,sessionId:agent.session.id})) {
+    for await (const chunk of llm.stream({provider,model,messages:converted,system,maxTokens,signal,sessionId:agent.session.id})) {
       signal?.throwIfAborted();
       if (chunk.type === 'text-delta') {
         deltaIndexes.add(chunk.index);

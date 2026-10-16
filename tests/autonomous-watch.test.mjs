@@ -39,6 +39,17 @@ function fixture(t) {
   return { root, watch, options, controller, videoLimits, personaMemory, memory, calls, events, state, paused: () => paused, now: () => clock, advance: ms => { clock += ms; }, provider: value => { provider = value; }, other: source => { const instance = new AutonomousWatch({ ...options, source }); instances.push(instance); return instance; } };
 }
 
+test('跨上海午夜结束的一轮分别保留开始日与结束日的事实日报', async t => {
+  const f = fixture(t);
+  f.advance(Date.parse('2026-10-15T15:59:58Z') - f.now());
+  f.personaMemory.initialize({ importLegacy: false });
+  f.personaMemory.recordObservation(f.state(), { source: 'api', kind: 'dom' });
+  f.watch.start({ startSession: true }, { explicit: true }); await f.watch.completion;
+  const dates = f.watch.reportService.state().reports.map(item => item.date);
+  assert.ok(dates.includes('2026-10-15')); assert.ok(dates.includes('2026-10-16'));
+  assert.equal(f.watch.reportService.read({ date: '2026-10-15' }).observedCount, 1);
+});
+
 test('默认停止且无轮次不能启动；显式启动也不延长已有有限轮次', async t => {
   const f = fixture(t); assert.equal(f.watch.state().running, false); assert.equal(f.calls.length, 0);
   assert.throws(() => f.watch.start({}, { explicit: true }), /开始新一轮/); assert.throws(() => f.watch.start({ startSession: true }), /明确启动/);

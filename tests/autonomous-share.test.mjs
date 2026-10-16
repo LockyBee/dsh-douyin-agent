@@ -143,7 +143,7 @@ test('异常退出遗留预留收据会暂停，损坏账本和发送锁不会�
 });
 
 test('真实合成分享面板通过可信授权发送官方卡片，撤回授权与JSON伪造不能点击', { timeout: 15000 }, async t => {
-  const [{ chromium }, { VideoForwarder }, { readPageState }] = await Promise.all([import('../playwright-runtime.mjs'), import('../video-forward.mjs'), import('../core.mjs?v=8')]);
+  const [{ chromium }, { VideoForwarder }, { readPageState }] = await Promise.all([import('../playwright-runtime.mjs'), import('../video-forward.mjs'), import('../core.mjs?v=9')]);
   const browser = await chromium.launch({ channel: 'msedge', headless: true }); t.after(() => browser.close());
   for (const revoked of [true, false]) {
     const f = fixture(t), page = await browser.newPage();
@@ -250,7 +250,7 @@ test('最终短输入与设置互斥，忙时不伪报关闭成功，释放后�
 });
 
 test('真实合成输入：点击后正常禁用按钮仍可核对卡片，缺少回执则保留 uncertain', { timeout: 15000 }, async t => {
-  const [{ chromium }, { VideoForwarder }, { readPageState }] = await Promise.all([import('../playwright-runtime.mjs'), import('../video-forward.mjs'), import('../core.mjs?v=8')]);
+  const [{ chromium }, { VideoForwarder }, { readPageState }] = await Promise.all([import('../playwright-runtime.mjs'), import('../video-forward.mjs'), import('../core.mjs?v=9')]);
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   try {
     for (const hasReceipt of [true, false]) {

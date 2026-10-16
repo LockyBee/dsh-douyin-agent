@@ -2,9 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ApiAgent, redact, watchDecisionMessages, parseWatchDecision } from './api-agent.mjs?v=8';
+import { ApiAgent, redact, watchDecisionMessages, parseWatchDecision } from './api-agent.mjs?v=9';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
-import { AutonomousShare } from './autonomous-share.mjs?v=8';
+import { AutonomousShare } from './autonomous-share.mjs?v=9';
+import { AutonomousComments } from './autonomous-comments.mjs?v=9';
+import { PublicCommentAgent } from './public-comment-agent.mjs?v=9';
+import { DailyReport } from './daily-report.mjs?v=9';
 
 export const WATCH_LIMITS = Object.freeze({ maxRequests: 30, hardMaxRequests: 100, dailyLimit: 200, sampleSeconds: 3 });
 const alive = pid => { if (!Number.isSafeInteger(pid) || pid < 1) return false; try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
@@ -15,10 +18,12 @@ const failure = (message, watchStatus = 'failed') => Object.assign(new Error(mes
 
 // API 与原生入口通过同一锁、有限视频轮次和持久预算协调，不在重启时恢复循环。
 export class AutonomousWatch {
-  constructor({ controller, config = {}, videoLimits, personaMemory, agent, shareService, decisionProvider, stateDir = resolveRuntimePaths().stateDir, source = 'api', fetchImpl = fetch, now = Date.now, delayImpl = (ms, signal) => delay(ms, undefined, { signal }), onEvent = () => {} } = {}) {
+  constructor({ controller, config = {}, videoLimits, personaMemory, agent, shareService, commentService, commentAgent, reportService, decisionProvider, stateDir = resolveRuntimePaths().stateDir, source = 'api', fetchImpl = fetch, now = Date.now, delayImpl = (ms, signal) => delay(ms, undefined, { signal }), onEvent = () => {} } = {}) {
     if (!controller?.execute || !videoLimits?.state || !personaMemory?.context || !['api', 'dsh'].includes(source)) throw new Error('自主观看缺少浏览器、时限或共同人格接口。');
     Object.assign(this, { controller, config, videoLimits, personaMemory, shareService, decisionProvider, stateDir, source, now, delayImpl, onEvent });
     this.agent = agent || new ApiAgent({ controller, config, personaMemory, fetchImpl });
+    Object.assign(this, { commentService, reportService });
+    this.commentAgent = commentAgent || new PublicCommentAgent({ config, fetchImpl });
     fs.mkdirSync(stateDir, { recursive: true });
     this.files = Object.fromEntries(['lock', 'guard', 'budget', 'state', 'stop'].map(name => [name, path.join(stateDir, `watch-${name === 'lock' ? 'loop.lock' : name === 'guard' ? 'control.guard' : name === 'stop' ? 'stop.request.json' : name + '.json'}`)]));
     this.files.manual = path.join(stateDir, 'watch-manual.lock');
@@ -101,7 +106,7 @@ export class AutonomousWatch {
       this.runId = randomUUID(); this.sessionId = time.session.id;
       write(this.files.lock, { version: 1, pid: process.pid, runId: this.runId, sessionId: this.sessionId, source: this.source, status: 'running', heartbeatAt: this.now() });
     });
-    this.abort = new AbortController(); this.running = true;
+    this.abort = new AbortController(); this.running = true; this.startedDate = day(this.now());
     try {
     this.save({ status: 'running', lastError: '', lastDecision: null });
     this.heartbeat = setInterval(() => {
@@ -135,6 +140,11 @@ export class AutonomousWatch {
     return this.shareService;
   }
   shareContext() { return this.getShareService()?.context() ?? { enabled: false, paused: false, dailyRemaining: 0, recipients: [] }; }
+  getCommentService() {
+    if (!this.commentService && this.personaMemory.snapshot) { this.commentService = new AutonomousComments({ controller: this.controller, videoLimits: this.videoLimits, personaMemory: this.personaMemory, stateDir: this.stateDir, source: this.source, now: this.now }); this.ownsCommentService = true; }
+    return this.commentService;
+  }
+  commentContext() { return this.getCommentService()?.context() ?? { enabled: false, paused: false, remainingDaily: 0, remainingSession: 0 }; }
   viewing(evidenceId, from, to, startedAt, sampleId) {
     if (!this.personaMemory.recordViewing) return null;
     return this.personaMemory.recordViewing({ evidenceId, from: from?.state || from, to: to?.state || to, wallSeconds: (this.now() - startedAt) / 1000, sampleId }, { source: this.source });
@@ -162,11 +172,11 @@ export class AutonomousWatch {
           if (viewing.evidenceId !== evidenceId || viewing.videoId !== observedState.video.id || typeof viewing.sampleId !== 'string' || typeof viewing.accepted !== 'boolean') throw failure('本次观看回执与作品观察不一致，没有写入兴趣。');
         } else viewing = this.viewing(evidenceId, current, observation, sampleStartedAt, `watch:${this.runId}:observe:${randomUUID()}`);
         observation = { ...observation, ...(viewing ? { viewing } : {}) };
-        const context = this.personaMemory.context(), shareContext = this.shareContext();
+        const context = this.personaMemory.context(), shareContext = this.shareContext(), commentContext = this.commentContext();
         this.reserveRequest();
-        const result = await this.agent.decideWatch({ observation, context, shareContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });
+        const result = await this.agent.decideWatch({ observation, context, shareContext, commentContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });
         this.assertAllowed();
-        const decision = redact(parseWatchDecision(result.decision, { shareContext: this.shareContext() }), [this.config.apiKey]);
+        const decision = redact(parseWatchDecision(result.decision, { shareContext: this.shareContext(), commentContext: this.commentContext() }), [this.config.apiKey]);
         current = await this.execute('douyin_status');
         const freshState = current.state || current, freshAt = this.now(), modelWaitSeconds = (freshAt - observedAt) / 1000;
         let gapTrusted = false, waited = null;
@@ -194,6 +204,17 @@ export class AutonomousWatch {
           const first = (found.state || found).searchResults?.find(item => Number.isSafeInteger(item.index) && item.index >= 0);
           if (!first) throw failure('搜索没有返回可核对的作品，已停止自主观看。');
           current = await this.execute('douyin_open_video', { index: first.index });
+        } else if (decision.action === 'comment') {
+          if (freshState.video?.id !== observedState.video.id) throw failure('评论前作品已变化，未发布评论。', 'needs_user');
+          this.reserveRequest();
+          const generated = await this.commentAgent.generate({ observation, signal: this.abort.signal, decisionProvider: this.decisionProvider });
+          this.assertAllowed();
+          if (generated.text !== null) {
+            const delivery = await this.getCommentService().comment({ evidenceId, videoId: observedState.video.id, text: generated.text }, { signal: this.abort.signal, watchRunId: this.runId });
+            this.onEvent({ type: 'watch.comment', delivery, usage: generated.usage });
+            if (delivery?.deliveryUncertain) throw failure('评论发布结果未确认，请在抖音核对，已停止自主观看。', 'needs_user');
+            if (delivery?.confirmed !== true) throw failure(delivery?.reason || '没有确认公开评论发布成功。', 'needs_user');
+          }
         } else if (decision.action === 'share') {
           const delivery = await this.getShareService().share({ evidenceId, videoId: observedState.video.id, recipientId: decision.recipientId, reason: decision.reason }, { signal: this.abort.signal, watchRunId: this.runId });
           this.onEvent(redact({ type: 'watch.share', delivery }, [this.config.apiKey]));
@@ -212,7 +233,7 @@ export class AutonomousWatch {
           if (stayed?.accepted === true) learned = this.behavior(evidenceId, 'stay')?.accepted === true;
         }
         if (learned && decision.topics.length) this.personaMemory.updateAgentInterests({ evidenceId, topics: decision.topics, reflection: decision.reflection }, { source: this.source });
-        if (decision.action === 'share') current = await this.execute('douyin_status');
+        if (['share', 'comment'].includes(decision.action)) current = await this.execute('douyin_status');
       }
     } catch (error) {
       const reason = this.abort?.signal.aborted ? this.abort.signal.reason || error : error;
@@ -227,6 +248,13 @@ export class AutonomousWatch {
         }
       } catch (error) { status = 'failed'; lastError ||= error.message; }
       this.running = false; if (!this.worker()?.owned) this.runId = null;
+      try {
+        if (!this.reportService && this.personaMemory.stateFile) this.reportService = new DailyReport({ personaMemory: this.personaMemory, now: this.now });
+        for (const date of new Set([this.startedDate || day(this.now()), day(this.now())])) {
+          const report = await this.reportService?.generate({ date, reason: 'watch-finished' });
+          if (report) this.onEvent({ type: 'watch.report', report: { date: report.date, path: report.path, observedCount: report.observedCount } });
+        }
+      } catch (error) { this.onEvent({ type: 'watch.report_failed', message: error.message || String(error) }); }
       this.onEvent({ type: `watch.${status}`, message: lastError || '自主观看已停止。' });
     }
     return this.state();
@@ -239,5 +267,5 @@ export class AutonomousWatch {
     else if (worker) this.control(() => { if (this.worker()?.runId === worker.runId) { fs.unlinkSync(this.files.lock); write(this.files.state, { status: 'stopped', sessionId: worker.sessionId, source: worker.source, lastError: '已清理退出进程的残留锁，预算继续保留。' }); } });
     return this.state();
   }
-  async close() { if (this.worker()?.owned) { this.abort?.abort(failure('本入口已关闭。', 'stopped')); await this.completion; if (!this.running && this.worker()?.owned) this.control(() => { if (this.worker()?.owned) fs.unlinkSync(this.files.lock); }); } if (this.ownsShareService) await this.shareService.close(); }
+  async close() { if (this.worker()?.owned) { this.abort?.abort(failure('本入口已关闭。', 'stopped')); await this.completion; if (!this.running && this.worker()?.owned) this.control(() => { if (this.worker()?.owned) fs.unlinkSync(this.files.lock); }); } if (this.ownsShareService) await this.shareService.close(); if (this.ownsCommentService) await this.commentService.close(); }
 }

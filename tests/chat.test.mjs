@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { ChatAgent } from '../chat-agent.mjs';
 import { ChatService } from '../chat-service.mjs';
+import { OutboundCoordinator } from '../outbound-send.mjs';
 const config = { apiKey: 'fixture-chat-key', baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash' };
 const contact = { id: 'synthetic-1', name: '合成联系人', followed: true, isGroup: false };
 const message = (id, text, sender = 'incoming') => ({ id, text, sender, eligibleForReply: true });
@@ -48,6 +49,23 @@ test('旧消息建立基线；只有启动后的新消息触发一次模型和�
   f.messages.push(message('new', '你好，这是新消息')); await f.service.poll(); await f.service.poll();
   assert.equal(f.inputs.length, 1); assert.equal(f.sent.length, 1); assert.deepEqual(f.inputs[0].map((item) => item.text), ['你好，这是新消息']);
   assert.equal(f.service.state().daily.requests, 1);
+});
+test('共同发送锁忙时保留生成回复，下次发送无需再次调用模型或消费水位', async t => {
+  const f = fixture(t); await prepare(f);
+  f.service.outbound = new OutboundCoordinator({ stateDir: f.directory, waitMs: 20 });
+  const guard = path.join(f.directory, 'outbound-send.guard'); fs.writeFileSync(guard, JSON.stringify({ pid: process.pid, token: '合成分享占用' }));
+  f.messages.push(message('new', '待发送问题')); await f.service.poll();
+  assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().contacts[0].pending.phase, 'outbound-wait');
+  assert.equal(f.service.state().contacts[0].status, 'ready'); fs.unlinkSync(guard);
+  await f.service.poll(); await f.service.poll(); assert.equal(f.sent.length, 1); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().daily.requests, 1);
+  assert.equal(f.service.outbound.history(contact.id)[0].kind, 'reply'); assert.equal(f.service.state().contacts[0].pending, null);
+});
+test('等共同发送锁期间本人已经回复，原生成回复不会补发', async t => {
+  const f = fixture(t); await prepare(f); f.service.outbound = new OutboundCoordinator({ stateDir: f.directory, waitMs: 20 });
+  const guard = path.join(f.directory, 'outbound-send.guard'); fs.writeFileSync(guard, JSON.stringify({ pid: process.pid, token: '合成分享占用' }));
+  f.messages.push(message('new', '待回复问题')); await f.service.poll(); fs.unlinkSync(guard);
+  f.messages.push(message('human', '本人已回复', 'outgoing')); await f.service.poll(); await f.service.poll();
+  assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().contacts[0].pending.phase, 'handled-by-user');
 });
 test('白名单必须核对关注关系和非群聊；只读也不接受第三个联系人', async (t) => {
   const f = fixture(t, { browser: { listContacts: async () => ({ contacts: [{ ...contact, followed: null }] }) } });

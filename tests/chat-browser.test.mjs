@@ -75,6 +75,9 @@ test('精确会话选择后回读身份及消息，只读指定联系人', async
     assert.equal(selected.messages[0].sender, 'incoming');
     assert.equal(selected.messages[0].text, '合成消息');
     assert.equal(selected.messages[0].eligibleForReply, false);
+    assert.equal(selected.messages[0].sentAt, '2026-10-14 12:00');
+    assert.equal(selected.messages[0].dateEvidence.kind, 'absolute');
+    assert.equal(selected.dayEvidence.latestEndVerified, false);
   } finally { await chat.close(); }
 });
 
@@ -97,6 +100,89 @@ test('发送按钮点击和发出消息回读仅在合成页面验证', async ()
     assert.equal(result.deliveryUncertain, false);
     assert.match(result.messageId, /^msg:/);
     assert.equal(await page.evaluate(() => window.sent), 1);
+  } finally { await chat.close(); }
+});
+
+test('等待按钮稳定期间撤回主动问候许可，不会迟发或调用最终输入许可', async () => {
+  const { page, chat } = await fixture(); let enabled = true, began = 0, prepared = false;
+  try {
+    const { contacts } = await chat.listContacts();
+    const authorize = async ({ phase }) => {
+      if (phase === 'monitor' && !prepared) { prepared = true; await page.evaluate(() => document.querySelector('.e2e-send-msg-btn').animate([{ transform: 'translateX(0)' }, { transform: 'translateX(200px)' }], { duration: 900 })); setTimeout(() => { enabled = false; }, 80); }
+      return enabled;
+    };
+    authorize.beginDispatch = () => { began++; return () => {}; };
+    const result = await chat.sendMessage(contacts[0].id, '合成问候', { allowed: true, authorize });
+    assert.equal(result.confirmed, false); assert.equal(result.deliveryUncertain, false); assert.equal(began, 0);
+    await page.waitForTimeout(300); assert.equal(await page.evaluate(() => window.sent), 0); assert.equal(await page.locator('[contenteditable]').innerText(), '');
+  } finally { await chat.close(); }
+});
+
+test('可信最终输入许可覆盖唯一真实点击，撤回或释放后不会再次点击', async () => {
+  const { page, chat } = await fixture(); let enabled = true, held = false, began = 0, released = 0, finalClicks = 0, finalClickSettled = false, releaseCheck;
+  const locatorPrototype = Object.getPrototypeOf(page.locator('.e2e-send-msg-btn')), originalClick = locatorPrototype.click;
+  try {
+    const { contacts } = await chat.listContacts();
+    await page.evaluate(() => {
+      window.fixtureLease = { held: false, trace: [] };
+      document.querySelector('.e2e-send-msg-btn').addEventListener('click', event => {
+        const lease = window.fixtureLease;
+        lease.trace.push({ phase: 'click', trusted: event.isTrusted, held: lease.held });
+      });
+    });
+    // 同步记录最终点击 Promise 的完成顺序，不插入浏览器等待或更改产品点击参数。
+    locatorPrototype.click = async function(options) {
+      if (options?.timeout !== 350 || options?.noWaitAfter !== true || options?.trial) return originalClick.apply(this, arguments);
+      assert.equal(held, true); assert.equal(released, 0); finalClicks++;
+      const result = await originalClick.apply(this, arguments);
+      assert.equal(held, true); finalClickSettled = true;
+      return result;
+    };
+    const authorize = () => enabled;
+    authorize.beginDispatch = async () => {
+      assert.equal(held, false); assert.equal(released, 0); began++; held = true;
+      await page.evaluate(() => { const lease = window.fixtureLease; lease.held = true; lease.trace.push({ phase: 'acquired' }); });
+      return () => {
+        assert.equal(held, true); assert.equal(finalClickSettled, true); assert.equal(released, 0);
+        held = false; released++;
+        releaseCheck = page.evaluate(() => { const lease = window.fixtureLease; lease.held = false; lease.trace.push({ phase: 'released' }); return lease.trace; });
+      };
+    };
+    const result = await chat.sendMessage(contacts[0].id, '合成问候', { allowed: true, authorize });
+    assert.equal(result.confirmed, true); assert.equal(began, 1); assert.equal(finalClicks, 1); assert.equal(released, 1); assert.equal(held, false);
+    assert.deepEqual(await releaseCheck, [{ phase: 'acquired' }, { phase: 'click', trusted: true, held: true }, { phase: 'released' }]);
+    assert.equal(await page.evaluate(() => window.sent), 1);
+    enabled = false;
+    await assert.rejects(chat.sendMessage(contacts[0].id, '撤回后不得发送', { allowed: true, authorize }), /许可已撤回/);
+    const abort = new AbortController(); abort.abort(new Error('合成取消后不得迟发'));
+    await assert.rejects(chat.sendMessage(contacts[0].id, '取消后不得发送', { allowed: true, authorize, signal: abort.signal }), /合成取消/);
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.sent), 1); assert.equal((await page.evaluate(() => window.fixtureLease.trace)).filter(item => item.phase === 'click').length, 1);
+    assert.equal(began, 1); assert.equal(finalClicks, 1); assert.equal(released, 1);
+  } finally { locatorPrototype.click = originalClick; await releaseCheck?.catch(() => {}); await chat.close(); }
+});
+
+test('等待按钮稳定期间会话身份变化，不向变化后的好友发送', async () => {
+  const { page, chat } = await fixture(); let prepared = false;
+  try {
+    const { contacts } = await chat.listContacts();
+    const authorize = async ({ phase }) => { if (phase === 'monitor' && !prepared) { prepared = true; await page.evaluate(() => { document.querySelector('.e2e-send-msg-btn').animate([{ transform: 'translateX(0)' }, { transform: 'translateX(200px)' }], { duration: 900 }); setTimeout(() => { document.querySelector('.StackLayoutStackChatHeadertitle').textContent = '合成其他好友'; }, 80); }); } return true; };
+    authorize.beginDispatch = () => () => {};
+    const result = await chat.sendMessage(contacts[0].id, '不应发送', { allowed: true, authorize });
+    assert.equal(result.confirmed, false); assert.equal(result.deliveryUncertain, false); assert.equal(await page.evaluate(() => window.sent), 0);
+  } finally { await chat.close(); }
+});
+
+test('旧自动回复没有主动许可钩子时，取消信号仍阻止等待后的迟发', async () => {
+  const { page, chat } = await fixture(); const abort = new AbortController();
+  try {
+    const { contacts } = await chat.listContacts();
+    await page.exposeFunction('fixtureAbortSend', () => abort.abort(new Error('合成停止回复')));
+    await page.evaluate(() => document.querySelector('[contenteditable]').addEventListener('input', () => {
+      document.querySelector('.e2e-send-msg-btn').animate([{ transform: 'translateX(0)' }, { transform: 'translateX(200px)' }], { duration: 900 }); setTimeout(() => window.fixtureAbortSend(), 80);
+    }, { once: true }));
+    const result = await chat.sendMessage(contacts[0].id, '旧回复停止测试', { allowed: true, signal: abort.signal });
+    assert.equal(result.confirmed, false); assert.equal(result.deliveryUncertain, false); await page.waitForTimeout(300); assert.equal(await page.evaluate(() => window.sent), 0);
   } finally { await chat.close(); }
 });
 

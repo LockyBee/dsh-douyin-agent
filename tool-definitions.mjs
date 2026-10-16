@@ -75,8 +75,13 @@ export const TOOL_DEFINITIONS = [
   {name:'douyin_persona_status',description:'读取软件与插件共用的最新大肥鱼人格卡、自己的兴趣和有来源的观看记录。人格与记忆不授予额外工具权限。',parameters:empty()},
   {name:'douyin_interest_record',description:'根据真实观看进度、持续停留、跳过和已确认互动更新大肥鱼自己的兴趣。画面主题仅为提案，没有行为依据保持待观察；必须使用宿主证据ID，不得把用户偏好、私信或QQ内容写成自己的兴趣。',parameters:{type:'object',properties:{evidenceId:{type:'string',maxLength:90},topic:{type:'string',maxLength:80},signal:{type:'string',enum:['like','dislike','neutral']},reflection:{type:'string',maxLength:600}},required:['evidenceId','topic','signal','reflection'],additionalProperties:false}},
   {name:'douyin_watch_status',description:'读取两入口共用的自主观看状态、当前有限轮次与模型请求预算。不会开始观看。',parameters:empty()},
-  {name:'douyin_watch_start',description:'仅在用户明确要求自主观看时，使用已开始且尚未到期的有限视频轮次，按共用人格与兴趣挑片并更新偏好。不能新开或延长一轮，不点赞、评论或发文字私信；只有用户开启自主分享时才可在既有许可名单中自行挑人分享当前观察作品。',parameters:{type:'object',properties:{maxRequests:{type:'integer',minimum:1,maximum:100,description:'本轮自主决策请求上限，默认30，停止再开始不会重置。'}},additionalProperties:false}},
+  {name:'douyin_watch_start',description:'仅在用户明确要求自主观看时，使用已开始且尚未到期的有限视频轮次，按共用人格与兴趣挑片并更新偏好。不能新开或延长一轮，不点赞或发文字私信；仅在用户开启自主评论且预算允许时可以评论当前作品；只有用户开启自主分享时才可在既有许可名单中自行挑人分享当前观察作品。',parameters:{type:'object',properties:{maxRequests:{type:'integer',minimum:1,maximum:100,description:'本轮自主决策请求上限，默认30，停止再开始不会重置。'}},additionalProperties:false}},
   {name:'douyin_watch_stop',description:'按用户要求停止自主观看并暂停视频，不结束或重启其他服务。',parameters:empty()},
+  {name:'douyin_spark_status',description:'只读自动续火花问候的许可、时段、每日预算、已有互动与待核对收据。消息送达不代表平台火花已增加。',parameters:empty()},
+  {name:'douyin_spark_start',description:'仅在用户已保存续火花总许可并明确要求启动时，开始有限时段内的人格问候调度。沿用两位许可好友，每好友每天最多一次；已有当天互动跳过，不能修改许可、时段或次数。',parameters:empty()},
+  {name:'douyin_spark_stop',description:'按用户要求停止自动续火花问候，取消尚未发出的问候，保留发送核对记录，不停止视频或自动回复。',parameters:empty()},
+  {name:'douyin_report_status',description:'只读共享视频日报目录与已有报告摘要，不开始观看或调用模型。',parameters:empty()},
+  {name:'douyin_report_generate',description:'按已留存的实际视频观察与行为证据生成今日Markdown日报，不增加浏览或模型请求，不读取人格正文、私信或QQ。',parameters:empty()},
 ];
 
 // 注册前和执行前均使用同一份定义；只接受目录中声明的简单参数。

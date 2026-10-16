@@ -1,9 +1,13 @@
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=8';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=9';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { createNativeWatchDecision } from './native-watch-decision.mjs';
+import { createNativeSparkGreeting } from './native-spark-greeting.mjs?v=9';
 import { bindNativePersonaContext } from './native-persona-context.mjs';
+import { createNativeSettingsRoute } from './native-settings.mjs?v=9';
+import { NativeModelSettings } from './native-model-settings.mjs?v=9';
+import { randomUUID } from 'node:crypto';
 
 export const name = 'douyin-browser';
 export const inject = ['tools'];
@@ -92,7 +96,7 @@ function nativeParameters(schema) {
   };
 }
 
-export function createNativeToolDefinitions({ ctx, getController, getWatch, attachPersona }) {
+export function createNativeToolDefinitions({ ctx, getController, getWatch, getSpark, attachPersona }) {
   return TOOL_DEFINITIONS.map((definition) => ({
     ...definition,
     parameters: nativeParameters(definition.parameters),
@@ -104,7 +108,12 @@ export function createNativeToolDefinitions({ ctx, getController, getWatch, atta
       attachPersona?.(exec.agent);
       const controller = await getController();
       let result;
-      if (getWatch && definition.name.startsWith('douyin_watch_')) {
+      if (getSpark && definition.name.startsWith('douyin_spark_')) {
+        const spark = await getSpark(exec, definition.name === 'douyin_spark_start');
+        if (definition.name === 'douyin_spark_start') result = await spark.start({ schedule: true, explicit: true });
+        else if (definition.name === 'douyin_spark_stop') result = await spark.stop({ explicit: true });
+        else result = spark.state();
+      } else if (getWatch && definition.name.startsWith('douyin_watch_')) {
         const watch=await getWatch(exec,definition.name==='douyin_watch_start');
         if(definition.name==='douyin_watch_start') result=await watch.start({startSession:false,maxRequests:args.maxRequests??30},{explicit:true});
         else if(definition.name==='douyin_watch_stop') result=await watch.stop({explicit:true});
@@ -150,25 +159,32 @@ export async function apply(ctx, config = {}) {
   let controllerPromise;
   let watchPromise;
   let disposed = false;
+  const modelSettings = new NativeModelSettings({ getLlm: () => optionalService(ctx, 'llm') });
+  const settingsSessionId = `douyin-settings:${randomUUID()}`;
+  const settingsExec = (starting = false) => {
+    const route = modelSettings.state();
+    if (starting && !route.configured) throw Object.assign(new Error('请先在刷抖音设置页选择 DSH 提供商和模型。'), { status: 400 });
+    return { agent: { options: { provider: route.provider, model: route.model }, session: { id: settingsSessionId } } };
+  };
   const getController = () => {
     if (disposed) throw new Error('抖音插件已卸载。');
     // 加载插件时只注册工具，首次调用时才创建控制器、启动浏览器。
-    controllerPromise ??= import('./core.mjs?v=8')
-      .then(({ BrowserController }) => new BrowserController({ ...config, source: 'dsh' }))
+    controllerPromise ??= import('./core.mjs?v=9')
+      .then(({ BrowserController }) => new BrowserController({ ...config, source: 'dsh', personaMemory: sharedPersona }))
       .catch((error) => { controllerPromise = undefined; throw error; });
     return controllerPromise;
   };
-  const {PersonaMemory}=await import('./persona-memory.mjs?v=8');
+  const {PersonaMemory}=await import('./persona-memory.mjs?v=9');
   const sharedPersona=new PersonaMemory();
   const personaBinding=bindNativePersonaContext(ctx,{workspacePaths:[path.dirname(resolveRuntimePaths().memoryDir),path.dirname(fileURLToPath(import.meta.url))],getPersonaMemory:()=>{
     // 提示词读取不触发浏览器或模型，按每次生成时的文件内容刷新。
     return sharedPersona;
   }});
   const getWatch=async(exec,starting)=>{
-    if (!watchPromise) watchPromise=Promise.all([getController(),import('./autonomous-watch.mjs?v=8')]).then(([controller,{AutonomousWatch}])=>{
+    if (!watchPromise) watchPromise=Promise.all([getController(),import('./autonomous-watch.mjs?v=9')]).then(async ([controller,{AutonomousWatch}])=>{
       if(starting) sharedPersona.initialize({importLegacy:false});
       const route=exec.agent?.session?.requestHeader?.()?.config ?? exec.agent?.options ?? {};
-      return new AutonomousWatch({controller,videoLimits:controller.limits(),personaMemory:sharedPersona,source:'dsh',config:{apiKey:'',baseUrl:'https://api.deepseek.com',model:route.model||'deepseek-flash'},...(starting?{decisionProvider:createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:exec.agent})}:{})});
+      return new AutonomousWatch({controller,videoLimits:controller.limits(),personaMemory:sharedPersona,commentService:await controller.getComments(),reportService:await controller.getReport(),source:'dsh',config:{apiKey:'',baseUrl:'https://api.deepseek.com',model:route.model||'deepseek-flash'},...(starting?{decisionProvider:createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:exec.agent})}:{})});
     }).catch(error=>{watchPromise=undefined;throw error;});
     const watch=await watchPromise;
     if(starting) {
@@ -178,14 +194,20 @@ export async function apply(ctx, config = {}) {
     }
     return watch;
   };
-  const definitions = createNativeToolDefinitions({ ctx, getController, getWatch, attachPersona:personaBinding.attach });
+  const getSpark = async (exec, starting) => {
+    const spark = await (await getController()).getSparkService();
+    if (starting && !spark.running && !spark.starting && !spark.busy) spark.setGreetingProvider(createNativeSparkGreeting({ llm: optionalService(ctx, 'llm'), agent: exec.agent }));
+    return spark;
+  };
+  const definitions = createNativeToolDefinitions({ ctx, getController, getWatch, getSpark, attachPersona:personaBinding.attach });
   const disposers = [];
   const launchLifetime = new AbortController();
-  let commandFiber, cleanupPromise;
+  let commandFiber, settingsFiber, cleanupPromise;
   const teardown = () => cleanupPromise ??= (async () => {
     disposed = true;
     launchLifetime.abort(new Error('抖音打开命令已卸载。'));
     await commandFiber?.dispose();
+    await settingsFiber?.dispose();
     personaBinding.close();
     const sharedState=watchPromise?await watchPromise.then(watch=>watch.state()).catch(()=>null):null;
     if(watchPromise) await watchPromise.then(watch=>watch.close()).catch(()=>{});
@@ -202,6 +224,38 @@ export async function apply(ctx, config = {}) {
         commandCtx.commands.register(createNativeLaunchCommand({ getController, lifetimeSignal: AbortSignal.any([launchLifetime.signal, dependencyLifetime.signal]) }));
       });
       if (optionalService(ctx, 'commands')) await commandFiber.await();
+      settingsFiber = ctx.inject(['webServer'], settingsCtx => {
+        settingsCtx.effect(() => settingsCtx.webServer.register(createNativeSettingsRoute({
+          getController, modelSettings,
+          getComments: async () => (await getController()).getComments(),
+          getReport: async () => (await getController()).getReport(),
+          getSpark: async () => (await getController()).getSparkService(),
+          getShare: async () => (await getWatch(settingsExec(), false)).getShareService(),
+          getChat: async () => (await getController()).getChatService(),
+          getMedia: async () => (await getController()).getMediaAdapter(),
+          getWatch: async () => getWatch(settingsExec(), false),
+          getMode: async () => (await getController()).getWatchMode(),
+          configureMode: async input => {
+            const controller = await getController(), mode = await controller.getWatchMode();
+            const saved = mode.configure(input, { explicit: true });
+            const application = await controller.applyWatchMode({ minimize: saved.silent });
+            return { ...saved, application };
+          },
+          startWatch: async input => {
+            const watch = await getWatch(settingsExec(true), true);
+            const result = watch.start({ ...input, startSession: false }, { explicit: true });
+            (await getController()).applyWatchMode({ minimize: true }).catch(() => {});
+            return result;
+          },
+          startSpark: async () => (await getSpark(settingsExec(true), true)).start({ schedule: true, explicit: true }),
+          startChat: async () => {
+            const chat = await (await getController()).getChatService();
+            chat.setReplyProvider(createNativeWatchDecision({ llm: optionalService(ctx, 'llm'), attachments: optionalService(ctx, 'attachments'), agent: settingsExec(true).agent, maxTokens: 512 }));
+            return chat.start();
+          },
+        })));
+      });
+      if (optionalService(ctx, 'webServer')) await settingsFiber.await();
     } else {
       const commands = optionalService(ctx, 'commands');
       if (commands) disposers.push(commands.register(createNativeLaunchCommand({ getController, lifetimeSignal: launchLifetime.signal })));

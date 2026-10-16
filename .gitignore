@@ -12,6 +12,7 @@ verification/native-chat-addon-workdir/
 verification/native-rich-workdir/
 verification/*-test.txt
 verification/*-tests.txt
+verification/*-recheck-*.txt
 verification/*-job-id.txt
 verification/api-software-regression.txt
 暂停交接_*.md

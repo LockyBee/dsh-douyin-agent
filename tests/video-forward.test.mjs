@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from '../playwright-runtime.mjs';
-import { readPageState } from '../core.mjs?v=8';
+import { readPageState } from '../core.mjs?v=9';
 import { VideoForwarder, canonicalVideoUrl, forwardAvatarIdentity, readForwardPanelDom } from '../video-forward.mjs';
 
 let browser;
@@ -83,6 +83,16 @@ test('分享面板同名歧义和头像变化不点击发送', async () => {
 test('合成原生卡片只点击一次并精确回读作品 ID，收据持久化', async () => {
   const f = await fixture();
   try { const result = await f.forwarder.forward({ recipientId, expectedVideoId: '12345' }, { humanAuthorized: true }); assert.equal(result.confirmed, true); assert.equal(result.deliveryType, 'native-card'); assert.equal(result.messageId, card.id); assert.equal(result.videoId, '12345'); assert.equal(await f.page.evaluate(() => window.sent), 1); assert.equal(f.stats().verified, 1); const receipt = JSON.parse(fs.readFileSync(path.join(f.stateDir, 'video-forward-receipts.json'))); assert.equal(receipt.operations[0].status, 'confirmed'); assert.equal(fs.existsSync(path.join(f.stateDir, 'video-forward.guard')), false); } finally { await f.cleanup(); }
+});
+test('视频分享的完整事务持共同锁，确认卡片也进入共同发出账本', async () => {
+  const f = await fixture();
+  try {
+    const prepare = f.forwarder.prepareContact.bind(f.forwarder);
+    f.forwarder.prepareContact = async (...args) => { assert.equal(fs.existsSync(path.join(f.stateDir, 'outbound-send.guard')), true); return prepare(...args); };
+    const result = await f.forwarder.forward({ recipientId }, { humanAuthorized: true });
+    assert.equal(result.confirmed, true); const rows = f.forwarder.outbound.history(recipientId); assert.equal(rows.length, 1); assert.equal(rows[0].kind, 'video'); assert.equal(rows[0].messageId, card.id);
+    assert.equal(fs.existsSync(path.join(f.stateDir, 'outbound-send.guard')), false);
+  } finally { await f.cleanup(); }
 });
 
 test('点击前作品变化或时间到点都拒绝分享', async () => {

@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
-import { ChatAgent } from './chat-agent.mjs?v=6';
+import { ChatAgent } from './chat-agent.mjs?v=9';
 import { loadApiConfig, redact } from './api-agent.mjs';
 import { messageFingerprint } from './chat-message.mjs';
+import { OutboundCoordinator } from './outbound-send.mjs';
 
 const basePolicy = () => ({ version: 1, enabled: false, allowlist: [], dailyReplyLimit: 40 });
 const dayKey = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -34,9 +35,10 @@ function messagesOf(snapshot) {
 
 // 沿用视频工具的本机配置与直接 API 请求；私信状态及正文只写本机 state。
 export class ChatService {
-  constructor({ browser, config = loadApiConfig(), agent = new ChatAgent({ config }), stateDir = resolveRuntimePaths().stateDir, pollIntervalMs = 15_000 } = {}) {
+  constructor({ browser, config = loadApiConfig(), agent = new ChatAgent({ config }), stateDir = resolveRuntimePaths().stateDir, pollIntervalMs = 15_000, outboundCoordinator } = {}) {
     if (!browser?.listContacts || !browser?.readConversation || !browser?.sendMessage) throw new Error('缺少私信浏览器控制器。');
     Object.assign(this, { browser, config, agent, stateDir, pollIntervalMs });
+    this.outbound = outboundCoordinator ?? new OutboundCoordinator({ stateDir, source: browser.controller?.source === 'dsh-chat' ? 'dsh' : 'api' });
     this.policyFile = path.join(stateDir, 'chat-policy.json');
     this.watermarkFile = path.join(stateDir, 'chat-watermarks.json');
     this.logFile = path.join(stateDir, 'chat-events.jsonl');
@@ -120,7 +122,7 @@ export class ChatService {
     return this.browser.readConversation(id, { allowed: true, signal });
   }
   async videoInspector() {
-    this.inspectorPromise??=import('./core.mjs?v=5').then(({BrowserController})=>new BrowserController({source:this.browser.controller?.source==='dsh-chat'?'dsh':'api'}));
+    this.inspectorPromise??=import('./core.mjs?v=9').then(({BrowserController})=>new BrowserController({source:this.browser.controller?.source==='dsh-chat'?'dsh':'api'}));
     return this.inspectorPromise;
   }
   async observeMessage(id,messageId,{signal,includeWork=true}={}) {
@@ -177,8 +179,13 @@ export class ChatService {
     this.starting = this.begin(schedule, signal);
     try { return await this.starting; } finally { this.starting = null; if (!this.running) this.release(); }
   }
+  setReplyProvider(provider) {
+    if (provider !== undefined && typeof provider !== 'function') throw new TypeError('私信回复提供器必须是本机函数。');
+    if (this.running || this.starting || this.busy) throw new Error('请先停止私信自动回复，再修改回复提供器。');
+    this.agent.replyProvider = provider;
+  }
   async begin(schedule, externalSignal) {
-    if (!this.config?.apiKey) throw new Error('没有找到 DeepSeek API Key。');
+    if (!this.config?.apiKey && typeof this.agent.replyProvider !== 'function') throw new Error('没有找到 DeepSeek API Key。');
     this.acquire();
     this.policy = validatePolicy(load(this.policyFile, this.policy));
     if (!this.policy.allowlist.length) throw new Error('请先保存核对后的白名单。');
@@ -231,6 +238,34 @@ export class ChatService {
     return this.state();
   }
 
+  async deliverReply(contact, mark, reply, latest, signal) {
+    const expectedContent = latest.map(item => ({ id: item.id, fingerprint: messageFingerprint(item) }));
+    let entered = false, delivery;
+    try {
+      delivery = await this.outbound.run({ recipientId: contact.id, purpose: 'reply', signal }, async () => {
+        signal.throwIfAborted(); this.assertOwned();
+        const current = await this.browser.readConversation(contact.id, { allowed: true, signal });
+        const messages = messagesOf(current);
+        if ((current.contact?.id || current.conversation?.id) !== contact.id || JSON.stringify(messages.map(item => ({ id: item.id, fingerprint: messageFingerprint(item) }))) !== JSON.stringify(expectedContent)) {
+          mark.pending.phase = 'superseded'; this.persist();
+          return { confirmed: false, deliveryUncertain: false, superseded: true };
+        }
+        entered = true; mark.status = 'inflight'; mark.pending = { ...mark.pending, phase: 'sending', text: reply.text, at: new Date().toISOString() }; this.persist();
+        return this.browser.sendMessage(contact.id, reply.text, { allowed: true, signal, expectedMessageIds: latest.map(item => item.id), expectedMessageContent: expectedContent });
+      });
+    } catch (error) {
+      if (!entered && error.beforeDelivery && error.code === 'OUTBOUND_BUSY') {
+        mark.status = 'ready'; mark.pending = { ...mark.pending, phase: 'outbound-wait', generatedText: reply.text, expectedContent, usage: reply.usage, at: new Date().toISOString() }; this.persist(); this.log('reply.waiting_for_sender', { recipientId: contact.id }); return;
+      }
+      if (!entered) throw error;
+      mark.status = 'delivery-uncertain'; mark.reason = '发送中断或失败，需人工核对；不会自动重发。'; this.persist(); this.log('delivery.uncertain', { recipientId: contact.id, message: error.message }); return;
+    }
+    if (delivery?.superseded) { this.log('reply.superseded', { recipientId: contact.id }); return; }
+    if (delivery?.confirmed !== true || typeof delivery.messageId !== 'string' || !delivery.messageId.trim()) { mark.status = 'delivery-uncertain'; mark.reason = '未取得发送确认，需人工核对；不会自动重发。'; this.persist(); this.log('delivery.uncertain', { recipientId: contact.id }); return; }
+    mark.status = 'ready'; mark.reason = ''; mark.context.push({ id: delivery.messageId, sender: 'outgoing', text: reply.text }); mark.context = mark.context.slice(-12);
+    mark.seen.push(delivery.messageId); delete mark.pending; this.persist();
+    this.log('reply.sent', { recipientId: contact.id, text: reply.text, messageId: delivery.messageId, usage: reply.usage });
+  }
   async poll() {
     if (!this.running || this.busy) return;
     this.assertOwned();
@@ -242,6 +277,13 @@ export class ChatService {
         try {
           const snapshot = await this.browser.readConversation(contact.id, { allowed: true, signal }); signal.throwIfAborted();
           if ((snapshot.contact?.id || snapshot.conversation?.id) !== contact.id) throw new Error('会话身份回读不一致。');
+          if (mark.pending?.phase === 'outbound-wait') {
+            const latest = messagesOf(snapshot), content = latest.map(item => ({ id: item.id, fingerprint: messageFingerprint(item) }));
+            if (JSON.stringify(content) === JSON.stringify(mark.pending.expectedContent)) {
+              await this.deliverReply(contact, mark, { text: mark.pending.generatedText, usage: mark.pending.usage }, latest, signal); continue;
+            }
+            mark.pending.phase = 'superseded'; this.persist();
+          }
           const messages = messagesOf(snapshot); const seen = new Set(mark.seen);
           const discovered = messages.filter((item) => !seen.has(item.id));
           const oldHistory = discovered.filter((item) => ['baseline', 'known-old-window', 'old-history'].includes(item.arrivalClassification));
@@ -280,14 +322,7 @@ export class ChatService {
           const latest = messagesOf(latestSnapshot);
           if (latest.some((item) => item.sender === 'unknown') || incoming.some((item) => !latest.some((current) => current.id === item.id && current.sender === 'incoming' && messageFingerprint(current)===messageFingerprint(item)))) { mark.pending.phase = 'superseded'; mark.pending.readback = latest.filter((item) => incoming.some((before) => before.id === item.id)).map((item) => ({ id: item.id, sender: item.sender, kind: item.kind, text: item.text })); throw new Error('待回复消息在生成期间被撤回、改动或方向不明，未发送。'); }
           if (latest.some((item) => !mark.seen.includes(item.id))) { mark.pending.phase = 'superseded'; mark.pending.reason = '生成期间到达新消息或人工回复，本次未发送。'; this.persist(); this.log('reply.superseded', { recipientId: contact.id }); continue; }
-          mark.status = 'inflight'; mark.pending = { ...mark.pending, phase: 'sending', text: reply.text, at: new Date().toISOString() }; this.persist();
-          let delivery;
-          try { this.assertOwned(); delivery = await this.browser.sendMessage(contact.id, reply.text, { allowed: true, signal, expectedMessageIds: latest.map((item) => item.id),expectedMessageContent:latest.map(item=>({id:item.id,fingerprint:messageFingerprint(item)})) }); }
-          catch (error) { mark.status = 'delivery-uncertain'; mark.reason = '发送中断或失败，需人工核对；不会自动重发。'; this.persist(); this.log('delivery.uncertain', { recipientId: contact.id, message: error.message }); continue; }
-          if (!delivery?.confirmed) { mark.status = 'delivery-uncertain'; mark.reason = '未取得发送确认，需人工核对；不会自动重发。'; this.persist(); this.log('delivery.uncertain', { recipientId: contact.id }); continue; }
-          mark.status = 'ready'; mark.reason = ''; mark.context.push({ id: delivery.messageId || `local:${Date.now()}`, sender: 'outgoing', text: reply.text }); mark.context = mark.context.slice(-12);
-          if (delivery.messageId) mark.seen.push(delivery.messageId); delete mark.pending; this.persist();
-          this.log('reply.sent', { recipientId: contact.id, text: reply.text, messageId: delivery.messageId || null, usage: reply.usage });
+          await this.deliverReply(contact, mark, reply, latest, signal);
         } catch (error) {
           if (mark.status === 'inflight') { mark.status = 'delivery-uncertain'; mark.reason = '发送被中断，需要人工核对。'; }
           else { mark.status = 'paused'; mark.reason = signal.aborted ? '用户停止时有未答消息，已保留在本机，未发送。' : redact(error.message, [this.config?.apiKey]); if (signal.aborted && mark.pending) mark.pending.phase = 'stopped-before-send'; }

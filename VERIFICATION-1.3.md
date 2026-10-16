@@ -1,0 +1,85 @@
+# 1.3／原生 v9 验证记录
+
+记录日期：2026-10-16。本轮优先交付原生插件设置页。完整回归、SDK 检查与当前 DSH 只读页面核对已完成，标准 bundle 安装未执行。没有调用真实模型或执行真人私信、问候、分享及公开评论。
+
+## 范围与版本
+
+- `package.json` 与 `desktop/package.json` 的源码版本均为 `1.3.0`，兼容工具目录为原生 v9、32 项，已直接核对 `tool-definitions.mjs`。
+- 插件主入口为 `dsh-plugin.mjs`，标准 bundle 声明为 `cordis.bundle.yml`，客户端为 `client.js`。页面注册到 `settings.section`，导航名称为“刷抖音”。
+- 原生客户端只依赖 DSH 现有 React／UI 静态模块和原生设置提供者；没有引入不存在的 `dsh-client-runtime`，也不启动独立软件或第二个 HTTP 端口。
+- 独立软件当前实际打包、启动检查的版本仍为 1.2.0。1.3.0 尚未打包发布；软件前端增加了自动问候面板，评论、日报和静默暂有后台接口，独立软件面板尚未补齐。本轮优先交付插件入口。
+
+## 本轮只读审查
+
+已核对 [README.md](README.md)、[PLUGIN-README.md](PLUGIN-README.md)、[FEATURE-REUSE.md](FEATURE-REUSE.md)、[desktop/README.md](desktop/README.md)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与现有源码。目标文档的本地 Markdown 链接均可解析。
+
+- 原生页面的实际标签为“人格与兴趣”“开始有限轮次”“观看日报”。修改人格或模型前需停止自主观看、自动问候和私信回复；人格草稿与版本冲突处理独立于状态轮询。
+- 未有既存策略时，私信回复、主动问候、自主分享、自主评论、音频和静默均默认关闭。升级读取既有策略，不擅自重置许可；服务启停仍须由本人操作。
+- 视频每日时段、有限轮次、自主观看请求、各类外发尝试分别计数。保存许可不开始自主观看或问候，停止再开不重置当前轮次或已扣预算。
+- 软件与插件通过同一 `runtime-location.json` 读取 `memoryDir` 和 `memoryDbPath`。人格与证据位于 `memoryDir/persona/`，日报位于 `memoryDir/reports/videos/`；源码未要求复制现有数据库。
+- 原生观看、问候和私信使用 DSH 配置的提供商／模型。原生页不收集主模型 Key；可选音频继续使用独立的本机媒体配置。
+- 评论正文的独立模型请求只包含当前作品的有限采样和元数据，不附加人格、兴趣、联系人、私信或 QQ。日报不调用模型，不读取人格正文、私信或 QQ。
+- `media/PROVENANCE.json` 的 7 份内置源码及许可证文件 SHA-256 全部匹配。复用声明区分了实际内置媒体源码和仅参考安装／设置／日报流程的项目。本次没有重新查询远端维护状态。
+
+本次文档审查没有调用模型、读取真实账号、打开抖音、启用服务或执行真人发送。
+
+## 既有测试证据，须与本轮最终结果分开
+
+下表保留较早日志，不作为本轮完整回归结果。定向重跑与整轮测试不能简单相加。
+
+| 本机日志 | 当时结果 | 边界 |
+| --- | --- | --- |
+| `verification/v1.3-backend-tests.txt` | 439 项：432 通过、0 失败、7 跳过 | 较早源码快照，不能覆盖后续修改 |
+| `verification/v1.3-final-backend-tests.txt` | 443 项：434 通过、2 失败、7 跳过 | Windows 原子替换 `EPERM` 异常与短锁测试观测竞争，原始失败保留 |
+| `verification/v1.3-final-sdk-tests.txt` | 45／45 通过 | 独立 SDK Context、临时状态与替身模型；不是当前 DSH 进程验收 |
+| `verification/native-settings-tests.txt` | 11／11 通过 | 真实 WebServer、LlmRuntime 元数据及 ClientModuleRegistry；没有向真实模型请求生成 |
+| `verification/v1.3-persona-behavior-recheck-20261016.txt` | 12／12 通过 | 定向行为证据复查，不替代完整回归 |
+
+原生客户端 `tests/native-client.test.mjs` 覆盖模块身份、原生插槽、同源令牌、无载体拒绝、人格草稿与 409 冲突、有限观看启停、问候许可保存与显式启动、联系人主动读取、日报读取、状态失联，以及官方 Input 的单层边框。本轮 3／3 通过，已计入最终 443 项，不重复累计。
+
+本机 `verification/native-settings-preview.png` 是明确标记的合成页面预览，使用虚构人格、提供商和联系人，不能作为用户当前 DSH 已挂载的截图。
+
+## 尚未由这些证据证明的效果
+
+- 当前 DSH 的“设置 → 刷抖音”已实际挂载并成功回读状态；32 项定义由 SDK 核对，本轮未独立读取当前进程的全部工具目录。标准 bundle 安装也未完成。
+- 真实抖音最小化后的持续播放、当前评论区 DOM 与公开评论发送，以及收到新消息后的自动回复全过程，不能由合成页或 SDK 测试代替。
+- 问候送达只说明消息确认，不表示平台火花已增加或续上；分享、问候、回复及评论的未确认记录不能自动重试。
+- 作品证据仅核对本机账号可见，未独立核实当前仍可播放或对外可见范围；有限采样不证明看完整条或听懂声音。
+- MiMo／MiniMax 尚未真实云联调；本地 Whisper 的合成对白结果不代表真实抖音音频的普遍准确率。
+- QQ 双向共享与可见范围另有专项边界，两个入口共用文件不代表 QQ 全流程已验收。
+
+## 本轮最终结果
+
+| 项目 | 状态 |
+| --- | --- |
+| 完整回归 | 443 项：436 通过、0 失败、7 项可选检查跳过，84.015 秒 |
+| 原生 SDK、命令及设置定向回归 | 45／45 通过，0 跳过，1.548 秒 |
+| 标准 bundle 安装 | 目标 DSH 正在运行，安装器在修改前停止；本轮未迁移 |
+| 当前 DSH 页面挂载与只读状态 | 正确 DSH 2.0.17 中已核对，通过现有 file URI 入口加载 |
+| 真实模型、真人发送、真实公开评论 | 本轮未执行；不得从其他检查推定通过 |
+| 源码提交与推送 | 本文件与相关源码一并提交既有 GitHub 仓库，最终提交与推送结果在交付消息记录 |
+
+使用本机 `desktop/.cache/generated/node/node.exe`，版本 24.17.0，在仓库根目录运行：
+
+```powershell
+node --test --test-concurrency=2 --test-timeout=55000 tests/*.test.mjs desktop/tests/*.test.mjs
+node --test --test-concurrency=2 --test-timeout=55000 verification/dsh-plugin.test.mjs verification/native-launch-command.test.mjs verification/native-settings.test.mjs
+```
+
+本轮日志分别为 `verification/v1.3-backend-20261016-tests.txt` 与 `verification/v1.3-sdk-20261016-tests.txt`。SDK 使用真实接口与独立 Context，模型生成由替身提供，没有向真实模型请求；已核实 file URI 能找到最近的 manifest、客户端 bundle 可读取且原生设置提供者先加载。上述结果覆盖本文件所在源码提交，随后仅修改文档、忽略规则和去敏验收记录。
+
+### 两项历史失败的处理
+
+人格行为测试的 `rename EPERM` 未在本轮定向 12／12 或完整回归中复现；原有原子替换已有有限重试，没有据此修改生产代码。未取得占用句柄证据，不能归因于某进程或杀毒软件。
+
+短输入锁测试原先等待异步浏览器 RPC 回传才观察锁，可能错过正常释放的时刻。本轮仅修改测试，改为浏览器同步可信点击标记，并观察原始调用完成，产品 350 毫秒短锁未延长。单项 1／1、该浏览器文件 31／31 和最终完整回归均通过。定向日志为 `verification/v1.3-chat-lease-single-recheck-20261016.txt` 和 `verification/v1.3-chat-browser-recheck-20261016.txt`。
+
+### 当前 DSH 与配置回读
+
+实际运行路径为 `F:/codex/DSH Desktop 2/DSH Desktop.exe`，版本 2.0.17，内部 DSH 0.2.0-rc.2。通过应用菜单进入“设置 → 刷抖音”，核实状态由检查中变为就绪；共享人格目录为 `D:/codex分局/大肥鱼/memory/persona`，日报目录为 `D:/codex分局/大肥鱼/memory/reports/videos`。
+
+已只读查看人格、视频时段与轮次、请求预算、静默、问候、评论、分享、私信许可与音频设置。本轮只导航和滚动，没有保存、刷新联系人、生成日报、打开抖音或启动服务，也不保存人格正文和联系人身份。当前提供商与模型尚未选择，视频轮次已结束；本人需先选择 DSH 中已配置的提供商、填写模型 ID，再开始有限轮次与自主观看。静默、问候、评论与分享开关未开启；已有本地 Whisper 音频许可原样保留。
+
+当前保留一个有效 file URI 后端入口，SDK 从相邻 manifest 发现前端。安装器因 DSH 运行而在备份、依赖安装与配置写入前停止；没有再次重启或叠加标准 bundle。脚本改用目标安装的 `resources/app/lib/desktop-cli.js`，临时配置检查已确认通用 CLI 不管理 desktop profile，而 Desktop CLI 支持；临时命令成功不代表标准 bundle 安装已实机通过。配置备份也不宣称能回滚全部依赖文件。
+
+通过 `verification/native-install-compose.mjs` 只读使用真实 SDK 合成 profile，不加载插件、求值表达式或写配置。前后均为一个受管 file URI、一个旧受管区块、零个本项目标准 bundle；其他 203 条有效配置的数量与摘要一致。真实配置、人格、密钥、私信与本机检查日志均不提交。

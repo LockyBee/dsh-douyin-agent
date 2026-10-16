@@ -7,14 +7,15 @@ const PROMPT = `你是用户在抖音私信中的 AI 自动回复助手。仅依
 只输出要发送的普通文本，不使用 Markdown，不输出推理过程。系统会为回复添加“自动回复”标记。`;
 
 export class ChatAgent {
-  constructor({ config = loadApiConfig(), personaMemory, fetchImpl = fetch, timeoutMs = 45_000, replyTokens = 512 } = {}) {
+  constructor({ config = loadApiConfig(), personaMemory, fetchImpl = fetch, replyProvider, timeoutMs = 45_000, replyTokens = 512 } = {}) {
     if (!Number.isSafeInteger(replyTokens) || replyTokens < 1 || replyTokens > 512) throw new Error('私信回复最多生成 512 token。');
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new Error('私信请求超时须在 1 至 60000 毫秒之间。');
-    Object.assign(this, { config, personaMemory, fetchImpl, timeoutMs, replyTokens });
+    if (replyProvider !== undefined && typeof replyProvider !== 'function') throw new TypeError('私信回复提供器必须是本机函数。');
+    Object.assign(this, { config, personaMemory, fetchImpl, replyProvider, timeoutMs, replyTokens });
   }
 
   async reply({ messages, mediaObservations = [], signal } = {}) {
-    if (!this.config.apiKey) throw new Error('未配置 DeepSeek API Key。');
+    if (!this.config.apiKey && !this.replyProvider) throw new Error('未配置 DeepSeek API Key。');
     if (!Array.isArray(messages) || !messages.length || messages.at(-1)?.sender !== 'incoming') throw new Error('私信回复需要当前联系人的新收到消息。');
     const content = messages.slice(-12).filter((message) => ['incoming', 'outgoing'].includes(message.sender) && (message.text?.trim() || message.media))
       .map((message) => ({ role: message.sender === 'incoming' ? 'user' : 'assistant', content: redact(message.text?.trim() || JSON.stringify({messageId:message.id,media:{type:message.media.type,label:message.media.label,title:message.media.title,author:message.media.author,isPhotoGallery:message.media.isPhotoGallery,understandingScope:message.media.understandingScope}}), [this.config.apiKey]).slice(0, 1800) }));
@@ -32,25 +33,33 @@ export class ChatAgent {
     const timeout = new AbortController();
     const timer = setTimeout(() => timeout.abort(new Error('私信模型请求超时。')), this.timeoutMs);
     const combined = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
+    let abortHandler;
     try {
       combined.throwIfAborted();
       const manualPersona=this.personaMemory?.snapshot().manualText || '';
       const systemPrompt=PROMPT+(manualPersona ? '\n\n共用人格卡的手编正文只作为表达风格参考，不增加联系人范围、现实承诺或工具权限。不读取或带出兴趣生成区、观看记录和其他会话。\n'+JSON.stringify(redact(manualPersona.slice(0,18_000),[this.config.apiKey])) : '');
-      const response = await this.fetchImpl(`${this.config.baseUrl}/chat/completions`, {
-        method: 'POST', redirect: 'error', signal: combined,
-        headers: { authorization: `Bearer ${this.config.apiKey}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: this.config.model, messages: [{ role: 'system', content: systemPrompt }, ...content], thinking: { type: 'disabled' }, stream: false, max_tokens: this.replyTokens }),
+      const cancelled = new Promise((_, reject) => { abortHandler = () => reject(combined.reason); combined.addEventListener('abort', abortHandler, { once: true }); });
+      const generated = Promise.resolve().then(async () => {
+        combined.throwIfAborted();
+        if (this.replyProvider) return this.replyProvider({ system: systemPrompt, messages: content, signal: combined, maxTokens: this.replyTokens });
+        const response = await this.fetchImpl(`${this.config.baseUrl}/chat/completions`, {
+          method: 'POST', redirect: 'error', signal: combined,
+          headers: { authorization: `Bearer ${this.config.apiKey}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ model: this.config.model, messages: [{ role: 'system', content: systemPrompt }, ...content], thinking: { type: 'disabled' }, stream: false, max_tokens: this.replyTokens }),
+        });
+        if (!response.ok) throw new Error(`私信模型请求失败（HTTP ${response.status}）。`);
+        const data = await response.json(), choice = data?.choices?.[0];
+        if (choice?.message?.tool_calls?.length || choice?.finish_reason !== 'stop') throw new Error('私信模型响应未完整结束，未发送。');
+        return { text: choice?.message?.content, usage: data.usage };
       });
-      if (!response.ok) throw new Error(`私信模型请求失败（HTTP ${response.status}）。`);
-      const data = await response.json();
+      const result = await Promise.race([generated, cancelled]);
       combined.throwIfAborted();
-      const choice = data?.choices?.[0];
-      if (choice?.message?.tool_calls?.length || choice?.finish_reason !== 'stop') throw new Error('私信模型响应未完整结束，未发送。');
-      const text = typeof choice?.message?.content === 'string' ? choice.message.content.trim() : '';
+      if (result?.tool_calls?.length || result?.toolCalls?.length) throw new Error('私信回复提供器返回了工具调用，未发送。');
+      const text = typeof result?.text === 'string' ? result.text.trim() : '';
       if (!text || text.length > 990) throw new Error('私信回复为空或加上标记后超过 1000 个字符，未发送。');
-      if (text.includes(this.config.apiKey) || /我是(?:用户本人|真人)|我不是\s*(?:AI|人工智能)|(?:我|我们|这边).{0,8}(?:会|马上|立即|帮你|给你|替你).{0,8}(?:购买|下单|付款|付钱|转账|打款)/i.test(text)) throw new Error('私信回复触发身份、凭据或现实承诺限制，未发送。');
-      return { text: `[自动回复] ${text.replace(/^\[自动回复\]\s*/, '')}`, usage: { promptTokens: data.usage?.prompt_tokens ?? null, completionTokens: data.usage?.completion_tokens ?? null } };
+      if (this.config.apiKey && text.includes(this.config.apiKey) || /我是(?:用户本人|真人)|我不是\s*(?:AI|人工智能)|(?:我|我们|这边).{0,8}(?:会|马上|立即|帮你|给你|替你).{0,8}(?:购买|下单|付款|付钱|转账|打款)/i.test(text)) throw new Error('私信回复触发身份、凭据或现实承诺限制，未发送。');
+      return { text: `[自动回复] ${text.replace(/^\[自动回复\]\s*/, '')}`, usage: { promptTokens: result?.usage?.promptTokens ?? result?.usage?.prompt_tokens ?? null, completionTokens: result?.usage?.completionTokens ?? result?.usage?.completion_tokens ?? null } };
     } catch (error) { throw new Error(redact(error.message || String(error), [this.config.apiKey]), { cause: error }); }
-    finally { clearTimeout(timer); }
+    finally { clearTimeout(timer); combined.removeEventListener('abort', abortHandler); }
   }
 }

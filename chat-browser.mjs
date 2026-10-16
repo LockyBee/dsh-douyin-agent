@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BrowserController } from './core.mjs?v=5';
+import { BrowserController } from './core.mjs?v=9';
 import { messageFingerprint } from './chat-message.mjs';
 import { MessageIdentityTracker } from './message-tracker.mjs';
 export { MessageIdentityTracker } from './message-tracker.mjs';
@@ -8,6 +8,37 @@ const HOME = 'https://www.douyin.com/?recommend=1&from_nav=1';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const stop = signal => signal?.throwIfAborted();
 const readableDraft = value => value.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+const localDay = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
+
+export function analyzeConversationDay(snapshot, { now = Date.now, confirmedHistory = [] } = {}) {
+  const current = typeof now === 'function' ? now() : now, today = localDay(current);
+  const recipientId = snapshot?.conversation?.id || snapshot?.contact?.id;
+  if (typeof recipientId === 'string' && recipientId.trim() && confirmedHistory.some(item => item?.confirmed === true && item.recipientId === recipientId && typeof item.messageId === 'string' && item.messageId.trim() && item.date === today && Number.isFinite(Date.parse(item.at)) && localDay(Date.parse(item.at)) === today && Date.parse(item.at) <= current)) return { status: 'already-sent', reason: '共同账本已确认今天向这位好友发过消息。' };
+  const evidence = snapshot?.dayEvidence;
+  if (snapshot?.blocked || snapshot?.loginRequired || snapshot?.verificationRequired || !recipientId || !Array.isArray(snapshot.messages) || !evidence?.latestEndVerified || evidence.chronology !== 'oldest-first' || !Number.isFinite(Date.parse(evidence.observedAt)) || localDay(Date.parse(evidence.observedAt)) !== today || Date.parse(evidence.observedAt) > current || current - Date.parse(evidence.observedAt) > 60_000) return { status: 'date-unknown', reason: '会话最新端、日期或快照时效尚未核实。' };
+  const messages = snapshot.messages;
+  if (messages.some(item => !['incoming', 'outgoing'].includes(item.sender || item.direction) || item.pending || item.failed)) return { status: 'date-unknown', reason: '会话含方向不明或未确认的消息，未自动问候。' };
+  const dayOf = item => {
+    if (item.dateEvidence?.kind === 'unknown') return null;
+    const raw = String(item.dateEvidence?.raw ?? item.sentAt ?? item.timestamp ?? '').trim();
+    if (/^今天(?:\s|$)/.test(raw)) return today;
+    const date = /^(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})(?:日)?(?:$|[ T\s])/.exec(raw);
+    if (!date) return null;
+    const padded = `${date[1]}-${date[2].padStart(2, '0')}-${date[3].padStart(2, '0')}`;
+    if (!Number.isFinite(Date.parse(padded + 'T00:00:00+08:00')) || localDay(Date.parse(padded + 'T00:00:00+08:00')) !== padded) return null;
+    if (/T.*(?:Z|[+-]\d\d:\d\d)$/.test(raw)) return Number.isFinite(Date.parse(raw)) ? localDay(Date.parse(raw)) : null;
+    return padded;
+  };
+  if (messages.some(item => (item.sender || item.direction) === 'outgoing' && dayOf(item) === today)) return { status: 'already-sent', reason: '当前会话已读到今天真实发出的消息。' };
+  const outgoing = messages.findLastIndex(item => (item.sender || item.direction) === 'outgoing');
+  if (messages.slice(outgoing + 1).some(item => (item.sender || item.direction) === 'incoming')) return { status: 'pending-incoming', reason: '对方有待回复消息，优先交给聊天回复。' };
+  if (!messages.length && evidence.emptyTodayVerified === true) return { status: 'eligible', reason: '当前最新会话明确显示今天尚无消息。' };
+  if (outgoing >= 0) {
+    const date = dayOf(messages[outgoing]);
+    if (date && date < today) return { status: 'eligible', reason: '已核对最新端，最近发出消息的明确日期早于今天。' };
+  }
+  return { status: 'date-unknown', reason: '没有足够日期证据判断今天是否发过消息。' };
+}
 
 // 只采集会话身份和未读标识，不读取预览或其他会话正文。
 export function readContactDom() {
@@ -89,11 +120,17 @@ export function readConversationDom() {
     const rawOrder = indexNode?.getAttribute('data-index');
     const order = rawOrder !== null && rawOrder !== undefined && /^\d+$/.test(rawOrder) ? Number(rawOrder) : null;
     const nativeId = box.getAttribute('data-message-id') || box.getAttribute('data-msg-id') || node.getAttribute('data-message-id') || null;
-    messages.push({ nativeId, direction, sender: direction, text, kind, media, timestamp, order, domIndex: order, domPosition: messages.length, orderMode: list ? 'relative' : 'absolute',
+    const ownTimestamp = box.getAttribute('data-sent-at') || box.getAttribute('data-timestamp') || node.getAttribute('data-sent-at');
+    const ownTimeNode = box.querySelector('.MessageBoxTimetimeLayout,time');
+    const ownTime = ownTimeNode?.getAttribute('datetime') || clean(ownTimeNode?.textContent);
+    const dated = ownTimestamp || ownTime || (!newestFirst ? timestamp : null);
+    messages.push({ nativeId, direction, sender: direction, text, kind, media, timestamp: ownTimestamp || timestamp, order, domIndex: order, domPosition: messages.length, orderMode: list ? 'relative' : 'absolute',
+      dateEvidence: { raw: dated || timestamp || '', kind: dated ? /^今天(?:\s|$)/.test(dated) ? 'today' : /^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(dated) ? 'absolute' : 'unknown' : 'unknown', source: ownTimestamp ? 'message-attribute' : ownTime ? 'message-time' : !newestFirst ? 'group-label' : 'unverified-group-label' },
       failed: Boolean(box.querySelector('[class*="sendFail"],[class*="SendFail"],[data-e2e="message-failed"]')),
       pending: Boolean(box.querySelector('[class*="sending"],[class*="Sending"],[data-e2e="message-pending"]')) });
   }
-  const latestEndVerified = newestFirst && messages.some(message => message.domIndex === 0);
+  const emptyTodayVerified = messages.length === 0 && [...(root?.querySelectorAll('[data-e2e="empty-conversation"],[class*="empty" i]') ?? [])].some(element => visible(element) && /^今天(?:还)?(?:暂无|没有|尚无)消息[。！!\s]*$/.test(clean(element.textContent)));
+  const latestEndVerified = emptyTodayVerified || newestFirst && messages.some(message => message.domIndex === 0);
   if (list) messages.forEach(message => { message.latestEndVerified = latestEndVerified; });
   if (newestFirst) {
     messages.reverse();
@@ -101,7 +138,8 @@ export function readConversationDom() {
     messages.forEach((message, index) => { message.order = index; message.timestamp ??= previousTime; previousTime = message.timestamp; });
   }
   const loading = [...(root?.querySelectorAll('[class*="loading"],[class*="Loading"],[aria-busy="true"]') ?? [])].some(visible);
-  return { displayName, avatar, messages, loading, latestEndVerified, chronology: list && !newestFirst ? 'unknown' : 'oldest-first', chronologySource, sourceDomOrder: newestFirst ? 'newest-first' : list ? 'unknown' : 'oldest-first' };
+  const historyStartVerified = [...(root?.querySelectorAll('[data-e2e="history-start"],[class*="no-more-tip"],[class*="noMoreTip"]') ?? [])].some(element => visible(element) && /没有更多消息|暂无更多消息|已显示全部消息/.test(clean(element.textContent)));
+  return { displayName, avatar, messages, loading, latestEndVerified, emptyTodayVerified, historyStartVerified, observedAt: new Date().toISOString(), chronology: list && !newestFirst && !emptyTodayVerified ? 'unknown' : 'oldest-first', chronologySource, sourceDomOrder: newestFirst ? 'newest-first' : list ? 'unknown' : 'oldest-first' };
 }
 
 export function readChatIdentityDom() {
@@ -287,7 +325,7 @@ export class ChatBrowser {
       const messages = this.publicMessages(recipientId, raw.messages);
       await this.markMessages(page, messages);
       return { ...flags, conversation: { id: contact.id, displayName: contact.displayName }, contact: publicContact,
-        messages };
+        messages, dayEvidence: { observedAt: raw.observedAt, latestEndVerified: raw.latestEndVerified, chronology: raw.chronology, historyStartVerified: raw.historyStartVerified, emptyTodayVerified: raw.emptyTodayVerified } };
     }, { signal });
   }
   captureMessage(recipientId, messageId, { allowed = false, signal } = {}) {
@@ -377,10 +415,14 @@ export class ChatBrowser {
       }
     }, { signal });
   }
-  sendMessage(recipientId, message, { allowed = false, expectedMessageIds, expectedMessageContent, signal } = {}) {
+  sendMessage(recipientId, message, { allowed = false, expectedMessageIds, expectedMessageContent, signal: parentSignal, authorize } = {}) {
     if (allowed !== true) return Promise.reject(new Error('发送需要这个指定联系人的明确授权。'));
     if (typeof message !== 'string' || !message.trim() || [...message].length > 1000) return Promise.reject(new TypeError('发送内容须为 1 到 1000 字的非空文字。'));
+    if (authorize !== undefined && (typeof authorize !== 'function' || typeof authorize.beginDispatch !== 'function')) return Promise.reject(new TypeError('主动问候需要本机许可检查和最终短输入控制。'));
+    const interrupt = new AbortController(), signal = AbortSignal.any([interrupt.signal, ...(parentSignal ? [parentSignal] : [])]);
+    const authorized = async phase => { stop(signal); if (authorize && await authorize({ phase, recipientId }) !== true) throw new Error('主动问候许可已撤回，未继续发送。'); stop(signal); };
     return this.controller.withPage(async page => {
+      await authorized('prepare');
       const { contact, flags } = await this.select(page, recipientId, signal);
       if (flags.blocked) return { ...flags, confirmed: false, deliveryUncertain: false };
       const before = await page.evaluate(readConversationDom);
@@ -394,7 +436,8 @@ export class ChatBrowser {
       const editor = page.locator('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable="true"]');
       if (await editor.count() !== 1) throw new Error('没有唯一的私信文字输入框。');
       if (readableDraft(await editor.innerText()) || await editor.locator('img,video,audio,[data-slate-void="true"]').count()) throw new Error('当前会话已有草稿，已停止发送以保留原内容。');
-      let clicked = false;
+      let clicked = false, monitoring = false, monitor, polling, releaseDispatch;
+      const witnessId = `chat-${hash(`${recipientId}:${Date.now()}:${Math.random()}`)}`;
       try {
         await editor.fill(message);
         stop(signal);
@@ -406,9 +449,35 @@ export class ChatBrowser {
         const targetPage = page.locator('.StackLayoutpagespageRoot,[data-e2e="chat-page"]').filter({ has: page.locator('.StackLayoutStackChatHeadertitle,[data-e2e="chat-title"]').filter({ hasText: new RegExp(`^${escaped}$`) }) });
         const send = targetPage.locator('.e2e-send-msg-btn,[data-e2e="send-msg-btn"]');
         if (await send.count() !== 1) throw new Error('没有唯一的指定会话发送按钮。');
-        stop(signal);
-        clicked = true;
-        await send.click({ timeout: 3000 });
+        await send.evaluate((button, token) => {
+          const entries = window.__deepseekChatInputs ??= Object.create(null), entry = { dispatched: false };
+          const witness = event => { if (event.isTrusted && (event.target === button || button.contains(event.target))) entry.dispatched = true; };
+          document.addEventListener('click', witness, true);
+          entry.cleanup = () => document.removeEventListener('click', witness, true); entries[token] = entry;
+        }, witnessId);
+        const inputDispatched = () => page.evaluate(token => window.__deepseekChatInputs?.[token]?.dispatched === true, witnessId);
+        const checkPendingInput = async () => {
+          if (clicked && await inputDispatched()) return;
+          await authorized('monitor');
+          if (await editor.count() !== 1 || await send.count() !== 1 || readableDraft(await editor.innerText()) !== readableDraft(message)) throw new Error('等待期间发送按钮或草稿发生变化，未发送。');
+          const current = await page.evaluate(readConversationDom), blockers = await page.evaluate(readChatBlockers);
+          if (blockers.loginRequired || blockers.verificationRequired || current.displayName !== contact.displayName || current.avatar !== contact.avatar) throw new Error('等待期间会话身份或页面许可发生变化，未发送。');
+          const messages = this.publicMessages(recipientId, current.messages);
+          if (messages.some(item => item.direction === 'unknown') || JSON.stringify(messages.map(item => item.id)) !== JSON.stringify(expected) || JSON.stringify(contentOf(messages)) !== JSON.stringify(expectedContent)) throw new Error('等待期间收到新消息或消息内容变化，未发送。');
+          stop(signal);
+        };
+        monitoring = true;
+        monitor = setInterval(() => { if (polling || !monitoring) return; polling = checkPendingInput().catch(async error => { if (monitoring && !await inputDispatched().catch(() => false)) interrupt.abort(error); }).finally(() => { polling = null; }); }, 40);
+        await checkPendingInput();
+        await send.click({ trial: true, timeout: 3000 });
+        stop(signal); await checkPendingInput(); await authorized('before-click');
+        if (await inputDispatched()) throw new Error('等待期间已发生发送输入，未再点击一次。');
+        if (authorize) { releaseDispatch = await authorize.beginDispatch(); if (typeof releaseDispatch !== 'function') throw new Error('最终输入控制没有返回可释放的许可。'); }
+        stop(signal); clicked = true;
+        await send.click({ timeout: 350, noWaitAfter: true });
+        releaseDispatch?.(); releaseDispatch = null;
+        if (!await inputDispatched()) throw new Error('没有核对到真实发送输入，结果需要核对。');
+        monitoring = false; clearInterval(monitor); stop(signal);
         const beforeIds = new Set(expected);
         for (let attempt = 0; attempt < 20; attempt += 1) {
           const after = await page.evaluate(readConversationDom);
@@ -431,6 +500,9 @@ export class ChatBrowser {
           }
         },message).catch(()=>{});
         return { ...receipt, confirmed: false, deliveryUncertain: clicked, reason: clicked ? '发送动作已尝试但结果不确定，未自动重试。' : '发送前检查未通过，未点击发送。' };
+      } finally {
+        monitoring = false; clearInterval(monitor); releaseDispatch?.();
+        await page.evaluate(token => { const entry = window.__deepseekChatInputs?.[token]; entry?.cleanup(); if (window.__deepseekChatInputs) delete window.__deepseekChatInputs[token]; }, witnessId).catch(() => {});
       }
     }, { signal });
   }

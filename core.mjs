@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from './playwright-runtime.mjs';
 import { MemoryStore } from './memory.mjs?v=2';
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=8';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=9';
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
-import { PersonaMemory } from './persona-memory.mjs?v=8';
+import { PersonaMemory } from './persona-memory.mjs?v=9';
 import { BrowserLauncher, connectDedicatedBrowser } from './browser-launcher.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -201,7 +201,7 @@ export class BrowserController {
   }
   limits() { return this.videoLimits ??= new VideoLimits(); }
   getMediaAdapter() { return this.mediaPromise??=import('./media/index.mjs?v=7').then(({MediaAdapter})=>new MediaAdapter()); }
-  getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs?v=8').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
+  getForwarder() { return this.forwarderPromise??=import('./video-forward.mjs?v=9').then(({VideoForwarder})=>new VideoForwarder({videoLimits:this.limits(),source:this.source==='dsh'?'dsh':'api'})); }
   watchVideoLimits() {
     if (!this.limitsEnabled || this.cancelLimitsWatch) return;
     this.cancelLimitsWatch = this.limits().watch({ sources:[this.source], pause:()=>this.pauseForLimits() });
@@ -247,10 +247,44 @@ export class BrowserController {
     return this.personaMemory;
   }
   getChatService() {
-    this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=5'),import('./chat-service.mjs?v=6')])
+    this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=9'),import('./chat-service.mjs?v=9')])
       .then(([{ChatBrowser},{ChatService}])=>{const service=new ChatService({browser:new ChatBrowser({source:this.source==='dsh'?'dsh-chat':'api-chat'})});service.agent.personaMemory=this.getPersonaMemory();return service;})
       .catch(error=>{this.chatPromise=null;throw error;});
     return this.chatPromise;
+  }
+  getSparkService() {
+    this.sparkPromise ??= Promise.all([this.getChatService(), import('./spark-service.mjs?v=9')]).then(([chat, { SparkService }]) => new SparkService({ browser: chat.browser, config: chat.config, personaMemory: this.getPersonaMemory(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.sparkPromise = null; throw error; });
+    return this.sparkPromise;
+  }
+  getCommenter() {
+    this.commenterPromise ??= import('./comment-browser.mjs?v=9').then(({ CommentBrowser }) => new CommentBrowser({ source: this.source === 'dsh' ? 'dsh' : 'api', videoLimits: this.limits(), stateDir: this.limits().stateDir })).catch(error => { this.commenterPromise = null; throw error; });
+    return this.commenterPromise;
+  }
+  getComments() {
+    this.commentsPromise ??= import('./autonomous-comments.mjs?v=9').then(({ AutonomousComments }) => new AutonomousComments({ controller: this, personaMemory: this.getPersonaMemory(), videoLimits: this.limits(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.commentsPromise = null; throw error; });
+    return this.commentsPromise;
+  }
+  getReport() {
+    this.reportPromise ??= import('./daily-report.mjs?v=9').then(({ DailyReport }) => new DailyReport({ personaMemory: this.getPersonaMemory() })).catch(error => { this.reportPromise = null; throw error; });
+    return this.reportPromise;
+  }
+  getWatchMode() {
+    this.modePromise ??= import('./watch-mode.mjs?v=9').then(({ WatchMode }) => new WatchMode({ stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' }));
+    return this.modePromise;
+  }
+  async applyWatchMode({ minimize = false } = {}) {
+    if (!['api', 'dsh'].includes(this.source) || !this.browser?.isConnected()) return { applied: false, pendingNextVideoAction: true };
+    const mode = await this.getWatchMode(), pages = this.browser.contexts().flatMap(context => context.pages());
+    const applied = [];
+    for (const page of pages) {
+      if (page.isClosed() || await page.evaluate(() => window.name).catch(() => '') !== `deepseek-douyin-${this.source}`) continue;
+      const result = await mode.apply(page);
+      if (minimize && mode.state().silent && result.applied) {
+        try { result.window = await mode.minimizeManagedWindow(page); } catch (error) { result.window = { minimized: false, reason: error.message }; }
+      }
+      applied.push(result);
+    }
+    return { applied: applied.some(item => item.applied), pages: applied, focusRequested: false };
   }
   openBrowser({ signal } = {}) {
     const operation = this.queue.catch(() => {}).then(async () => {
@@ -274,7 +308,14 @@ export class BrowserController {
     for (const candidate of context.pages()) {
       if (await candidate.evaluate(() => window.name).catch(()=>'') === label) { this.page = candidate; break; }
     }
-    if (!this.page || this.page.isClosed()) this.page = await context.newPage();
+    if (!this.page || this.page.isClosed()) {
+      const initial = [];
+      for (const candidate of context.pages()) {
+        if (candidate.isClosed() || candidate.url() !== 'about:blank') continue;
+        if (await candidate.evaluate(() => !window.name && !document.body?.textContent?.trim() && document.querySelectorAll('body *').length === 0).catch(() => false)) initial.push(candidate);
+      }
+      this.page = initial.length === 1 ? initial[0] : await context.newPage();
+    }
     this.page.setDefaultTimeout(10_000); this.page.setDefaultNavigationTimeout(25_000);
     await this.page.evaluate(name => { window.name = name; }, label);
     aborted(signal);
@@ -327,6 +368,7 @@ export class BrowserController {
         aborted(signal);
         const page=await this.connect(signal);
         aborted(signal);
+        if (['api', 'dsh'].includes(this.source)) await (await this.getWatchMode()).apply(page);
         if(new URL(page.url()).origin!=='https://www.douyin.com') throw new Error('专用标签页已离开抖音，请重新打开抖音后操作。');
         return await callback(page,signal);
       }finally{signal?.removeEventListener('abort',onAbort);release();}
@@ -367,6 +409,14 @@ export class BrowserController {
         if(name==='douyin_chat_read') return chat.readConversation(args.recipientId,{signal});
         if(name==='douyin_chat_observe') return chat.observeMessage(args.recipientId,args.messageId,{signal});
       }
+      if (name.startsWith('douyin_spark_')) {
+        const spark = await this.getSparkService(); aborted(signal);
+        if (name === 'douyin_spark_status') return spark.state();
+        if (name === 'douyin_spark_start') return spark.start({ schedule: true, explicit: true });
+        if (name === 'douyin_spark_stop') return spark.stop({ explicit: true });
+      }
+      if (name === 'douyin_report_status') return (await this.getReport()).state();
+      if (name === 'douyin_report_generate') return (await this.getReport()).generate({ reason: 'manual' });
       if(name==='douyin_media_status') return (await this.getMediaAdapter()).status();
       if(name==='douyin_forward_video') {
         if(humanAuthorized!==true) return {sent:false,requiresUserAction:true,note:'请在本机控制台选择这位好友并点击转发；此工具不会代替人类按钮授权。',recipientId:args.recipientId,url:args.url??null};
@@ -375,7 +425,7 @@ export class BrowserController {
       if (name==='douyin_recall') return this.store().recall({query:args.query??'',limit:args.limit??10});
       if (name==='douyin_persona_status') return this.getPersonaMemory().snapshot();
       if (name==='douyin_watch_status') {
-        const {AutonomousWatch}=await import('./autonomous-watch.mjs?v=8');
+        const {AutonomousWatch}=await import('./autonomous-watch.mjs?v=9');
         this.watchStatusReader??=new AutonomousWatch({controller:this,config:{},videoLimits:this.limits(),personaMemory:this.getPersonaMemory(),source:this.source==='dsh'?'dsh':'api',stateDir:this.limits().stateDir});
         return this.watchStatusReader.state();
       }
@@ -395,6 +445,13 @@ export class BrowserController {
         signal?.addEventListener('abort',onAbort,{once:true});
         await this.connect(signal);
         aborted(signal);
+        if (['api', 'dsh'].includes(this.source)) {
+          const mode = await this.getWatchMode();
+          await mode.apply(this.page);
+          if (autonomousRunId && mode.state().silent) {
+            try { await mode.minimizeManagedWindow(this.page); } catch { /* 未核实窗口归属时继续保持静音，不隐藏其他页面。 */ }
+          }
+        }
         await this.checkVideoLimits(name);
         if(this.limitsEnabled && !this.limits().state().allowed) await this.pauseForLimits();
         if(!['douyin_open','douyin_search','douyin_open_video'].includes(name) && new URL(this.page.url()).origin!=='https://www.douyin.com') {
@@ -560,6 +617,9 @@ export class BrowserController {
     if(this.limitsEnabled) await this.pauseForLimits();
     await this.queue.catch(()=>{});
     await this.browser?.close().catch(()=>{});
+    if(this.sparkPromise) await this.sparkPromise.then(spark=>spark.close()).catch(()=>{});
+    if(this.commentsPromise) await this.commentsPromise.then(comments=>comments.close()).catch(()=>{});
+    if(this.commenterPromise) await this.commenterPromise.then(commenter=>commenter.close?.()).catch(()=>{});
     if(this.chatPromise) await this.chatPromise.then(chat=>chat.close()).catch(()=>{});
     if(this.forwarderPromise) await this.forwarderPromise.then(forwarder=>forwarder.close?.()).catch(()=>{});
     this.memory?.close(); this.browser=null; this.page=null; this.memory=null;
