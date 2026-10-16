@@ -15,7 +15,7 @@ test('实际打入的依赖均有可核对通知，清单没有机器绝对路�
   assert.equal(manifest.method, 'esbuild-metafile-bytesInOutput'); assert.equal(info.licenses.packages, manifest.packages.length);
   for (const name of ['react', 'react-dom', 'scheduler', 'katex', '@shikijs/core', '@shikijs/langs', 'mdast-util-from-markdown', 'micromark-core-commonmark', '@deepseek-ai/dsh-client-ui-primitives', '@deepseek-ai/dsh-client-ui-layout', '@deepseek-ai/dsh-client-ui-theme']) assert.ok(manifest.packages.some(item => item.name === name), name);
   assert.equal(manifest.packages.some(item => ['electron', 'esbuild', '@deepseek-ai/cordis'].includes(item.name)), false);
-  assert.doesNotMatch(text, /[a-zA-Z]:[\\/]|\/Users\/|\/home\/|1982sprite/);
+  assert.doesNotMatch(text, /[a-zA-Z]:[\\/]|(?:^|[\\/])Users[\\/]|\/home\//);
   for (const item of manifest.packages) {
     assert.ok(item.inputs.length && item.notices.length, item.name);
     for (const notice of item.notices) {

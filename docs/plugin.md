@@ -4,22 +4,23 @@
 
 ## 安装到正在使用的 DSH
 
-本机正确安装为 F:/codex/DSH Desktop 2/DSH Desktop.exe。2026-10-16 已核实正在运行的这份软件为 2.0.17，内部 DSH 核心为 0.2.0-rc.2，并实际打开“设置 → 刷抖音”。不要启动另一份旧版 DeepSeek Harness；路径与版本都应核对。插件需要 Windows、Edge、Node.js 22.13+ 和本仓库依赖，不需要独立软件、QQ 服务或另一个 DSH 后台。
+2026-10-16 已在 DSH Desktop 2.0.17、内部 DSH 核心 0.2.0-rc.2 中核对“设置 → 刷抖音”。安装路径以你正在使用的那一份 DSH 为准；同时装有多个版本时，应核对路径与版本。插件需要 Windows、Edge、Node.js 22.13+ 和本仓库依赖，不需要独立软件、QQ 服务或另一个 DSH 后台。
 
 本机目前保留一个既有 file URI 后端入口，当前 SDK 能从它找到相邻 package.json 中的客户端声明，原生设置页已成功加载。继续使用这一入口无需迁移或重启；不要再叠加一个标准 bundle。以下流程供首次安装或本人选择迁移时使用。
 
 在仓库目录执行检查：
 
 ~~~powershell
-Set-Location -LiteralPath 'D:\codex分局\dsh配置\douyin-browser'
+# 在克隆后的 dsh-douyin-agent 仓库根目录执行
 pnpm install --frozen-lockfile
-.\install-native.ps1
+$dshInstallDirectory = 'C:\Apps\DSH Desktop' # 替换为实际安装目录
+.\install-native.ps1 -DshRoot $dshInstallDirectory
 ~~~
 
 检查不会改配置或打开桌面窗口。首次安装或选择迁移时，确认目录正确，完全退出这份 DSH，再执行：
 
 ~~~powershell
-.\install-native.ps1 -Install
+.\install-native.ps1 -DshRoot $dshInstallDirectory -Install
 ~~~
 
 安装脚本使用明确目录内的 DSH CLI，添加本地标准 bundle，保留安装前 profile 配置副本；成功后仅移除旧安装器管理的全局 douyin-browser 区块，避免两次注册。其他版本或机器可传 -DshRoot 指定已核实的安装目录。源码路径需保留，移动后须重新安装链接。脚本不强制结束进程、不自动重启、不修改其他插件，不删除登录、记忆或发送收据。
@@ -70,7 +71,7 @@ pnpm install --frozen-lockfile
 | stateDir/watch-mode.json、native-model.json | 共用静默开关、原生模型路由（不含Key） |
 | stateDir/spark-*、comments-*、share-* | 各自许可、预算、运行协调与收据 |
 
-位置记录默认在 %USERPROFILE%/.dsh/douyin-browser/runtime-location.json。本机既有记忆通常为 D:/codex分局/大肥鱼/memory；以页面回读为准，不应另复制一套或通过删配置“修复”路径。
+位置记录默认在 %USERPROFILE%/.dsh/douyin-browser/runtime-location.json。已有安装保留登记的记忆目录，新机器默认使用 %USERPROFILE%/.dsh/douyin-browser/memory；以页面回读为准，不应另复制一套或通过删配置“修复”路径。
 
 主题识别不等于喜欢。喜好依据实际媒体进度、观看比例、持续停留、快划及已确认分享计算，证据不足保持待观察；代理自己的偏好不能当用户偏好。人格手编正文只由本人保存，模型不能改许可、联系人、时间或现实承诺。人格保存有版本检查，保留自动生成区。
 

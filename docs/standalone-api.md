@@ -5,7 +5,7 @@
 双击本目录的 `start-api.cmd`，或执行：
 
 ```powershell
-& 'D:/codex分局/dsh配置/douyin-browser/start-api.ps1'
+.\start-api.ps1
 ```
 
 启动后打开 `http://127.0.0.1:3218`，在“刷视频时间”点击“开始新一轮”，再输入“搜索猫咪，观察当前视频 3 秒，告诉我看到了什么”等任务。DeepSeek 自己发出工具调用，读回浏览器结果再决定下一步。可以点击“停止”中断任务；抖音窗口和登录资料会保留。遇到登录、验证码请在专用 Edge 窗口手动完成，再重新发起任务。
@@ -23,7 +23,7 @@
 ```powershell
 $env:DOUYIN_MODEL = 'deepseek-flash'
 $env:DOUYIN_API_PORT = '3218'
-& 'D:/codex分局/dsh配置/douyin-browser/start-api.ps1' -Port 3218
+.\start-api.ps1 -Port 3218
 ```
 
 `DOUYIN_QQ_ROOT` 可指定另一个 QQ 机器人项目目录。也可以只设置当前进程的 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_BASE_URL`，无需读取 QQ 项目。不要把密钥写入此文档、命令参数或网页。
@@ -87,14 +87,14 @@ $env:DOUYIN_API_PORT = '3218'
 ## 开发与验证
 
 ```powershell
-node --test 'D:/codex分局/dsh配置/douyin-browser/tests/api-agent.test.mjs'
+node --test tests/api-agent.test.mjs
 ```
 
 定向测试使用假的模型和控制器，覆盖工具回读、图片回传与预算、停止、截断与损坏响应、凭据去敏，以及真实 HTTP 请求下的 Host、Origin、令牌、JSON 内容和大小限制。临时 Edge 测试检验任务填入、开始、停止、笔记检索和桌面/手机宽度布局；它使用替身控制器，不操作登录资料。启用页面测试：
 
 ```powershell
 $env:DOUYIN_UI_TEST = '1'
-node --test 'D:/codex分局/dsh配置/douyin-browser/tests/api-agent.test.mjs'
+node --test tests/api-agent.test.mjs
 ```
 
 2026-10-14 完成两次最小真实 API 请求，均为 HTTP 200，返回模型为 `deepseek-flash`：一项按要求发出了 `douyin_status` 工具调用；另一项接收已有的真实抖音截图，答出了中间人物的外套、内搭和户外树林背景。该验证只证明当前接口的工具协议与图片输入可用，没有在这两次请求中调用浏览器。

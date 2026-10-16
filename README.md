@@ -36,14 +36,17 @@
 需要 Windows、Microsoft Edge、Node.js 22.13 以上，以及 DSH 0.2.0-rc.2 系列（已在 DSH Desktop 2.0.17 上核对过设置页）。
 
 ```powershell
+git clone https://github.com/LockyBee/dsh-douyin-agent.git
+cd dsh-douyin-agent
 pnpm install --frozen-lockfile
-.\install-native.ps1
+$dshInstallDirectory = 'C:\Apps\DSH Desktop' # 替换为正在使用的 DSH 安装目录
+.\install-native.ps1 -DshRoot $dshInstallDirectory
 ```
 
 第一条命令安装依赖；不带 `-Install` 的脚本只做检查，不改配置也不开窗口。确认无误后完全退出 DSH，再执行：
 
 ```powershell
-.\install-native.ps1 -Install
+.\install-native.ps1 -DshRoot $dshInstallDirectory -Install
 ```
 
 重新打开 DSH，在「设置」里找到「刷抖音」，按这个顺序用：
@@ -102,3 +105,7 @@ pnpm run test:native
 ```
 
 `pnpm test` 会起临时 Edge 页面，不碰真实抖音和你的账号。运行状态、浏览器资料、密钥、数据库、私信正文和联系人信息都只保存在本机，不进入仓库。
+
+## 许可证
+
+本项目原创代码采用 [MIT](LICENSE)。第三方源码和依赖的原许可证、版权及通知见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
