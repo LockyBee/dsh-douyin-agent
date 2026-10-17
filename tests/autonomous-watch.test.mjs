@@ -71,6 +71,114 @@ test('真实采样结果先进入共同证据，再结构化选择搜索/停留/
   assert.ok(f.memory.recall({ query: '猫咪' }).entries.length >= 1); assert.equal(JSON.stringify(f.events).includes(PNG), false);
 });
 
+test('观看动作忽略多余时长，超长停留建议实际只执行十秒并按原预算停止', async t => {
+  const f = fixture(t), queue = [
+    choice('skip', { query: '', seconds: 30, recipientId: null }),
+    choice('stay', { query: null, seconds: 600, recipientId: '' }),
+    choice('search', { query: '猫咪', seconds: 90, recipientId: null }),
+    choice('stop', { query: '  ', seconds: 100, recipientId: ' ' }),
+  ];
+  const waits = [], delayImpl = f.watch.delayImpl;
+  f.watch.delayImpl = async (ms, signal) => { waits.push(ms); return delayImpl(ms, signal); };
+  f.provider(async () => ({ text: JSON.stringify(queue.shift()), usage: { total_tokens: 5 } }));
+  f.watch.start({ startSession: true, maxRequests: 4 }, { explicit: true }); await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped');
+  assert.equal(f.watch.state().counts.requests, 4);
+  assert.equal(f.calls.filter(call => call.name === 'douyin_next').length, 1);
+  assert.deepEqual(waits, [10_000]);
+  assert.equal(f.events.filter(event => event.type === 'watch.decision').length, 4);
+  assert.equal(f.events.find(event => event.type === 'watch.decision' && event.decision.action === 'stay').decision.seconds, 10);
+  assert.equal(f.paused(), 1);
+});
+
+test('模型JSON漏写停留时长时宿主默认三秒，随后停止仍保留同轮请求预算', async t => {
+  const f = fixture(t), queue = [choice('stay'), choice('stop')], waits = [], delayImpl = f.watch.delayImpl;
+  f.watch.delayImpl = async (ms, signal) => { waits.push(ms); return delayImpl(ms, signal); };
+  f.provider(async () => {
+    const value = queue.shift();
+    assert.equal(Object.hasOwn(value, 'seconds'), false);
+    return { text: JSON.stringify(value), usage: { total_tokens: 5 } };
+  });
+  f.watch.start({ startSession: true, maxRequests: 2 }, { explicit: true });
+  const session = f.videoLimits.state().session;
+  await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped');
+  assert.deepEqual(waits, [3000]);
+  assert.equal(f.watch.state().counts.requests, 2);
+  assert.equal(f.watch.state().counts.maxRequests, 2);
+  assert.equal(f.videoLimits.state().session.id, session.id);
+  assert.equal(f.videoLimits.state().session.expiresAt, session.expiresAt);
+  assert.throws(() => f.watch.start({ maxRequests: 100 }, { explicit: true }), /预算已用完/);
+  assert.equal(f.watch.state().counts.requests, 2);
+  assert.equal(f.events.find(event => event.type === 'watch.decision' && event.decision.action === 'stay').decision.seconds, 3);
+  assert.equal(f.paused(), 1);
+});
+
+test('仅移除不适用于当前动作的空值，不改写调用方数据或有效动作参数', () => {
+  for (const [action, extra] of [
+    ['skip', { query: '', seconds: 0, recipientId: null }],
+    ['stop', { query: null, seconds: null, recipientId: '  ' }],
+    ['search', { query: '猫咪', seconds: 0, recipientId: '' }],
+    ['stay', { query: ' ', seconds: 2, recipientId: null }],
+  ]) {
+    const raw = Object.freeze(choice(action, extra)), before = JSON.stringify(raw);
+    const expected = choice(action, action === 'search' ? { query: '猫咪' } : action === 'stay' ? { seconds: 2 } : {});
+    assert.deepEqual(parseWatchDecision(raw), expected);
+    assert.deepEqual(parseWatchDecision(JSON.stringify(raw)), expected);
+    assert.equal(JSON.stringify(raw), before);
+  }
+});
+
+test('时长兼容只接受安全整数，不允许非法类型、非空跨动作参数或未知字段', () => {
+  assert.equal(parseWatchDecision(choice('stay')).seconds, 3);
+  assert.equal(parseWatchDecision(choice('stay', { seconds: undefined })).seconds, 3);
+  for (const seconds of [null, 0, -1, 1.5, '', '2', false, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => parseWatchDecision(choice('stay', { seconds, query: null, recipientId: '' })), /1至10秒/);
+  }
+  for (const seconds of [1, 10, 11, 600, Number.MAX_SAFE_INTEGER]) assert.equal(parseWatchDecision(choice('stay', { seconds })).seconds, Math.min(seconds, 10));
+  for (const action of ['skip', 'search', 'stop']) {
+    for (const seconds of [0, 10, 600, Number.MAX_SAFE_INTEGER]) {
+      const value = choice(action, { seconds, ...(action === 'search' ? { query: '猫咪' } : {}) });
+      assert.equal(Object.hasOwn(parseWatchDecision(value), 'seconds'), false);
+    }
+  }
+  for (const extra of [{ seconds: -1 }, { seconds: 1.5 }, { seconds: '0' }, { seconds: false }, { seconds: '' }, { seconds: NaN }, { seconds: Infinity }, { seconds: Number.MAX_SAFE_INTEGER + 1 }, { query: '猫咪' }, { recipientId: `conv:${'a'.repeat(64)}` }, { url: null }]) {
+    assert.throws(() => parseWatchDecision(choice('skip', extra)));
+  }
+  for (const query of [undefined, null, '', ' ']) assert.throws(() => parseWatchDecision(choice('search', { query, seconds: 0 })), /关键词/);
+});
+
+test('时长错误只诊断动作及数字或类型，不包含理由、人格或字符串原值', () => {
+  const privateText = '合成私人资料不得写入诊断';
+  for (const [seconds, expected] of [[0, 'number:0'], [-1, 'number:-1'], [1.5, 'number:1.5'], [NaN, 'number:NaN'], [privateText, 'string'], [{ privateText }, 'object']]) {
+    assert.throws(() => parseWatchDecision(choice('stay', { seconds, reason: privateText, reflection: privateText })), error => {
+      assert.match(error.message, /action=stay/);
+      assert.ok(error.message.includes(`seconds=${expected}`));
+      assert.equal(error.message.includes(privateText), false);
+      return true;
+    });
+  }
+});
+
+test('空字段兼容后分享和评论仍要求有效许可与剩余额度', () => {
+  const recipientId = `conv:${'a'.repeat(64)}`;
+  const shareContext = { enabled: true, paused: false, dailyRemaining: 1, recipients: [{ id: recipientId, name: '合成许可好友' }] };
+  const share = choice('share', { query: null, seconds: 0, recipientId });
+  assert.equal(parseWatchDecision(share, { shareContext }).recipientId, recipientId);
+  for (const seconds of [1, 10, 600]) assert.throws(() => parseWatchDecision({ ...share, seconds }, { shareContext }), /1至10秒/);
+  for (const permission of [undefined, { ...shareContext, enabled: false }, { ...shareContext, paused: true }, { ...shareContext, dailyRemaining: 0 }]) {
+    assert.throws(() => parseWatchDecision(share, { shareContext: permission }), /许可好友/);
+  }
+  for (const id of [null, '', `conv:${'b'.repeat(64)}`]) assert.throws(() => parseWatchDecision({ ...share, recipientId: id }, { shareContext }), /许可好友/);
+  const commentContext = { enabled: true, paused: false, remainingDaily: 1, remainingSession: 1 };
+  const comment = choice('comment', { query: '', seconds: null, recipientId: null });
+  assert.equal(parseWatchDecision(comment, { commentContext }).action, 'comment');
+  for (const seconds of [1, 10, 600]) assert.throws(() => parseWatchDecision({ ...comment, seconds }, { commentContext }), /1至10秒/);
+  for (const permission of [undefined, { ...commentContext, enabled: false }, { ...commentContext, paused: true }, { ...commentContext, remainingDaily: 0 }, { ...commentContext, remainingSession: 0 }]) {
+    assert.throws(() => parseWatchDecision(comment, { commentContext: permission }), /评论未启用/);
+  }
+});
+
 test('同轮预算在停止、重新构造及失败后保持；预算耗尽不再采样或自行续轮', async t => {
   const f = fixture(t); f.provider(async () => ({ text: JSON.stringify(choice('skip')) }));
   f.watch.start({ startSession: true, maxRequests: 2 }, { explicit: true }); const sessionId = f.watch.sessionId; await f.watch.completion;
@@ -143,7 +251,7 @@ test('普通ApiAgent每次请求重读人格；结构化解析拒绝越权与不
   let counter = 0; const prompts = [];
   const agent = new ApiAgent({ controller: { execute: async () => ({}) }, config: { apiKey: 'synthetic', baseUrl: 'https://synthetic.example', model: 'synthetic' }, personaMemory: { context: () => `共享人格版本${++counter}` }, fetchImpl: async (_url, options) => { const body = JSON.parse(options.body); prompts.push(body.messages[0].content); return new Response(JSON.stringify({ choices: [{ message: prompts.length === 1 ? { tool_calls: [{ id: 'synthetic-call', type: 'function', function: { name: 'douyin_status', arguments: '{}' } }] } : { content: '已读取共同人格。' } }] })); } });
   assert.equal((await agent.runTask({ instruction: '看看人格。' })).status, 'completed'); assert.match(prompts[0], /共享人格版本1/); assert.match(prompts[1], /共享人格版本2/);
-  for (const value of [{ ...choice(), action: 'forward' }, { ...choice(), tools: [] }, choice('stay', { seconds: 999 }), choice('search', { query: '' }), { ...choice(), reflection: undefined }]) assert.throws(() => parseWatchDecision(value));
+  for (const value of [{ ...choice(), action: 'forward' }, { ...choice(), tools: [] }, choice('stay', { seconds: -1 }), choice('search', { query: '' }), { ...choice(), reflection: undefined }]) assert.throws(() => parseWatchDecision(value));
   assert.throws(() => watchDecisionMessages({ state: { loginRequired: true }, frames: [] }), /手动操作/);
 });
 

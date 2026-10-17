@@ -1,7 +1,6 @@
 {
   "name": "dsh-douyin-browser-local",
-  "version": "1.3.0",
-  "private": true,
+  "version": "1.3.1",
   "type": "module",
   "description": "DSH 原生抖音工具与独立 DeepSeek 本地助手",
   "license": "MIT",
@@ -14,7 +13,14 @@
   "bugs": {
     "url": "https://github.com/LockyBee/dsh-douyin-agent/issues"
   },
-  "keywords": ["dsh-plugin", "deepseek-harness", "douyin", "browser-automation", "persona", "local-memory"],
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "douyin",
+    "browser-automation",
+    "persona",
+    "local-memory"
+  ],
   "engines": {
     "node": ">=22.13",
     "dsh": ">=0.2.0-rc.2 <0.3.0"
@@ -100,6 +106,21 @@
       "inject": [
         "@deepseek-ai/dsh-client-ui-settings-general"
       ]
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "os": [
+    "win32"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh": "^0.2.0-rc.2"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
     }
   }
 }

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ApiAgent, redact, watchDecisionMessages, parseWatchDecision } from './api-agent.mjs?v=9';
+import { ApiAgent, redact, watchDecisionMessages, parseWatchDecision } from './api-agent.mjs?v=13';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { AutonomousShare } from './autonomous-share.mjs?v=9';
 import { AutonomousComments } from './autonomous-comments.mjs?v=9';

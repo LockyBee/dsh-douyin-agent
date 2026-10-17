@@ -41,3 +41,12 @@
 本机两个市场入口使用不同目录。`dshmarket` 使用 awesome-dsh-plugin 目录；自动检查通过后仍须合并申请，再等待目录同步，刷新本机不能补入尚未合并的条目。
 
 `dsh-community-market` 的默认页面为“可安装”，会过滤没有可用 npm 包的条目。当前本插件未发布 npm，应在“发现”页选择“DSH 1024Store”来源，再搜索 `dsh-douyin-agent` 或 `LockyBee`。2026-10-16 匿名查询 1024Store 线上 API，搜索完整仓库名和“抖音”均能找到本插件；线上收录不代表本机已具备 npm 一键安装。
+
+## 2026-10-17 npm 发布准备
+
+包名保持 `dsh-douyin-browser-local`，待发布版本 `1.3.1`，包含本地已验证的观看决策参数修复。已取消 private 限制，指定 npm 官方 registry 与 public 可见性，声明 Windows 和 DSH 0.2.0-rc.2 宿主要求。保留白名单打包，不含本机配置、人格、凭据、浏览器资料和验收输出。此前未发布 npm 的说明为当时状态；最终发布状态以 npm registry 为准。
+
+## 2026-10-17 npm 发布结果
+
+已发布 dsh-douyin-browser-local@1.3.1，npm latest 已指向该版本。从官方 registry 在隔离目录安装成功，原生入口 apply 可导入，dsh.bundle.patch 存在，registry integrity 与已测试 tarball 一致。未重启用户 DSH，未声称本次已完成桌面端运行验收。1024Store 在线目录仍返回旧 GitHub 安装命令；awesome-dsh-plugin PR #7509 仍待合并，市场一键安装尚未验证。
+

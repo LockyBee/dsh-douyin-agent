@@ -42,14 +42,14 @@ async function managedIncludeFixture({ version = '4', mode = 'complete' } = {}) 
   const configFile = join(directory, 'plugins.json'), otherFile = join(directory, 'other-plugin.mjs');
   const { ctx, runtime } = context();
   const config = { marker: '保留原插件配置', nested: { enabled: true }, mode };
-  await writeFile(file, `import {createNativeToolDefinitions} from ${JSON.stringify(new URL('../dsh-plugin.mjs?v=10', import.meta.url).href)};
+  await writeFile(file, `import {createNativeToolDefinitions} from ${JSON.stringify(new URL('../dsh-plugin.mjs?v=13', import.meta.url).href)};
 export const name='douyin-managed-fixture';export const inject=['tools'];
 export function apply(ctx,config={}){
   const version=new URL(import.meta.url).searchParams.get('v');
   const all=createNativeToolDefinitions({ctx,getController:async()=>{throw new Error('SDK临时测试禁止浏览器执行')}});
-  const count=version==='10'?(config.mode==='incomplete'?all.length-1:all.length):${version.endsWith('-full') ? 'all.length' : version === '5' ? '22' : '17'};
+  const count=version==='13'?(config.mode==='incomplete'?all.length-1:all.length):${version.endsWith('-full') ? 'all.length' : version === '5' ? '22' : '17'};
   for(const tool of all.slice(0,count)){const off=ctx.tools.register(tool);ctx.effect(()=>off)}
-  if(version==='10'&&config.mode==='throw')throw new Error('合成升级失败');
+  if(version==='13'&&config.mode==='throw')throw new Error('合成升级失败');
   ctx.provide('douyinManagedFixture',{version,config});
 }`);
   await writeFile(otherFile, `export const name='unrelated-fixture';export function apply(ctx,config){ctx.provide('unrelatedManagedFixture',config)}`);
@@ -82,10 +82,10 @@ test('真实SDK复现：旧式include移除再新建留下失败条目，Loader.
   const fixture = await managedIncludeFixture();
   try {
     assert.equal(fixture.runtime.schemas().length, 17);
-    const legacy = `return {name:'legacy-remove-create',inject:['loader','tools'],async apply(ctx){await ctx.loader.remove('include:douyin-browser');await ctx.loader.create({name:${JSON.stringify(`${fixture.uri}?v=10`)}});await ctx.loader.await()}};`;
+    const legacy = `return {name:'legacy-remove-create',inject:['loader','tools'],async apply(ctx){await ctx.loader.remove('include:douyin-browser');await ctx.loader.create({name:${JSON.stringify(`${fixture.uri}?v=13`)}});await ctx.loader.await()}};`;
     const { result } = await fixture.run(legacy);
     assert.equal(result.ok, true, JSON.stringify(result));
-    const failed = [...fixture.ctx.loader.entries()].find(entry => entry.options.name === `${fixture.uri}?v=10`);
+    const failed = [...fixture.ctx.loader.entries()].find(entry => entry.options.name === `${fixture.uri}?v=13`);
     assert.equal(Boolean(failed), true);
     assert.equal(failed.fiber.state, 3, '重复注册使新条目失败，Loader.await只等任务收敛，不向辅助包上抛该错误');
     assert.equal(fixture.ctx.loader.resolve('include:douyin-browser'), fixture.entry);
@@ -98,31 +98,31 @@ test('真实SDK复现：旧式include移除再新建留下失败条目，Loader.
 test('真实SDK复现：Loader仅更新name元数据时旧fiber和17工具仍在', async () => {
   const fixture = await managedIncludeFixture();
   try {
-    await fixture.ctx.loader.update(fixture.entry.id, { name: `${fixture.uri}?v=10` });
+    await fixture.ctx.loader.update(fixture.entry.id, { name: `${fixture.uri}?v=13` });
     await fixture.ctx.loader.await();
-    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=10`);
+    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=13`);
     assert.equal(fixture.entry.fiber, fixture.originalFiber);
     assert.equal(fixture.ctx.get('douyinManagedFixture').version, '4');
     assert.equal(fixture.runtime.schemas().length, 17);
   } finally { await fixture.close(); }
 });
 
-test('旧版完整32工具被误标为v10时仍核对实际入口函数，真实重载后重复运行不再重启', async () => {
+test('旧版完整32工具被误标为v13时仍核对实际入口函数，真实重载后重复运行不再重启', async () => {
   for (const version of ['4-full', '7-full']) {
     const fixture = await managedIncludeFixture({ version });
     try {
       const previousCallback = fixture.entry.fiber.runtime.callback;
-      await fixture.ctx.loader.update(fixture.entry.id, { name: `${fixture.uri}?v=10` });
+      await fixture.ctx.loader.update(fixture.entry.id, { name: `${fixture.uri}?v=13` });
       await fixture.ctx.loader.await();
       assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
       assert.equal(fixture.entry.fiber, fixture.originalFiber);
       assert.equal(fixture.ctx.get('douyinManagedFixture').version, version);
       const first = await fixture.run(await fixture.helper());
       assert.equal(first.result.ok, true, JSON.stringify(first.result));
-      assert.equal(fixture.entry.options.name, `${fixture.uri}?v=10`);
+      assert.equal(fixture.entry.options.name, `${fixture.uri}?v=13`);
       assert.notEqual(fixture.entry.fiber, fixture.originalFiber);
       assert.notEqual(fixture.entry.fiber.runtime.callback, previousCallback);
-      assert.equal(fixture.ctx.get('douyinManagedFixture').version, '10');
+      assert.equal(fixture.ctx.get('douyinManagedFixture').version, '13');
       assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
       const upgradedFiber = fixture.entry.fiber;
       const second = await fixture.run(await fixture.helper());
@@ -145,15 +145,15 @@ test('真实纯host沙箱受控重启原include条目，停止辅助包仍保留
     await fixture.ctx.loader.await();
     assert.equal(fixture.ctx.loader.resolve('include:douyin-browser'), fixture.entry);
     assert.notEqual(fixture.entry.fiber, fixture.originalFiber);
-    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=10`);
+    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=13`);
     assert.deepEqual({ ...fixture.entry.options, name: before.name }, before);
     assert.equal(fixture.runtime.schemas().length, TOOL_DEFINITIONS.length);
-    assert.equal(fixture.ctx.get('douyinManagedFixture').version, '10');
+    assert.equal(fixture.ctx.get('douyinManagedFixture').version, '13');
     assert.deepEqual(fixture.ctx.get('douyinManagedFixture').config, fixture.config);
     assert.equal(fixture.unrelated.fiber, fixture.unrelatedFiber);
     const persisted = await fixture.persisted();
     assert.deepEqual(persisted.map(entry => entry.id), ['douyin-browser', 'unrelated']);
-    assert.deepEqual(persisted[0], { ...fixture.entries[0], name: `${fixture.uri}?v=10` });
+    assert.deepEqual(persisted[0], { ...fixture.entries[0], name: `${fixture.uri}?v=13` });
     assert.deepEqual(persisted[1], fixture.entries[1]);
     const stopped = await fixture.runner.undefine(fixture.agent, defined.pluginId);
     assert.equal(stopped.ok, true);
@@ -163,14 +163,14 @@ test('真实纯host沙箱受控重启原include条目，停止辅助包仍保留
   } finally { await fixture.close(); }
 });
 
-test('已有完整目录或v5旧22工具仍核对自有entry版本，升级到v10且重复运行不重启', async () => {
+test('已有完整目录或v5旧22工具仍核对自有entry版本，升级到v13且重复运行不重启', async () => {
   for (const version of ['4-full', '5']) {
   const fixture = await managedIncludeFixture({ version });
   try {
     assert.equal(fixture.runtime.schemas().length, version === '5' ? 22 : TOOL_DEFINITIONS.length);
     const first = await fixture.run(await fixture.helper());
     assert.equal(first.result.ok, true, JSON.stringify(first.result));
-    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=10`);
+    assert.equal(fixture.entry.options.name, `${fixture.uri}?v=13`);
     assert.notEqual(fixture.entry.fiber, fixture.originalFiber);
     const upgradedFiber = fixture.entry.fiber;
     const second = await fixture.run(await fixture.helper());
@@ -204,7 +204,7 @@ test('原位升级的应用失败或工具目录不完整时回滚原include条�
 });
 
 test('工具名齐全但来源不是目标entry，或自有entry不唯一时拒绝加载', async () => {
-  const foreign = await managedIncludeFixture({ version: '10' });
+  const foreign = await managedIncludeFixture({ version: '13' });
   try {
     const body = (await foreign.helper()).replaceAll(foreign.uri, foreign.uri.replace('plugin.mjs', 'different-plugin.mjs'));
     const { result } = await foreign.run(body);
@@ -258,7 +258,7 @@ test('新建条目的清理不删除同ID替换、原位改名的其他插件，
   for (const replacement of ['replace', 'rename', 'removed']) {
     const directory = await mkdtemp(join(tmpdir(), 'douyin-cleanup-owner-'));
     const file = join(directory, 'plugin.mjs'), uri = pathToFileURL(file).href;
-    await writeFile(file, `export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=10', import.meta.url).href)};`);
+    await writeFile(file, `export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=13', import.meta.url).href)};`);
     const { ctx, runtime } = context();
     const fiber = ctx.plugin(Loader, { baseUrl: pathToFileURL(join(directory, 'cordis.yml')).href });
     await fiber.await(); ctx.loader.internal = undefined;
@@ -270,7 +270,7 @@ test('新建条目的清理不删除同ID替换、原位改名的其他插件，
       const result = await runner.run(agent, defined.pluginId, defined.packageId, 'run', new AbortController().signal);
       assert.equal(result.ok, true, JSON.stringify(result));
       assert.equal(runtime.schemas().length, TOOL_DEFINITIONS.length);
-      const entry = [...ctx.loader.entries()].find(entry => entry.options.name === `${uri}?v=10`), id = entry.id;
+      const entry = [...ctx.loader.entries()].find(entry => entry.options.name === `${uri}?v=13`), id = entry.id;
       const originalFiber = entry.fiber;
       if (replacement === 'rename') {
         await ctx.loader.update(id, { disabled: true });
@@ -474,13 +474,13 @@ test('真实动态包可通过 Loader 原位升级同路径旧模块，保留已
     await writeFile(file,`export const name='old-douyin';export const inject=['tools'];export function apply(ctx){const off=ctx.tools.register({name:'douyin_open',description:'合成旧版本',parameters:{type:'object',properties:{}},output:{schema:{type:'object',additionalProperties:true},render:()=>[{type:'text',text:'合成状态'}]},execute:async()=>({ok:true})});ctx.effect(()=>off)}`);
     const old=await ctx.loader.create({name:uri});await ctx.loader.await();
     assert.equal(runtime.schemas().length,1);
-    await writeFile(file,`export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=10',import.meta.url).href)};`);
+    await writeFile(file,`export{default,name,inject,apply}from${JSON.stringify(new URL('../dsh-plugin.mjs?v=13',import.meta.url).href)};`);
     const body=(await readFile(new URL('../plugin-hotload.js',import.meta.url),'utf8')).replaceAll('file:///D:/codex%E5%88%86%E5%B1%80/dsh%E9%85%8D%E7%BD%AE/douyin-browser/dsh-plugin.mjs',uri);
     const defined=runner.define({sessionId:'升级测试',plugin:{kind:'new',idPrefix:'douyin'},name:'升级测试',purpose:'核实模块升级',code:{host:body}});
     const result=await runner.run({id:'升级测试'},defined.pluginId,defined.packageId,'run',new AbortController().signal);await ctx.loader.await();
     assert.equal(result.ok,true,JSON.stringify(result));
     assert.equal(runtime.schemas().length,TOOL_DEFINITIONS.length);assert.equal(Boolean(ctx.loader.store[old]),true);
-    assert.equal(ctx.loader.resolve(old).options.name,`${uri}?v=10`);
+    assert.equal(ctx.loader.resolve(old).options.name,`${uri}?v=13`);
     await runner.undefine({id:'升级测试'},defined.pluginId);
     assert.equal(runtime.schemas().length,TOOL_DEFINITIONS.length);
   }finally{await ctx.fiber.dispose();await rm(directory,{recursive:true,force:true});}
