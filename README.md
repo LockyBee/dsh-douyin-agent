@@ -35,10 +35,12 @@
 
 ### npm 安装（1.3.1）
 
-在 DSH Desktop 自带终端中运行：
+DSH Desktop：打开“应用 → 桌面插件”，在 npm 包输入框填写 `dsh-douyin-browser-local@1.3.1` 并点击“安装”。Desktop profile 由 Electron 管理，不能用普通 CLI 修改。
+
+Web 版在终端运行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-douyin-browser-local@1.3.1
+dsh plugin --profile web add dsh-douyin-browser-local@1.3.1
 ```
 
 需要 Windows、已安装 Microsoft Edge 和 DSH 0.2.0-rc.2。安装后按宿主提示重新加载，在设置中打开“刷抖音”；抖音登录和验证由使用者自行完成。市场收录与 npm 包发布分别同步，不能把发布成功当成市场已刷新。
@@ -124,4 +126,3 @@ pnpm run test:native
 本项目原创代码采用 [MIT](LICENSE)。第三方源码和依赖的原许可证、版权及通知见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 公开准备、分发包检查与社区市场申请见 [发布记录](docs/publication.md)。
-
