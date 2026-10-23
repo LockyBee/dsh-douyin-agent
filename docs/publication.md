@@ -54,3 +54,15 @@
 
 针对多位使用者反馈的“没有可用的同源设置服务”，修复桌面载体识别、Connection 后端设置路由及断连后的刷新恢复，纳入 1.3.2 候选源码。当前只准备本地 tarball、完成隔离安装，未发布 npm、未改市场条目，不应指导使用者安装尚未发布的版本号。设置通信两代 SDK 和定向检查通过；完整回归的既有 Node 探针超时、Windows EPERM 偶发失败如实保留，详见 [验证记录](verification/settings-compatibility-20261023.md)。
 
+## 2026-10-23 1.4.3 公开发布
+
+上面的1.3.2至1.4.2是本机候选记录，这些功能已随1.4.3一并公开。源码提交为`2b5802dee6be880416094038107931e176455da3`，发布标签为`v1.4.3`。
+
+- [GitHub Release](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.3)已公开，包含Windows x64便携EXE、同名SHA256文件和插件tarball。EXE为124624746字节，SHA256为`cbff8e513d1b5d7dbe43a0377a9c908c225ff42842bb88d5d23fd5d8e9550e61`；GitHub返回的附件digest与本地一致。
+- [npm包](https://www.npmjs.com/package/dsh-douyin-browser-local/v/1.4.3)已发布，公共registry确认版本为1.4.3，latest指向1.4.3。包内86个文件，压缩593273字节，SHA512 integrity为`sha512-c6pxFRA4QWQTwaNq+I4RHL+dEaYRAPpTzcgm3PvIWUCfJHM9YAp52GAP3wkIDJhdqTkjZqdkMpg6Maqg5rJtig==`。
+- 从官方registry重新下载tarball，摘要与上传前审查的文件一致；另在仓库外的临时项目从registry按固定版本全新安装，原生apply、34项工具、客户端声明、bundle补丁及诊断等共享模块均可读取和导入。未安装到用户的DSH profile，未启动浏览器、模型或外发。
+- 发布使用文件白名单；源码上传没有加入本机配置、记忆、登录资料、录屏、原始诊断和聊天采样。补齐npm白名单中的task-limits.mjs，检查静态相对模块依赖完整。源码与运行包保留MIT及内置第三方许可。
+- 社区市场目录和npm分别同步。固定版本安装已验证；本条不表示用户本机的市场缓存已刷新，也没有为了发布改写他人的目录条目。
+
+软件更新器已能从正式GitHub latest识别1.4.3；本机Node直连GitHub下载域名出现连接超时，不能据此声称内置下载在所有网络下通过。原本的便携包隔离启动、诊断和退出检查通过，详见[本机验收摘要](verification/local-1.4.3-20261023.md)。
+
