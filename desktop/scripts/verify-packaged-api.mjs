@@ -11,8 +11,9 @@ import { chromium } from '../../playwright-runtime.mjs';
 
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'), domain = path.dirname(desktop);
 const { version } = JSON.parse(await fs.readFile(path.join(desktop, 'package.json'), 'utf8'));
-const executable = path.join(desktop, 'release-api', `Dafeiyu-Douyin-API-${version}-win-x64.exe`);
-const unpacked = path.join(desktop, 'release-api', 'win-unpacked'), resources = path.join(unpacked, 'resources');
+const releaseDirectory = process.argv[2] ? path.resolve(process.argv[2]) : path.join(desktop, 'release-api');
+const executable = path.join(releaseDirectory, `Dafeiyu-Douyin-API-${version}-win-x64.exe`);
+const unpacked = path.join(releaseDirectory, 'win-unpacked'), resources = path.join(unpacked, 'resources');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const rootRequire = createRequire(path.join(desktop, 'package.json'));
 const builderRequire = createRequire(rootRequire.resolve('electron-builder'));
@@ -106,7 +107,18 @@ try {
   await page.getByText('主题已保存，插件与软件共用；下次自主观看生效。', { exact: true }).waitFor();
   await page.getByRole('button', { name: '谷时段（DeepSeek）', exact: true }).click();
   await page.getByRole('switch', { name: '不限单轮时长', exact: true }).click();
-  await page.getByRole('button', { name: '保存时间设置', exact: true }).click();
+  const saveTime = () => Promise.all([page.waitForResponse(response => response.url().endsWith('/api/video/policy') && response.request().method() === 'POST'), page.getByRole('button', { name: '保存时间设置', exact: true }).click()]);
+  const savedMinutes = () => page.evaluate(async () => { const boot = await (await fetch('/api/bootstrap')).json(); return (await (await fetch('/api/video/status', { headers: { 'x-session-token': boot.token } })).json()).policy.sessionMinutes; });
+  await saveTime();
+  const minutes = page.getByRole('spinbutton', { name: '单轮上限', exact: true });
+  assert.equal(await minutes.isEnabled(), true); assert.equal(await minutes.inputValue(), ''); assert.equal(await savedMinutes(), null);
+  await minutes.fill('25'); await delay(1700);
+  assert.equal(await minutes.inputValue(), '25'); assert.equal(await page.getByRole('switch', { name: '不限单轮时长', exact: true }).getAttribute('aria-checked'), 'false');
+  assert.equal(await savedMinutes(), null);
+  await saveTime(); assert.equal(await savedMinutes(), 25);
+  await page.getByRole('switch', { name: '不限单轮时长', exact: true }).click(); await saveTime();
+  await page.getByRole('tab', { name: '好友互动', exact: true }).click();
+  await page.locator('[aria-labelledby="auto-share-title"]').getByText('名单在“业务设置 → 好友互动 → 好友私信”中维护。读取联系人、勾选并保存许可名单即可，不需要启用自动回复；不会自动加入其他联系人。', { exact: true }).waitFor();
   const checks = await page.evaluate(async () => {
     const boot = await (await fetch('/api/bootstrap')).json();
     const routes = ['/api/state', '/api/video/status', '/api/watch/state', '/api/chat/state', '/api/share/state', '/api/spark/state', '/api/comments/state', '/api/mode/state', '/api/persona', '/api/media/state', '/api/reports/state', '/api/usage', '/api/watch/options', '/api/watch/schedule', '/api/interactions/state'];
@@ -130,12 +142,12 @@ try {
   assert.equal(checks.status['/api/interactions/state'].rows.length,4);
   const saved = await readJson(path.join(userData, 'api-settings.json'));
   assert.equal('encryptedApiKey' in saved, false); assert.equal(JSON.stringify(saved).includes('synthetic-packaged-check-only'), false);
-  const receipt = { version, executable: path.basename(executable), bytes: bytes.length, sha256, archiveSourcesMatch: true, iconsMatch:true, domainFilesMatch: DOMAIN_FILES.length, runtimeId: manifest.runtimeId, startup: { ready: true, packaged: true, visible: false, isolated: true, version: ready.version }, renderer: { loaded: true, privateKeyIpc: true, syntheticKeyCleared: true, dailyReportRendered: true, navDeduplicated:true, brandLoaded:true, updateIpc:true, scheduleSettingsSaved:true, pageErrors: errors.length }, readOnlyEndpoints: Object.keys(checks.status).length, automationStarted: false, realModelCalled: false, smokeDirectory: directory };
+  const receipt = { version, executable: path.basename(executable), bytes: bytes.length, sha256, archiveSourcesMatch: true, iconsMatch:true, domainFilesMatch: DOMAIN_FILES.length, runtimeId: manifest.runtimeId, startup: { ready: true, packaged: true, visible: false, isolated: true, version: ready.version }, renderer: { loaded: true, privateKeyIpc: true, syntheticKeyCleared: true, dailyReportRendered: true, navDeduplicated:true, brandLoaded:true, updateIpc:true, scheduleSettingsSaved:true, durationDraftSavedExplicitly:true, shareAllowlistHint:true, pageErrors: errors.length }, readOnlyEndpoints: Object.keys(checks.status).length, automationStarted: false, realModelCalled: false, smokeDirectory: directory };
   await page.evaluate(() => window.close());
   assert.equal(await Promise.race([exited, delay(12_000, null, { ref: false }).then(() => { throw new Error('便携包未正常退出。'); })]), 0);
   await until(async () => { try { await fetch(ready.origin, { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 12_000);
   receipt.exit = { graceful: true, backendPortReleased: true };
-  await fs.writeFile(path.join(desktop, 'release-api', `verification-${version}.json`), JSON.stringify(receipt, null, 2) + '\n');
+  await fs.writeFile(path.join(releaseDirectory, `verification-${version}.json`), JSON.stringify(receipt, null, 2) + '\n');
   console.log(JSON.stringify(receipt, null, 2));
 } finally {
   if (page && !page.isClosed()) await page.evaluate(() => window.close()).catch(() => {});

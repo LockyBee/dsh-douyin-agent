@@ -1,6 +1,6 @@
 {
   "name": "dsh-douyin-browser-local",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "type": "module",
   "description": "DSH 原生抖音工具与独立 DeepSeek 本地助手",
   "license": "MIT",

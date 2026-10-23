@@ -24,6 +24,7 @@ export function WatchControls({ state, video, configured, connected, otherBusy, 
     <p className="notice">请先亲自开始新一轮。到时或预算用尽都会结束，不会自动续时或预约下一轮。</p>
     {otherBusy && <p className="notice">请先结束手动视频任务或转发，再开始自主观看。</p>}
     <p className="notice">本轮 {counts?.requests ?? 0} / {counts?.maxRequests ?? budget} 次 · 今日 {counts?.dailyRequests ?? 0} / {counts?.dailyLimit ?? 20000} 次</p>
+    {state?.lastError && <p className="notice" role="status">上次自主观看停止原因：{state.lastError}</p>}
     {active && state?.owned === false && <p className="notice">当前由另一个入口运行，停止按钮仍可请求停止。</p>}
   </div>;
 }

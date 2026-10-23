@@ -13,7 +13,7 @@ test('生产自主分享入口只保存总许可，观看中可关闭，异常�
   const calls = [], errors = []; let failedReview = false;
   const recipients = [{ id: 'synthetic-friend-a', name: '合成许可好友甲' }, { id: 'synthetic-friend-b', name: '合成许可好友乙' }];
   const share = { protocol: 'autonomous-share-v1', enabled: false, dailyLimit: 3, recipients, daily: { attempts: 0, remaining: 3 }, paused: false, busy: false, recent: [], needsReview: [], receiptsFile: 'C:\\合成分享收据.json' };
-  const watch = { running: false, status: 'stopped', owned: false, worker: null, counts: { requests: 2, maxRequests: 30, dailyRequests: 2, dailyLimit: 200 }, lastDecision: { action: 'share', reason: '合成选择理由：准备向许可好友分享当前观察作品。' } };
+  const watch = { running: false, status: 'stopped', owned: false, worker: null, lastError: '合成停止原因：本轮请求预算已用完。', counts: { requests: 2, maxRequests: 30, dailyRequests: 2, dailyLimit: 200 }, lastDecision: { action: 'share', reason: '合成选择理由：准备向许可好友分享当前观察作品。' } };
   const limits = { protocol: 'task-limits-v1', policy: { maxSteps: 20, maxToolCalls: 20, timeoutSeconds: 180 }, hardLimits: TASK_LIMIT_BOUNDS, configured: false };
   const persona = { revision: 'synthetic-behavior', manualText: '合成手编人格', personaText: '合成生效人格', interests: [
     { key: 'pixel-topic', topic: '合成像素识别主题', signal: 'neutral', counts: { like: 0, dislike: 0, neutral: 1 }, basis: '合成依据：只有主题识别，尚不足以判断喜欢。', evidence: [{ evidenceId: 'synthetic-pixel', reflection: '识别出猫咪不等于喜欢。', source: 'api', watchedSeconds: 0, watchRatio: 0, actions: { stay: 0, skip: 0, share: 0 }, basis: '合成依据：只有主题识别。' }] },
@@ -62,6 +62,8 @@ test('生产自主分享入口只保存总许可，观看中可关闭，异常�
   await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
   const panel = page.locator('[aria-labelledby="auto-share-title"]'), toggle = panel.getByRole('switch', { name: '允许大肥鱼自主分享' }), limit = panel.getByRole('spinbutton', { name: '自主分享每日次数上限' }), save = panel.getByRole('button', { name: '保存自主分享设置', exact: true });
   await page.waitForFunction(() => document.querySelector('[aria-label="自主分享每日次数上限"]')?.disabled === false);
+  await page.getByRole('status').filter({ hasText: '上次自主观看停止原因：合成停止原因：本轮请求预算已用完。' }).waitFor();
+  await panel.getByText('名单在“业务设置 → 好友互动 → 好友私信”中维护。读取联系人、勾选并保存许可名单即可，不需要启用自动回复；不会自动加入其他联系人。', { exact: true }).waitFor();
   assert.equal(await limit.inputValue(), '3'); assert.equal(await toggle.getAttribute('aria-checked'), 'false');
   assert.equal(await page.getByLabel('转发收件人', { exact: true }).count(), 0); assert.equal(await page.getByLabel('转发作品链接', { exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '选择此作品转发', exact: true }).count(), 0);

@@ -84,6 +84,17 @@ test('独立React界面完成IPC配置、共享目录、任务结果与显式转
   assert.equal(await page.getByRole('spinbutton', { name: '单轮上限' }).inputValue(), '5');
   await page.getByRole('button', { name: '保存时间设置' }).click();
   assert.deepEqual(JSON.parse(calls.find(call => call.route === '/api/video/policy').body), { windows: ['23:00-01:00'], weekendWindows: null, sessionMinutes: 5 });
+  const minutes = page.getByRole('spinbutton', { name: '单轮上限', exact: true }), unlimited = page.getByRole('switch', { name: '不限单轮时长', exact: true });
+  await unlimited.click(); await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/video/policy') && response.request().method() === 'POST'), page.getByRole('button', { name: '保存时间设置' }).click()]);
+  await page.waitForFunction(() => document.querySelector('[aria-label="单轮上限"]')?.placeholder === '不限；输入分钟数可设置上限');
+  assert.equal(await minutes.isEnabled(), true); assert.equal(await minutes.inputValue(), '');
+  assert.equal(video.policy.sessionMinutes, null);
+  const savesBeforeTyping = calls.filter(call => call.route === '/api/video/policy').length;
+  await minutes.fill('25'); await page.waitForTimeout(1700);
+  assert.equal(await minutes.inputValue(), '25'); assert.equal(await unlimited.getAttribute('aria-checked'), 'false');
+  assert.equal(calls.filter(call => call.route === '/api/video/policy').length, savesBeforeTyping); assert.equal(video.policy.sessionMinutes, null);
+  await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/video/policy') && response.request().method() === 'POST'), page.getByRole('button', { name: '保存时间设置' }).click()]);
+  assert.deepEqual(JSON.parse(calls.filter(call => call.route === '/api/video/policy').at(-1).body), { windows: ['23:00-01:00'], weekendWindows: null, sessionMinutes: 25 });
   await page.getByRole('button', { name: '读取联系人', exact: true }).click();
   await page.getByRole('checkbox', { name: /合成好友乙/ }).check();
   await page.getByRole('spinbutton', { name: '每日模型请求上限' }).fill('8');

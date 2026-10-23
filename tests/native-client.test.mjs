@@ -138,6 +138,9 @@ test('原生设置页面只显式写入，保留人格草稿及409冲突，直�
   assert.equal(await page.getByRole('tab').count(),7); assert.equal(await page.getByRole('button',{name:'保存视频时间',exact:true}).count(),0);
   assert.equal(await page.getByRole('combobox',{name:'模型名称',exact:true}).evaluate(node=>node.tagName),'SELECT');
   await page.getByRole('tab',{name:'视频观看',exact:true}).click();
+  state.watch.lastError = '合成模型请求被取消。';
+  await page.getByText('上次自主观看停止原因：合成模型请求被取消。',{exact:true}).waitFor();
+  state.watch.lastError = '';
   const startWatch = page.getByRole('button', { name: '开始自主观看', exact: true }); assert.equal(await startWatch.isDisabled(), true); await page.getByRole('button', { name: '开始新一轮', exact: true }).click(); await startWatch.click();
   await page.getByRole('tab',{name:'基础设置',exact:true}).click(); await page.waitForFunction(() => document.querySelector('[aria-label="模型名称"]').disabled === true); assert.deepEqual(calls.find(item => item.route === '/watch/start').body, { maxRequests: 30 });
   await page.getByRole('tab',{name:'视频观看',exact:true}).click(); await page.getByRole('button', { name: '停止自主观看', exact: true }).click();
@@ -145,6 +148,19 @@ test('原生设置页面只显式写入，保留人格草稿及409冲突，直�
   await page.getByRole('checkbox',{name:'不限单轮时长',exact:true}).check();
   await page.getByRole('button',{name:'保存视频时间',exact:true}).click();
   assert.deepEqual(calls.filter(item=>item.route==='/video/configure').at(-1).body,{windows:['00:00-09:00','12:00-14:00','18:00-24:00'],weekendWindows:['00:00-24:00'],sessionMinutes:null});
+  const minuteField = page.getByRole('spinbutton',{name:'单轮上限（分钟）',exact:true});
+  assert.equal(await minuteField.isEnabled(),true);
+  assert.equal(await minuteField.inputValue(),'');
+  assert.match(await minuteField.getAttribute('placeholder'),/不限/);
+  const savesBeforeTyping = calls.filter(item=>item.route==='/video/configure').length;
+  await minuteField.fill('25');
+  assert.equal(await page.getByRole('checkbox',{name:'不限单轮时长',exact:true}).isChecked(),false);
+  await page.waitForTimeout(250);
+  assert.equal(await minuteField.inputValue(),'25');
+  assert.equal(calls.filter(item=>item.route==='/video/configure').length,savesBeforeTyping);
+  await page.getByRole('button',{name:'保存视频时间',exact:true}).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="单轮上限（分钟）"]').value === '25');
+  assert.equal(calls.filter(item=>item.route==='/video/configure').at(-1).body.sessionMinutes,25);
   await page.getByRole('checkbox',{name:'不限单轮时长',exact:true}).uncheck();
   await page.getByRole('combobox',{name:'观看方式',exact:true}).selectOption('topic');
   await page.getByRole('textbox',{name:'想看的主题，每行一个',exact:true}).fill('合成天文');
@@ -166,6 +182,7 @@ test('原生设置页面只显式写入，保留人格草稿及409冲突，直�
   const shots = path.join(root, 'desktop/ui-api/.test-temp/native-client'); await fs.mkdir(shots, { recursive: true }); await page.screenshot({ path: path.join(shots, 'native-settings-top.png') });
   await page.getByRole('checkbox', { name: '静默观看', exact: true }).check(); await page.getByRole('button', { name: '保存静默设置', exact: true }).click(); assert.deepEqual(calls.filter(item => item.route === '/mode/configure').at(-1).body, { silent: true });
   await page.getByRole('tab',{name:'好友互动',exact:true}).click();
+  await page.getByText('分享好友与下方“许可好友与自动回复”的名单共用。读取联系人、勾选并保存好友即可，不需要启动自动回复。',{exact:true}).waitFor();
   await page.getByRole('checkbox', { name: '允许主动问候', exact: true }).check(); await page.getByRole('button', { name: '保存问候许可', exact: true }).click(); assert.equal(calls.some(item => item.route === '/spark/start'), false);
   await page.getByRole('checkbox', { name: '允许主动问候', exact: true }).uncheck(); await page.getByRole('button', { name: '保存问候许可', exact: true }).click(); await page.waitForTimeout(150); assert.deepEqual(calls.filter(item => item.route.startsWith('/spark/')).slice(-2).map(item => item.route), ['/spark/configure', '/spark/stop']);
   state.model.configured=false;

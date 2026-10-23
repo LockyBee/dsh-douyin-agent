@@ -32,7 +32,8 @@ export function AutoSharePanel({ state, api, run, busy, connected = true }) {
       <label className="field"><span>每日分享次数上限</span><Input aria-label="自主分享每日次数上限" type="number" min={1} max={20} step={1} required value={dailyLimit} disabled={!state || !connected || saving} onChange={event => { dirty.current = true; setNotice(''); setDailyLimit(event.target.value); }} /></label>
       <Button size="sm" type="submit" variant="outline" disabled={!state || !connected || saving}>{saving ? '正在保存…' : '保存自主分享设置'}</Button>
     </form>
-    <p className="notice">可选好友：{(state?.recipients || []).map(item => item.name || '许可好友').join('、') || '尚无已验证的许可好友'}。名单沿用好友私信设置，不会自动加入其他联系人。</p>
+    <p className="notice">可选好友：{(state?.recipients || []).map(item => item.name || '许可好友').join('、') || '尚无已验证的许可好友'}。</p>
+    <p className="notice">名单在“业务设置 → 好友互动 → 好友私信”中维护。读取联系人、勾选并保存许可名单即可，不需要启用自动回复；不会自动加入其他联系人。</p>
     <p className="notice">今日已处理 {state?.daily?.attempts ?? 0} 次，剩余 {state?.daily?.remaining ?? 0} 次。发送未确认也计入次数，不自动重发。</p>
     {notice && <p className="notice" role="status">{notice}</p>}
     {state?.busy && <p className="notice">当前分享正在处理，可关闭总开关请求停止。</p>}

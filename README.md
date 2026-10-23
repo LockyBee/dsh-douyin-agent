@@ -1,6 +1,6 @@
 # DSH 抖音助手
 
-1.4.3 增强自检与按报告修复，并汇总设置通信兼容、静默最小化、时段自动启动、用量看板和主题观看等更新。查看[功能说明](docs/features-1.4.3.md)或[下载 1.4.3 软件与插件包](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.3)。
+1.4.4 同步修复插件和软件的分钟数字框，直接显示自主观看停止原因，并补充分享名单入口说明。查看[本版说明](docs/features-1.4.4.md)或[下载 1.4.4 软件与插件包](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.4)。包含上一版的设置通信兼容、一键自检、用量看板和主题观看。
 
 让 DSH 里的 DeepSeek（大肥鱼）自己刷抖音：搜索、换片、看真实画面，把有意思的内容记下来，并在你许可的范围内分享给好友。
 
@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | 在哪用 | DSH 的「设置 → 刷抖音」，全部用按钮操作 | 独立的 Windows 桌面软件，对话式下任务 |
 | 模型 | 用 DSH 里已配置的提供商 | 用你自己填的 DeepSeek API Key |
-| 版本 | 1.4.3 | 1.4.3 Windows 便携包，见 [软件说明](desktop/README.md) |
+| 版本 | 1.4.4 | 1.4.4 Windows 便携包，见 [软件说明](desktop/README.md) |
 
 两者共用同一份人格、兴趣和记忆，但同一时刻只会运行一个自主观看。
 
@@ -37,14 +37,14 @@
 
 1.4.3 包含“没有可用的同源设置服务”兼容修复，适配常用桌面载体、Connection 设置路由和刷新恢复。更新后请完全退出并重开 DSH，无需删除记忆、登录目录或重填 Key。各第三方宿主仍以实际自检结果为准，见[验证记录](docs/verification/settings-compatibility-20261023.md)。
 
-### npm 安装或更新（1.4.3）
+### npm 安装或更新（1.4.4）
 
-DSH Desktop：打开“应用 → 桌面插件”，在 npm 包输入框填写 `dsh-douyin-browser-local@1.4.3`，点击安装或更新。Desktop profile 由 Electron 管理，不能用普通 CLI 修改。完成后完全退出并重开 DSH。
+DSH Desktop：打开“应用 → 桌面插件”，在 npm 包输入框填写 `dsh-douyin-browser-local@1.4.4`，点击安装或更新。Desktop profile 由 Electron 管理，不能用普通 CLI 修改。完成后完全退出并重开 DSH。
 
 Web 版在终端运行：
 
 ```powershell
-dsh plugin --profile web add dsh-douyin-browser-local@1.4.3
+dsh plugin --profile web add dsh-douyin-browser-local@1.4.4
 ```
 
 需要 Windows、Microsoft Edge 和 DSH 0.2.0-rc.2 至 0.2.x 兼容宿主。抖音登录和验证由使用者自行完成。npm、GitHub Release 和社区市场分别同步；市场未更新时可使用固定版本号安装。
@@ -84,7 +84,7 @@ $dshInstallDirectory = 'C:\Apps\DSH Desktop' # 替换为正在使用的 DSH 安�
 | 通过专项或合成测试 | 自主分享、行为偏好、自动问候、自主评论、静默修复及日报；不代表全部真实外发已验证 |
 | 还没验证 | 抖音最小化后的持续播放、真实评论区、收到新私信后的完整自动回复、MiMo 与 MiniMax 云端、标准 bundle 安装 |
 
-合成测试用的是替身模型和临时页面，不能当作真实抖音上能用的证据。1.4.3 的专项检查、实机自检、软件包验收及完整回归首轮失败记录见[本版验证记录](docs/verification/local-1.4.3-20261023.md)；[v10 记录](docs/verification/native-v10.md)仅对应旧版本。
+合成测试用的是替身模型和临时页面，不能当作真实抖音上能用的证据。1.4.4 的输入、停止原因与名单提示检查见[本版验证记录](docs/verification/ui-feedback-20261023.md)。上一版专项检查、实机自检和完整回归首轮失败记录见[1.4.3 验证记录](docs/verification/local-1.4.3-20261023.md)；[v10 记录](docs/verification/native-v10.md)仅对应旧版本。
 
 ## 目录
 
