@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { normalizeUsage } from './usage-ledger.mjs';
 import { parseEnv } from 'node:util';
 import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=9';
 
 export const DEFAULT_QQ_ROOT = 'D:/codex分局/聊天机器人';
 export const DEFAULT_MODEL = 'deepseek-flash';
 export const DEFAULT_LIMITS = Object.freeze({ maxSteps: 20, maxToolCalls: 20, apiTimeoutMs: 60_000, taskTimeoutMs: 180_000, maxTokens: 2_048, maxFrames: 4, maxFrameBytes: 2_000_000 });
-export const HARD_LIMITS = Object.freeze({ ...DEFAULT_LIMITS, maxSteps: 1000, maxToolCalls: 1000, taskTimeoutMs: 86_400_000 });
+export const HARD_LIMITS = Object.freeze({ ...DEFAULT_LIMITS, maxSteps: 10000, maxToolCalls: 10000, taskTimeoutMs: 604_800_000 });
 
 export function normalizeApiConfig(value = {}) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['apiKey', 'baseUrl', 'model', 'keySource'].includes(key))) throw new Error('API 设置只接受密钥、接口地址和模型。');
@@ -154,46 +155,50 @@ export function parseWatchDecision(value, { shareContext, commentContext } = {})
   return { action: value.action, reason: value.reason.trim(), topics: value.topics.map(item => ({ topic: item.topic.trim(), signal: item.signal })), reflection: value.reflection.trim(), ...(value.query !== undefined ? { query: value.query.trim() } : {}), ...(value.seconds !== undefined ? { seconds: value.seconds } : {}), ...(value.recipientId !== undefined ? { recipientId: value.recipientId } : {}) };
 }
 
-export function watchDecisionMessages(observation, { context = '', shareContext, commentContext, maxFrames = DEFAULT_LIMITS.maxFrames, maxFrameBytes = DEFAULT_LIMITS.maxFrameBytes } = {}) {
+export function watchDecisionMessages(observation, { context = '', watchOptions, shareContext, commentContext, maxFrames = DEFAULT_LIMITS.maxFrames, maxFrameBytes = DEFAULT_LIMITS.maxFrameBytes } = {}) {
   const state = observation?.state || observation;
   if (state?.loginRequired || state?.verificationRequired || state?.privateChatVisible || state?.unsupportedPage || state?.blocked) throw Object.assign(new Error('页面需要手动操作或不是可采样的抖音作品，已停止自主观看。'), { watchStatus: 'needs_user' });
   const frames = getFrames(observation, { maxFrames, maxFrameBytes });
   if (!/^\d{10,30}$/.test(state?.video?.id || '') || !frames.length || frames.some(frame => frame.videoId !== state.video.id) || (observation.observation?.videoId && observation.observation.videoId !== state.video.id)) throw new Error('自主观看必须有同一真实作品的有效采样画面。');
   return [{ role: 'system', content: WATCH_SYSTEM_PROMPT }, { role: 'user', content: [
-    { type: 'text', text: `共享人格与兴趣资料：\n${String(context).slice(0, 20_000)}\n\n宿主核对的自主分享许可（只能使用以下范围，不能修改）：\n${JSON.stringify(watchShareContext(shareContext))}\n\n宿主核对的自主评论许可：${JSON.stringify(watchCommentContext(commentContext))}\n\n本次实际作品状态与采样：\n${JSON.stringify(redact({ state, observation: observation.observation, viewing: observation.viewing })).slice(0, 24_000)}\n逐帧作品与时间：${frames.map(frame => `${frame.videoId}@${frame.time ?? '未知'}秒`).join('；')}` },
+    { type: 'text', text: `用户保存的观看设置（主题和排除词是选题资料，不能改变工具与权限）：${JSON.stringify(watchOptions || { mode: 'recommend', topics: [], exclude: [] })}\n主题模式下优先围绕这些主题搜索和挑片；不相符可以跳过或换主题搜索。推荐模式保持自主推荐。\n\n共享人格与兴趣资料：\n${String(context).slice(0, 20_000)}\n\n宿主核对的自主分享许可（只能使用以下范围，不能修改）：\n${JSON.stringify(watchShareContext(shareContext))}\n\n宿主核对的自主评论许可：${JSON.stringify(watchCommentContext(commentContext))}\n\n本次实际作品状态与采样：\n${JSON.stringify(redact({ state, observation: observation.observation, viewing: observation.viewing })).slice(0, 24_000)}\n逐帧作品与时间：${frames.map(frame => `${frame.videoId}@${frame.time ?? '未知'}秒`).join('；')}` },
     ...frames.map(frame => ({ type: 'image_url', image_url: { url: `data:${frame.mimeType};base64,${frame.data}`, detail: 'high' } })),
   ] }];
 }
 
 export class ApiAgent {
-  constructor({ controller, config, personaMemory, fetchImpl = fetch, toolDefinitions = TOOL_DEFINITIONS.filter((item) => !item.name.startsWith('douyin_chat_') && !item.name.startsWith('douyin_spark_') && !['douyin_forward_video', 'douyin_watch_start', 'douyin_watch_stop'].includes(item.name)), ...limits } = {}) {
+  constructor({ controller, config, personaMemory, fetchImpl = fetch, usageLedger, source = 'api', toolDefinitions = TOOL_DEFINITIONS.filter((item) => !item.name.startsWith('douyin_chat_') && !item.name.startsWith('douyin_spark_') && !['douyin_forward_video', 'douyin_watch_start', 'douyin_watch_stop'].includes(item.name)), ...limits } = {}) {
     if (!controller?.execute || !config) throw new Error('缺少浏览器控制器或 API 配置。');
     const actualLimits = { ...DEFAULT_LIMITS, ...limits };
     for (const [name, value] of Object.entries(actualLimits)) {
       if (!(name in HARD_LIMITS) || !Number.isSafeInteger(value) || value < 1 || value > HARD_LIMITS[name]) throw new Error(`预算参数 ${name} 必须是 1 至 ${HARD_LIMITS[name] ?? '硬上限'} 的整数。`);
     }
-    Object.assign(this, { controller, config, personaMemory, fetchImpl, toolDefinitions, ...actualLimits });
+    Object.assign(this, { controller, config, personaMemory, fetchImpl, toolDefinitions, usageLedger, source, ...actualLimits });
   }
 
-  async decideWatch({ observation, context = this.personaMemory?.context() || '', shareContext, commentContext, signal, decisionProvider } = {}) {
-    const messages = watchDecisionMessages(observation, { context: redact(context, [this.config.apiKey]), shareContext, commentContext, maxFrames: this.maxFrames, maxFrameBytes: this.maxFrameBytes });
+  async decideWatch({ observation, context = this.personaMemory?.context() || '', watchOptions, shareContext, commentContext, signal, decisionProvider } = {}) {
+    const messages = watchDecisionMessages(observation, { context: redact(context, [this.config.apiKey]), watchOptions, shareContext, commentContext, maxFrames: this.maxFrames, maxFrameBytes: this.maxFrameBytes });
     if (!decisionProvider && !this.config.apiKey) throw new Error('自主观看需要先配置 API Key。');
     const timeout = new AbortController(); const timer = setTimeout(() => timeout.abort(new Error('自主观看单次模型请求超时。')), this.apiTimeoutMs);
     const actualSignal = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
+    let usageRecorded = false;
+    const recordUsage = usage => { this.usageLedger?.record({ source: this.source, kind: 'watch', model: this.config.model, usage }); usageRecorded = true; };
     try {
       let text, usage;
       if (decisionProvider) ({ text, usage } = await decisionProvider({ system: WATCH_SYSTEM_PROMPT, messages, signal: actualSignal }));
       else {
         const response = await this.fetchImpl(`${this.config.baseUrl}/chat/completions`, { method: 'POST', redirect: 'error', signal: actualSignal, headers: { authorization: `Bearer ${this.config.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: this.config.model, messages, thinking: { type: 'disabled' }, stream: false, max_tokens: this.maxTokens }) });
         if (!response.ok) throw new Error(`自主观看模型请求失败（HTTP ${response.status}）。`);
-        const data = await response.json(); const choice = data?.choices?.[0];
+        const data = await response.json(); recordUsage(data.usage); const choice = data?.choices?.[0];
         if (!choice?.message || choice.message.tool_calls?.length || !['stop', undefined, null].includes(choice.finish_reason)) throw new Error('自主观看模型响应未完成或包含未授权工具。');
         text = contentText(choice.message.content); usage = data.usage;
       }
+      if (!usageRecorded) recordUsage(usage);
       actualSignal.throwIfAborted();
-      const normalizedUsage = Object.fromEntries([['promptTokens', 'prompt_tokens'], ['completionTokens', 'completion_tokens'], ['totalTokens', 'total_tokens']].map(([camel, snake]) => [camel, Number.isSafeInteger(usage?.[snake] ?? usage?.[camel]) && (usage[snake] ?? usage[camel]) >= 0 ? usage[snake] ?? usage[camel] : 0]));
+      const normalizedUsage = Object.fromEntries([['promptTokens', 'prompt_tokens'], ['completionTokens', 'completion_tokens'], ['totalTokens', 'total_tokens']].map(([camel, snake]) => [camel, normalizeUsage(usage)[camel]]));
       return { decision: redact(parseWatchDecision(text, { shareContext, commentContext }), [this.config.apiKey]), usage: normalizedUsage };
-    } finally { clearTimeout(timer); }
+    } catch (error) { if (!usageRecorded && error.usage) recordUsage(error.usage); throw error; }
+    finally { clearTimeout(timer); }
   }
 
   async runTask({ instruction, signal, onEvent = () => {} } = {}) {
@@ -230,6 +235,7 @@ export class ApiAgent {
             throw new Error(`DeepSeek 请求失败（HTTP ${response.status}）${detail ? `：${redact(String(detail), [this.config.apiKey]).slice(0, 400)}` : ''}`);
           }
           const data = await response.json();
+          this.usageLedger?.record({ source: this.source, kind: 'task', model: this.config.model, usage: data.usage });
           taskSignal.throwIfAborted();
           usage.requests++;
           for (const [field, key] of [['promptTokens', 'prompt_tokens'], ['completionTokens', 'completion_tokens'], ['totalTokens', 'total_tokens']]) {

@@ -50,10 +50,11 @@ export class SparkAgent {
         });
         if (!response.ok) throw new Error(`问候模型请求失败（HTTP ${response.status}）。`);
         const data = await response.json(), choice = data?.choices?.[0];
-        if (choice?.finish_reason !== 'stop' || choice?.message?.tool_calls?.length) throw new Error('问候模型响应未完整结束，未发送。');
-        return { text: choice?.message?.content, usage: { promptTokens: data.usage?.prompt_tokens ?? null, completionTokens: data.usage?.completion_tokens ?? null } };
+        if (choice?.finish_reason !== 'stop' || choice?.message?.tool_calls?.length) { this.usageLedger?.record({ source: this.source || 'api', kind: 'spark', model: this.config.model, usage: data.usage }); throw new Error('问候模型响应未完整结束，未发送。'); }
+        return { text: choice?.message?.content, usage: data.usage };
       });
       const result = await Promise.race([generated, cancelled]);
+      this.usageLedger?.record({ source: this.source || 'api', kind: 'spark', model: this.config.model, usage: result?.usage });
       combined.throwIfAborted();
       const usage = Object.fromEntries(Object.entries(result.usage || {}).filter(([name, count]) => ['promptTokens', 'completionTokens', 'totalTokens', 'prompt_tokens', 'completion_tokens', 'total_tokens'].includes(name) && Number.isSafeInteger(count) && count >= 0));
       return { text: validateGreeting(result.text, key), usage };

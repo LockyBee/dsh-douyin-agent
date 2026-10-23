@@ -55,6 +55,8 @@ test('未配置主 Key 也可点击打开抖音；MiMo Key 只走桌面接口且
   assert.equal(configured, false); assert.deepEqual(native, []);
   await dialog.getByRole('textbox', { name: 'API Key', exact: true }).fill('synthetic-main-key');
   await dialog.getByRole('button', { name: '保存并连接', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
+  await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
   await page.getByLabel('音频后端', { exact: true }).selectOption('mimo');
   const key = page.getByRole('textbox', { name: 'MiMo API Key', exact: true });
   assert.equal(await key.getAttribute('type'), 'password');

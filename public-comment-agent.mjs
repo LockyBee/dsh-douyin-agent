@@ -29,10 +29,11 @@ export class PublicCommentAgent {
         const response = await this.fetchImpl(`${this.config.baseUrl}/chat/completions`, { method: 'POST', redirect: 'error', signal: actualSignal, headers: { authorization: `Bearer ${this.config.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: this.config.model, messages, stream: false, thinking: { type: 'disabled' }, max_tokens: 400 }) });
         if (!response.ok) throw new Error(`评论模型请求失败（HTTP ${response.status}）。`);
         const data = await response.json(), choice = data?.choices?.[0];
-        if (choice?.finish_reason !== 'stop' || choice.message?.tool_calls?.length) throw new Error('评论模型响应未完整结束。');
+        if (choice?.finish_reason !== 'stop' || choice.message?.tool_calls?.length) { this.usageLedger?.record({ source: this.source || 'api', kind: 'comment', model: this.config.model, usage: data.usage }); throw new Error('评论模型响应未完整结束。'); }
         return { text: choice.message?.content, usage: data.usage };
       });
       const result = await Promise.race([generated, cancelled]); actualSignal.throwIfAborted();
+      this.usageLedger?.record({ source: this.source || 'api', kind: 'comment', model: this.config.model, usage: result?.usage });
       if (typeof result?.text !== 'string' || result.text.length > 2000 || result.tool_calls?.length || result.toolCalls?.length) throw new Error('评论模型没有返回有限的普通JSON。');
       let value; try { value = JSON.parse(result.text); } catch { throw new Error('评论模型没有返回有效JSON。'); }
       if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1 || !Object.hasOwn(value, 'text')) throw new Error('评论模型返回了未允许字段。');

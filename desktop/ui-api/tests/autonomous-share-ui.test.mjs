@@ -57,6 +57,9 @@ test('生产自主分享入口只保存总许可，观看中可关闭，异常�
   await page.exposeFunction('__getSyntheticSettings', () => ({ configured: true, model: '合成分享模型', baseUrl: 'https://api.example.invalid', memoryFolder: 'C:\\合成共享记忆' }));
   await page.addInitScript(() => { window.douyinDesktop = { getSettings: () => window.__getSyntheticSettings(), saveSettings: async () => ({}), clearApiKey: async () => ({}), openMemoryFolder: async () => {}, openPersonaFolder: async () => {} }; });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
+  await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
   const panel = page.locator('[aria-labelledby="auto-share-title"]'), toggle = panel.getByRole('switch', { name: '允许大肥鱼自主分享' }), limit = panel.getByRole('spinbutton', { name: '自主分享每日次数上限' }), save = panel.getByRole('button', { name: '保存自主分享设置', exact: true });
   await page.waitForFunction(() => document.querySelector('[aria-label="自主分享每日次数上限"]')?.disabled === false);
   assert.equal(await limit.inputValue(), '3'); assert.equal(await toggle.getAttribute('aria-checked'), 'false');

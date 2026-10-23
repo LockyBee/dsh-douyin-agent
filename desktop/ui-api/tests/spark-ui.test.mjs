@@ -66,6 +66,10 @@ async function fixture(t, { assets, component = false } = {}) {
     await page.addInitScript(() => { window.douyinDesktop = { getSettings: () => window.__sparkSettings(), saveSettings: value => window.__sparkNative('save'), clearApiKey: () => window.__sparkNative('clear'), openMemoryFolder: async () => {} }; });
   }
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+  if (!component) {
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
+  await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
+  }
   return { ...fixture, data: fixture, page, panel: page.locator('[aria-labelledby="spark-title"]') };
 }
 
@@ -124,14 +128,20 @@ test('主界面回读问候状态，问候运行中禁止换Key，状态失联�
   await panel.getByText('调度中', { exact: true }).waitFor();
   await page.getByRole('textbox', { name: '视频任务', exact: true }).fill('只执行合成视频任务，不操作实际抖音。');
   const videoStart = page.getByRole('button', { name: '开始任务 ↑', exact: true }); assert.equal(await videoStart.isDisabled(), false);
-  await page.getByRole('button', { name: /模型与记忆设置/ }).click(); const dialog = page.getByRole('dialog');
+  await page.getByRole('button', { name: /☷ 业务设置/ }).click();
+  await page.getByRole('tab', { name: '基础设置', exact: true }).click();
+  await page.getByRole('button', { name: '配置模型与 API Key', exact: true }).click(); const dialog = page.getByRole('dialog');
   assert.equal(await dialog.getByRole('button', { name: '保存设置', exact: true }).isDisabled(), true); assert.equal(await dialog.getByRole('button', { name: '清除已保存的 API Key', exact: true }).isDisabled(), true);
   await dialog.getByRole('button', { name: '返回', exact: true }).click();
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
   data.failState = true; await panel.getByText('自动问候状态尚未核实，暂不能修改或启动，请等待本机服务回读。', { exact: true }).waitFor(); assert.equal(await save.isDisabled(), true);
   data.failState = false; data.stateHold = true; await page.waitForTimeout(1700); assert.equal(await save.isDisabled(), true);
   data.stateHold = false; data.spark.running = false; data.spark.worker = null;
   await page.waitForFunction(() => document.querySelector('[aria-label="每日问候时段"]').disabled === false);
-  await page.getByRole('button', { name: /模型与记忆设置/ }).click(); assert.equal(await dialog.getByRole('button', { name: '保存设置', exact: true }).isDisabled(), false); await dialog.getByRole('button', { name: '返回', exact: true }).click();
+  await page.getByRole('button', { name: /☷ 业务设置/ }).click();
+  await page.getByRole('tab', { name: '基础设置', exact: true }).click();
+  await page.getByRole('button', { name: '配置模型与 API Key', exact: true }).click(); assert.equal(await dialog.getByRole('button', { name: '保存设置', exact: true }).isDisabled(), false); await dialog.getByRole('button', { name: '返回', exact: true }).click();
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
   await panel.getByRole('switch', { name: '允许自动续火花', exact: true }).click(); await save.click(); await panel.getByText('已关闭主动问候许可并请求停止服务；请以回读状态为准。', { exact: true }).waitFor();
   assert.deepEqual(data.calls.filter(item => item.method === 'POST').map(item => ({ route: item.route, body: item.body })), [{ route: '/api/spark/configure', body: { enabled: false, windows: ['09:00-22:00'], dailyLimit: 2 } }, { route: '/api/spark/stop', body: {} }]);
   assert.deepEqual(data.native, []); assert.deepEqual(data.errors, []);

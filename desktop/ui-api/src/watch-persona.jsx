@@ -8,7 +8,7 @@ const actions = { search: '搜索作品', skip: '换一条', stay: '继续观察
 const firstText = (...values) => values.find(value => typeof value === 'string' && value) || '';
 const textOf = value => typeof value === 'string' ? value : firstText(value?.summary, value?.observation, value?.text, value?.content);
 const topicOf = value => typeof value === 'string' ? value : firstText(value?.topic, value?.name, value?.label);
-const secondsLabel = seconds => { const safe = Math.max(0, Math.floor(Number(seconds) || 0)); return `${Math.floor(safe / 60)}分${safe % 60}秒`; };
+const secondsLabel = seconds => { if (seconds === null) return '不限时长'; const safe = Math.max(0, Math.floor(Number(seconds) || 0)); return `${Math.floor(safe / 60)}分${safe % 60}秒`; };
 const dateLabel = value => { const date = new Date(value); return value && Number.isFinite(date.getTime()) ? date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) : ''; };
 const signalLabel = signal => ({ like: '感兴趣', dislike: '暂不感兴趣', neutral: '待观察' }[signal] || '待观察');
 
@@ -19,11 +19,11 @@ export function WatchControls({ state, video, configured, connected, otherBusy, 
   return <div className="watch-controls">
     <div className="panel-title"><h3>自主观看</h3><Tag>{states[state?.status] || '正在读取状态'}</Tag></div>
     <p className="muted">大肥鱼会按人格和兴趣挑片，用实际观看与已确认行为积累偏好依据。</p>
-    <label className="field"><span>本轮模型请求上限</span><Input aria-label="自主观看请求上限" type="number" min={1} max={100} step={1} value={budget} disabled={active} onChange={event => { dirty.current = true; setBudget(event.target.value); }} /><small>默认 30 次；停止后再开不会清零本轮已用预算。</small></label>
+    <label className="field"><span>本轮模型请求上限</span><Input aria-label="自主观看请求上限" type="number" min={1} max={10000} step={1} value={budget} disabled={active} onChange={event => { dirty.current = true; setBudget(event.target.value); }} /><small>默认30次，最多10000次，每日最多20000次；停止后再开不会清零本轮已用预算。</small></label>
     <div className="actions"><Button size="sm" variant="primary" disabled={!state || active || otherBusy || !connected || !configured || video?.allowed !== true || video?.session?.status !== 'active' || busy.has('watchStart') || busy.has('watchStop')} onClick={() => { void run('watchStart', async () => { await api('/api/watch/start', watchStartInput(budget)); dirty.current = false; }); }}>开始自主观看</Button><Button size="sm" disabled={!active || busy.has('watchStop')} onClick={() => { void run('watchStop', () => api('/api/watch/stop', {})); }}>停止自主观看</Button><Button size="sm" variant="ghost" onClick={onView}>查看观看记录</Button></div>
     <p className="notice">请先亲自开始新一轮。到时或预算用尽都会结束，不会自动续时或预约下一轮。</p>
     {otherBusy && <p className="notice">请先结束手动视频任务或转发，再开始自主观看。</p>}
-    <p className="notice">本轮 {counts?.requests ?? 0} / {counts?.maxRequests ?? budget} 次 · 今日 {counts?.dailyRequests ?? 0} / {counts?.dailyLimit ?? 200} 次</p>
+    <p className="notice">本轮 {counts?.requests ?? 0} / {counts?.maxRequests ?? budget} 次 · 今日 {counts?.dailyRequests ?? 0} / {counts?.dailyLimit ?? 20000} 次</p>
     {active && state?.owned === false && <p className="notice">当前由另一个入口运行，停止按钮仍可请求停止。</p>}
   </div>;
 }
@@ -64,7 +64,7 @@ export function InterestRecords({ snapshot }) {
 export function WatchView({ state, video, browser, snapshot, onSettings }) {
   const active = watchIsActive(state), decision = state?.lastDecision;
   return <div className="memory-view watch-view"><div className="section-heading"><h1>自主观看</h1><p>和插件共用大肥鱼的人格与兴趣；每次启动只在你允许的当前轮次内运行。</p></div>
-    <div className="watch-summary"><Tag>{states[state?.status] || '正在读取状态'}</Tag><strong>本轮剩余 {secondsLabel(video?.remainingSeconds ?? state?.remainingSeconds)}</strong><span>模型请求 {state?.counts?.requests ?? 0} / {state?.counts?.maxRequests ?? 30}</span><Button size="sm" onClick={onSettings}>查看启动设置</Button></div>
+    <div className="watch-summary"><Tag>{states[state?.status] || '正在读取状态'}</Tag><strong>本轮剩余 {secondsLabel(video?.allowed && video?.remainingSeconds === null ? null : video?.remainingSeconds ?? state?.remainingSeconds)}</strong><span>模型请求 {state?.counts?.requests ?? 0} / {state?.counts?.maxRequests ?? 30}</span><Button size="sm" onClick={onSettings}>查看启动设置</Button></div>
     <section className="persona-records"><h2>当前选择</h2>{browser?.video?.title && <h3>{browser.video.title}</h3>}{decision ? <><Tag>{actions[decision.action] || decision.action || '观察作品'}</Tag><p className="decision-reason">{decision.reason || '当前选择尚未给出理由。'}</p>{decision.query && <p className="muted">搜索：{decision.query}</p>}{Number.isFinite(decision.seconds) && <p className="muted">计划观察 {decision.seconds} 秒</p>}</> : <p className="muted">{active ? '正在准备本次选择…' : '点击右侧“开始自主观看”后会显示选择理由。'}</p>}{state?.lastError && <p className="notice error" role="alert">{state.lastError}</p>}</section>
     <InterestRecords snapshot={snapshot} />
     <div className="watch-origin"><span>运行入口：{state?.worker?.source || '无活动入口'}</span><span>本窗口持有 worker：{state?.owned === true ? '是' : '否'}</span></div>

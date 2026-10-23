@@ -59,14 +59,17 @@ test('自主观看与人格使用合成服务验证有限启动、跨入口互�
   await page.exposeFunction('__nativeMutation', payload => { nativeCalls.push(payload); return prefs(); });
   await page.addInitScript(() => { window.douyinDesktop = { getSettings: () => window.__getSettings(), openMemoryFolder: async () => {}, openPersonaFolder: () => window.__openPersona(), saveSettings: value => window.__nativeMutation(value), clearApiKey: () => window.__nativeMutation({ clear: true }) }; });
   await page.goto(`http://127.0.0.1:${server.address().port}`);
+
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
+  await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
   await page.getByRole('button', { name: '开始自主观看', exact: true }).waitFor();
   await page.waitForTimeout(1700);
   assert.equal(calls.some(call => call.method === 'POST'), false, '页面初始化与轮询不会启动新轮或自主观看');
   assert.equal(await page.getByRole('button', { name: '开始自主观看', exact: true }).isDisabled(), true);
   await page.getByRole('button', { name: '开始新一轮', exact: true }).click();
-  await page.getByRole('spinbutton', { name: '自主观看请求上限' }).fill('101');
+  await page.getByRole('spinbutton', { name: '自主观看请求上限' }).fill('10001');
   await page.getByRole('button', { name: '开始自主观看', exact: true }).click();
-  await page.getByText('本轮请求上限须为 1 至 100 的整数。', { exact: true }).waitFor();
+  await page.getByText('本轮请求上限须为 1 至 10000 的整数。', { exact: true }).waitFor();
   assert.equal(calls.filter(call => call.route === '/api/watch/start').length, 0);
   await page.getByRole('spinbutton', { name: '自主观看请求上限' }).fill('4'); await page.waitForTimeout(1600);
   assert.equal(await page.getByRole('spinbutton', { name: '自主观看请求上限' }).inputValue(), '4');
@@ -77,11 +80,12 @@ test('自主观看与人格使用合成服务验证有限启动、跨入口互�
   assert.equal(await page.getByRole('button', { name: '开始任务 ↑', exact: true }).isDisabled(), true);
   await page.getByRole('button', { name: '读取许可好友', exact: true }).click(); await page.getByLabel('转发收件人', { exact: true }).selectOption('synthetic-friend');
   assert.equal(await page.getByRole('button', { name: '确认转发给所选好友', exact: true }).isDisabled(), true);
-  await page.getByRole('button', { name: /模型与记忆设置/ }).click();
+  await page.getByRole('button', { name: /☷ 业务设置/ }).click();
+  await page.getByRole('tab', { name: '基础设置', exact: true }).click();
+  await page.getByRole('button', { name: '配置模型与 API Key', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: '保存设置', exact: true }).isDisabled(), true);
   assert.equal(await page.getByRole('button', { name: '清除已保存的 API Key', exact: true }).isDisabled(), true);
   await page.getByRole('dialog').getByRole('button', { name: '返回', exact: true }).click();
-  await page.getByRole('button', { name: /共享记忆与人格/ }).click();
   assert.equal(await page.getByRole('button', { name: '编辑人格', exact: true }).isDisabled(), true);
   await page.getByRole('button', { name: '停止当前自主观看', exact: true }).click();
   await page.getByRole('button', { name: '编辑人格', exact: true }).click();
@@ -126,7 +130,7 @@ test('自主观看与人格使用合成服务验证有限启动、跨入口互�
   Object.assign(watch, { status: 'limited', remainingSeconds: 0 });
   await page.getByText('达到限制', { exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: '开始自主观看', exact: true }).isDisabled(), true);
-  await page.reload(); await page.getByRole('button', { name: '开始自主观看', exact: true }).waitFor(); await page.waitForTimeout(1700);
+  await page.reload(); await page.getByRole('tab', { name: '视频观看', exact: true }).click(); await page.getByRole('button', { name: '开始自主观看', exact: true }).waitFor(); await page.waitForTimeout(1700);
   assert.equal(calls.filter(call => call.route === '/api/watch/start').length, 1, '重连与重载不自动恢复自主观看');
   assert.equal(calls.filter(call => call.route === '/api/watch/stop').length, 1);
   assert.equal(calls.filter(call => call.route === '/api/video/start').length, 1);

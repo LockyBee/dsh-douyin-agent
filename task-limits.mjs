@@ -5,9 +5,9 @@ import { resolveRuntimePaths } from './runtime-paths.mjs';
 
 export const DEFAULT_TASK_POLICY = Object.freeze({ maxSteps: 20, maxToolCalls: 20, timeoutSeconds: 180 });
 export const TASK_LIMIT_BOUNDS = Object.freeze({
-  maxSteps: Object.freeze({ minimum: 1, maximum: 1000 }),
-  maxToolCalls: Object.freeze({ minimum: 1, maximum: 1000 }),
-  timeoutSeconds: Object.freeze({ minimum: 10, maximum: 86400 }),
+  maxSteps: Object.freeze({ minimum: 1, maximum: 10000 }),
+  maxToolCalls: Object.freeze({ minimum: 1, maximum: 10000 }),
+  timeoutSeconds: Object.freeze({ minimum: 10, maximum: 604800 }),
 });
 const MAX_POLICY_BYTES = 4096;
 const error = (code, message, status = 400) => Object.assign(new Error(message), { code, status });

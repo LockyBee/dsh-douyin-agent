@@ -6,26 +6,37 @@ window.__ModuleLoader__.load({
     const { createElement: h, useEffect, useRef, useState } = React;
     const Button = primitives.Button, Input = primitives.Input || 'input';
     const PREFIX = '/api/douyin-browser';
-    const routes = new Set(['/state', '/video/configure', '/video/start', '/video/stop', '/browser/open', '/persona/configure', '/model/configure', '/mode/configure', '/watch/start', '/watch/stop', '/spark/configure', '/spark/start', '/spark/stop', '/spark/resolve', '/comments/configure', '/comments/resolve', '/share/configure', '/share/resolve', '/chat/contacts', '/chat/configure', '/chat/start', '/chat/stop', '/chat/resolve', '/media/configure', '/media/credentials', '/reports/generate']);
+    const routes = new Set(['/state', '/diagnostics', '/diagnostics/repair', '/watch/schedule', '/watch/options', '/video/configure', '/video/start', '/video/stop', '/browser/open', '/persona/configure', '/model/configure', '/mode/configure', '/watch/start', '/watch/stop', '/spark/configure', '/spark/start', '/spark/stop', '/spark/resolve', '/comments/configure', '/comments/resolve', '/share/configure', '/share/resolve', '/chat/contacts', '/chat/configure', '/chat/start', '/chat/stop', '/chat/resolve', '/media/configure', '/media/credentials', '/reports/generate']);
     const column = { display: 'flex', flexDirection: 'column', gap: 12 };
     const row = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' };
     const muted = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, margin: 0 };
     const formControl = { font: 'inherit', color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-base)', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: 9, maxWidth: '100%', width: '100%', boxSizing: 'border-box' };
-    const categories = { '基础设置': ['人格与兴趣', 'DSH 模型'], '视频观看': ['视频时间与自主观看'], '好友互动': ['自动续火花', '自主分享作品', '许可好友与自动回复'], '公开评论': ['自主公开视频评论'], '音频与密钥': ['可选音频'], '观看日报': ['观看日报'] };
+    const fallbackCategories = { '基础设置': ['人格与兴趣', 'DSH 模型'], '视频观看': ['观看主题', '视频时间与自主观看'], '自检与用量': ['自检与用量'], '好友互动': ['自动续火花', '自主分享作品', '许可好友与自动回复'], '公开评论': ['自主公开视频评论'], '音频与密钥': ['可选音频'], '观看日报': ['观看日报'] };
 
-    function createSettingsTransport(globals = globalThis) {
+    function createSettingsTransport(globals = globalThis, rpc = globals.__DSH_TRANSPORT__?.rpc) {
       const carrier = globals.__DSH_TRANSPORT__;
       const address = globals.location;
-      const http = address && address.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(address.hostname);
-      const fetcher = typeof carrier?.fetch === 'function' ? carrier.fetch.bind(carrier) : http && typeof globals.fetch === 'function' ? globals.fetch.bind(globals) : null;
+      const http = address && ['http:', 'https:'].includes(address.protocol) && ['localhost', '127.0.0.1', '[::1]'].includes(address.hostname);
+      const desktop = ['dsh-app:', 'dsh:'].includes(address?.protocol) && address.hostname === 'app';
+      const fetcher = typeof carrier?.fetch === 'function' ? carrier.fetch.bind(carrier) : (http || desktop) && typeof globals.fetch === 'function' ? globals.fetch.bind(globals) : null;
       let token = '';
       return {
         async request(route, input) {
           if (!routes.has(route) && !/^\/reports\/read\?date=\d{4}-\d{2}-\d{2}$/.test(route)) throw new Error('只允许本插件的原生设置接口。');
-          if (!fetcher) throw new Error('当前 DSH 没有可用的同源设置服务，请使用支持 WebServer 的原生宿主。');
+          if (!fetcher && typeof rpc?.call !== 'function') throw new Error('当前 DSH 页面没有可用的插件设置通信接口。请更新插件后完全退出并重开 DSH；若仍失败，请核对 DSH 版本与来源。可点击“刷新插件状态”重试。');
           if (input !== undefined && !token) throw new Error('请先刷新原生设置页，核实当前状态。');
-          const response = await fetcher(PREFIX + route, { method: input === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(65_000), headers: { 'content-type': 'application/json', ...(input === undefined ? {} : { 'x-douyin-settings-token': token }) }, ...(input === undefined ? {} : { body: JSON.stringify(input) }) });
-          const value = await response.json();
+          const signal = AbortSignal.timeout(65_000);
+          let response;
+          if (!fetcher && typeof rpc?.call === 'function') {
+            const reply = await rpc.call('/douyin-settings', 'request', { path: route, ...(input === undefined ? {} : { input, token }) }, signal);
+            if (!reply?.ok) throw new Error(reply?.error?.message || 'DSH 设置通信失败，请确认插件后端已加载新版；操作不会自动重试。');
+            const outcome = reply.value;
+            if (!Number.isInteger(outcome?.status) || !outcome.body || typeof outcome.body !== 'object') throw new Error('DSH 设置接口版本不匹配，请完全退出后重开 DSH。');
+            response = { status: outcome.status, ok: outcome.status >= 200 && outcome.status < 300, json: async () => outcome.body };
+          } else response = await fetcher(PREFIX + route, { method: input === undefined ? 'GET' : 'POST', credentials: 'same-origin', cache: 'no-store', signal, headers: { 'content-type': 'application/json', ...(input === undefined ? {} : { 'x-douyin-settings-token': token }) }, ...(input === undefined ? {} : { body: JSON.stringify(input) }) });
+          let value;
+          try { value = await response.json(); }
+          catch { const error = new Error(`插件设置接口未返回 JSON（HTTP ${response.status || '未知'}）。请检查插件后端是否启用、DSH 的 WebServer 服务及版本兼容性。`); error.status = response.status; throw error; }
           if (!response.ok) { const error = new Error(value.error || '原生设置操作未完成。'); error.status = response.status; throw error; }
           if (route === '/state') { if (typeof value.token !== 'string' || !value.token) throw new Error('原生设置未取得有效会话。'); token = value.token; const { token: hidden, ...state } = value; return state; }
           return value;
@@ -33,28 +44,33 @@ window.__ModuleLoader__.load({
       };
     }
 
-    function SettingsPage() {
-      const [api] = useState(() => createSettingsTransport());
+    function SettingsPage({ rpc } = {}) {
+      const [api] = useState(() => createSettingsTransport(globalThis, rpc));
       const [state, setState] = useState(null), [ready, setReady] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
       const [draft, setDraft] = useState({}), [busy, setBusy] = useState(new Set()), [contacts, setContacts] = useState(null), [report, setReport] = useState(null), [reportDate, setReportDate] = useState('');
+      const [diagnostics, setDiagnostics] = useState(null);
+      const [repairResult, setRepairResult] = useState('');
       const [personaConflict, setPersonaConflict] = useState(false), [reviews, setReviews] = useState(new Set());
       const [category, setCategory] = useState('基础设置'), [credentials, setCredentials] = useState({ mimo: '', minimax: '' });
+      const categories = state?.sections || fallbackCategories;
       const dirty = useRef(new Set()), locks = useRef(new Set()), personaRevision = useRef(null), stateRef = useRef(null), generation = useRef(0), alive = useRef(true), submitted = useRef(new Set());
+      const connectionFailed = useRef(false);
       const active = value => value?.running === true || value?.starting === true || value?.busy === true || value?.worker?.alive === true;
       const operationActive = active(state?.watch) || active(state?.spark) || active(state?.chat);
       const runningWatch = active(state?.watch), runningSpark = active(state?.spark), runningChat = active(state?.chat);
       async function refresh() {
         const sequence = ++generation.current;
-        try { const value = await api.request('/state'); if (!alive.current || sequence !== generation.current) return; stateRef.current = value; setState(value); setReady(true); }
-        catch (failure) { if (alive.current && sequence === generation.current) { setReady(false); setError(failure.message); } }
+        try { const value = await api.request('/state'); if (!alive.current || sequence !== generation.current) return; stateRef.current = value; setState(value); setReady(true); if (connectionFailed.current) setError(''); connectionFailed.current = false; }
+        catch (failure) { if (alive.current && sequence === generation.current) { connectionFailed.current = true; setReady(false); setError(failure.message); } }
       }
       useEffect(() => { alive.current = true; void refresh(); const timer = setInterval(() => { void refresh(); }, 2500); return () => { alive.current = false; generation.current++; clearInterval(timer); }; }, [api]);
       useEffect(() => {
         if (!state) return;
         const defaults = {
           persona: { content: state.persona?.manualText || '' }, model: { provider: state.model?.provider || '', model: state.model?.model || '' },
-          video: { windows: (state.video?.policy?.windows || ['00:00-24:00']).join('\n'), sessionMinutes: state.video?.policy?.sessionMinutes ?? 10 },
-          mode: { silent: state.mode?.silent === true }, watch: { maxRequests: state.watch?.counts?.maxRequests ?? 30 },
+          video: { windows: (state.video?.policy?.windows || ['00:00-24:00']).join('\n'), sessionMinutes: state.video?.policy?.sessionMinutes ?? 10, unlimited: state.video?.policy?.sessionMinutes === null, weekendAll: state.video?.policy?.weekendWindows?.join() === '00:00-24:00' },
+          topics: { mode: state.watchOptions?.policy?.mode || 'recommend', topics: (state.watchOptions?.policy?.topics || []).join('\n'), exclude: (state.watchOptions?.policy?.exclude || []).join('\n') },
+          schedule: { enabled: state.schedule?.policy?.enabled === true, maxRequests: state.schedule?.policy?.maxRequests ?? 30 }, mode: { silent: state.mode?.silent === true }, watch: { maxRequests: state.watch?.counts?.maxRequests ?? 30 },
           spark: { enabled: state.spark?.enabled === true, windows: (state.spark?.policy?.windows || ['09:00-22:00']).join('\n'), dailyLimit: state.spark?.policy?.dailyLimit ?? 2 },
           comments: { enabled: state.comments?.enabled === true, dailyLimit: state.comments?.policy?.dailyLimit ?? 3, perSessionLimit: state.comments?.policy?.perSessionLimit ?? 1 },
           share: { enabled: state.share?.enabled === true, dailyLimit: state.share?.dailyLimit ?? 3 },
@@ -79,7 +95,7 @@ window.__ModuleLoader__.load({
       const post = (key, route, value, section) => { void perform(key, () => api.request(route, value), section); };
       const value = (section, key, fallback = '') => draft[section]?.[key] ?? fallback;
       const windows = section => value(section, 'windows').split(/[\n,;，；]+/).map(item => item.trim()).filter(Boolean);
-      const button = (text, key, callback, disabled = false) => h(Button, { type: 'button', size: 'sm', variant: 'outline', style: { alignSelf: 'flex-start' }, disabled: !ready || busy.has(key) || disabled, onClick: callback }, busy.has(key) ? '处理中…' : text);
+      const button = (text, key, callback, disabled = false, needsReady = true) => h(Button, { type: 'button', size: 'sm', variant: 'outline', style: { alignSelf: 'flex-start' }, disabled: needsReady && !ready || busy.has(key) || disabled, onClick: callback }, busy.has(key) ? '处理中…' : text);
       const input = (label, section, key, extra = {}) => h('label', { style: column }, h('span', null, label), h(Input, { 'aria-label': label, value: value(section, key), disabled: !ready, onChange: event => edit(section, key, event.target.value), ...extra }));
       const textarea = (label, section, key, rows = 2) => h('label', { style: column }, h('span', null, label), h('textarea', { 'aria-label': label, rows, value: value(section, key), disabled: !ready, onChange: event => edit(section, key, event.target.value), style: formControl, maxLength: section === 'persona' ? 40000 : 220 }));
       const toggle = (label, section, key = 'enabled') => h('label', { style: row }, h('input', { type: 'checkbox', 'aria-label': label, checked: value(section, key, false) === true, disabled: !ready, onChange: event => edit(section, key, event.target.checked) }), label);
@@ -109,7 +125,7 @@ window.__ModuleLoader__.load({
         h('h2', null, '大肥鱼抖音助手'),
         !ready && h('p', { role: 'status' }, '正在核实插件状态；未就绪时不会启用或启动任何功能。'),
         error && h('p', { role: 'alert' }, error), notice && h('p', { role: 'status' }, notice),
-        h('div', { style: row }, button('刷新插件状态', 'refresh', () => { void refresh(); }), button('打开抖音', 'browser', () => post('browser', '/browser/open', {}))),
+        h('div', { style: row }, button('刷新插件状态', 'refresh', () => { void refresh(); }, false, false), button('打开抖音', 'browser', () => post('browser', '/browser/open', {}))),
         h('div', { role: 'tablist', 'aria-label': '刷抖音设置分类', style: { ...row, marginTop: 20, marginBottom: 24 } }, ...Object.keys(categories).map(name => h(Button, { key: name, type: 'button', role: 'tab', 'aria-selected': category === name, size: 'sm', variant: category === name ? 'primary' : 'outline', onClick: () => setCategory(name) }, name))),
         section('DSH 模型', note('使用 DSH 已配置提供商；观看、问候和私信按本页模型设置运行。'),
           h('label', { style: column }, '模型提供商', h('select', { 'aria-label': '模型提供商', style: formControl, value: value('model', 'provider'), disabled: !ready || operationActive, onChange: event => { edit('model', 'provider', event.target.value); edit('model', 'model', ''); } }, h('option', { value: '' }, '请选择 DSH 提供商'), ...(state?.model?.providers || []).map(item => h('option', { key: item.id, value: item.id }, item.name || item.id)))),
@@ -122,11 +138,14 @@ window.__ModuleLoader__.load({
           h('div', { style: row }, button('保存人格', 'persona', () => post('persona', '/persona/configure', { content: value('persona', 'content'), expectedRevision: personaRevision.current }, 'persona'), operationActive || personaConflict), button('载入最新人格（替换草稿）', 'personaReload', () => { dirty.current.delete('persona'); setDraft(old => ({ ...old, persona: { content: state.persona?.manualText || '' } })); personaRevision.current = state.persona?.revision; setPersonaConflict(false); })),
           h('details', null, h('summary', null, '查看最新人格正文'), h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, state?.persona?.manualText || '尚未填写')),
           note(state?.persona?.personaFolder || '人格文件夹位置正在读取。')),
-        section('视频时间与自主观看', textarea('每日允许视频时段（北京时间）', 'video', 'windows'), input('单轮上限（分钟）', 'video', 'sessionMinutes', { type: 'number', min: 1, max: 1440 }),
-          button('保存视频时间', 'video', () => post('video', '/video/configure', { windows: windows('video'), sessionMinutes: Number(value('video', 'sessionMinutes')) }, 'video')),
-          note(state?.video?.reason || `当前轮次剩余 ${remaining} 秒。`), h('div', { style: row }, button('开始有限轮次', 'videoStart', () => post('videoStart', '/video/start', {}), runningWatch), button('结束本轮', 'videoStop', () => post('videoStop', '/video/stop', {}))),
-          input('本轮自主模型请求上限', 'watch', 'maxRequests', { type: 'number', min: 1, max: 100 }), h('div', { style: row }, button('开始自主观看', 'watchStart', () => post('watchStart', '/watch/start', { maxRequests: Number(value('watch', 'maxRequests', 30)) }), runningWatch || !state?.video?.allowed || !state?.model?.configured), button('停止自主观看', 'watchStop', () => post('watchStop', '/watch/stop', {}), !runningWatch)),
-          watchReason && note(watchReason), !state?.model?.configured && modelLink(), note('先由本人开始有限轮次，再启动自主观看；停止再开不会重置时间或请求预算。'), toggle('静默观看', 'mode', 'silent'), button('保存静默设置', 'mode', () => post('mode', '/mode/configure', { silent: value('mode', 'silent', false) === true }, 'mode')), note(state?.mode?.note || '静默模式不延长轮次，也不保证网站始终允许后台播放。')),
+        section('观看主题', h('label', { style: column }, '观看方式', h('select', { 'aria-label': '观看方式', style: formControl, value: value('topics','mode','recommend'), disabled: !ready || runningWatch, onChange: event => edit('topics','mode',event.target.value) }, h('option', { value: 'recommend' }, '自主挑选推荐'), h('option', { value: 'topic' }, '围绕指定主题观看'))), textarea('想看的主题，每行一个', 'topics', 'topics'), textarea('排除关键词，每行一个', 'topics', 'exclude'), button('保存观看主题', 'topics', () => post('topics', '/watch/options', { mode: value('topics','mode','recommend'), topics: value('topics','topics').split(/[\n,，;；]+/).map(item => item.trim()).filter(Boolean), exclude: value('topics','exclude').split(/[\n,，;；]+/).map(item => item.trim()).filter(Boolean) }, 'topics'), runningWatch), note('主题模式先搜索真实作品，再按人格挑片；排除词按作品标题匹配，不能保证识别画面内全部内容。保存后下次启动生效。')),
+        section('自检与用量', button('一键自检', 'diagnostics', () => { void perform('diagnostics', async () => { const result = await api.request('/diagnostics', {}); setDiagnostics(result); setRepairResult(''); return result; }); }), diagnostics && h('div', { style: column }, ...diagnostics.checks.map(item => h('div', { key: item.id }, note(`${({pass:'通过',warning:'待核对',fail:'未通过'})[item.status]} · ${item.label}：${item.message} [${item.code || ''}]`), ...(item.resolution?.steps || []).map((step,index) => note(step,index)))), ...(diagnostics.repairableActions || []).map(action => button(`修复：${action.label}`, 'diagnostics', () => { void perform('diagnostics', async () => { const result = await api.request('/diagnostics/repair', { reportId: diagnostics.reportId, action: action.id }); setDiagnostics(result.after); setRepairResult(result.message); return result; }); })), repairResult && note(repairResult), note(diagnostics.note), h('details', null, h('summary', null, '查看或复制诊断报告'), h('textarea', { 'aria-label': '诊断报告', readOnly: true, rows: 12, style: formControl, value: JSON.stringify(diagnostics, null, 2) }))), h('h3', null, '今日用量'), note(`模型响应 ${state?.usage?.today?.requests ?? 0} 次 · 已报告 ${state?.usage?.today?.totalTokens ?? 0} Token`), note(`输入 ${state?.usage?.today?.promptTokens ?? 0} · 输出 ${state?.usage?.today?.completionTokens ?? 0} · 缓存命中 ${state?.usage?.today?.cacheReportedRequests ? state.usage.today.cachedTokens : '未报告'} · 用量未知 ${state?.usage?.today?.unknownRequests ?? 0} 次`), h('h3', null, '最近30个有记录的日期'), ...(state?.usage?.groups || []).map((item,index) => note(`${item.source === 'dsh' ? '插件' : '软件'} · ${item.model} · ${({watch:'自主观看',task:'手动任务',comment:'评论生成',spark:'自动问候',chat:'私信回复'})[item.kind]}：${item.requests} 次响应 / ${item.totalTokens} Token / ${item.unknownRequests} 次用量未知`, index)), note(state?.usage?.note || '从本版开始记录，不回填历史用量。'), ...(state?.usage?.days || []).slice().reverse().map(item => note(`${item.date} · ${item.requests} 次响应 · ${item.totalTokens} Token`, item.date))),
+        section('视频时间与自主观看', toggle('每个允许时段自动开始一轮', 'schedule', 'enabled'), input('自动启动每轮请求上限','schedule','maxRequests',{type:'number',min:1,max:10000}), button('保存自动启动设置','schedule',()=>post('schedule','/watch/schedule',{enabled:value('schedule','enabled',false),maxRequests:Number(value('schedule','maxRequests',30))},'schedule')), note(state?.schedule?.policy?.enabled?'自动启动已开启，DSH需保持运行。':'自动启动未开启，保存时间段不会自行开始。'), note(state?.schedule?.note), state?.schedule?.last && note(`最近自动轮次：${({started:'已启动，本时段不再重开',starting:'启动中',failed:'启动失败，需人工处理',occupied:'已有观看运行'})[state.schedule.last.status] || state.schedule.last.status}`), h('div', { style: row }, button('谷时段（DeepSeek）', 'presetValley', () => { edit('video','windows','00:00-09:00\n12:00-14:00\n18:00-24:00'); edit('video','weekendAll',true); }), button('全天', 'presetAll', () => { edit('video','windows','00:00-24:00'); edit('video','weekendAll',false); }), button('晚间 20–22 点', 'presetEvening', () => { edit('video','windows','20:00-22:00'); edit('video','weekendAll',false); })), note('谷时段按 DeepSeek 2026-10-23 官方规则；周末全天，法定节假日可手动改为全天。其他提供商优惠以其规则为准。快捷填入后请保存。'), toggle('周末全天允许', 'video', 'weekendAll'), toggle('不限单轮时长', 'video', 'unlimited'), textarea('每日允许视频时段（北京时间）', 'video', 'windows'), input('单轮上限（分钟）', 'video', 'sessionMinutes', { type: 'number', min: 1, max: 1000000, disabled: value('video','unlimited',false) }),
+          button('保存视频时间', 'video', () => post('video', '/video/configure', { windows: windows('video'), weekendWindows: value('video','weekendAll',false) ? ['00:00-24:00'] : null, sessionMinutes: value('video','unlimited',false) ? null : Number(value('video', 'sessionMinutes')) }, 'video')),
+          note(state?.video?.reason || state?.video?.remainingSeconds === null ? '本轮不限单轮时长，仍受允许时段和请求预算控制。' : `当前轮次剩余 ${remaining} 秒。`), h('div', { style: row }, button('开始新一轮', 'videoStart', () => post('videoStart', '/video/start', {}), runningWatch), button('结束本轮', 'videoStop', () => post('videoStop', '/video/stop', {}))),
+          input('本轮自主模型请求上限', 'watch', 'maxRequests', { type: 'number', min: 1, max: 10000 }), h('div', { style: row }, button('开始自主观看', 'watchStart', () => post('watchStart', '/watch/start', { maxRequests: Number(value('watch', 'maxRequests', 30)) }), runningWatch || !state?.video?.allowed || !state?.model?.configured), button('停止自主观看', 'watchStop', () => post('watchStop', '/watch/stop', {}), !runningWatch)),
+          watchReason && note(watchReason), !state?.model?.configured && modelLink(), note('先由本人开始轮次，再启动自主观看；停止再开不会重置时间或请求预算。单轮请求最多10000次，每日最多20000次。'), toggle('静默观看', 'mode', 'silent'), button('保存静默设置', 'mode', () => post('mode', '/mode/configure', { silent: value('mode', 'silent', false) === true }, 'mode')), note(state?.mode?.note || '静默模式不延长轮次，也不保证网站始终允许后台播放。'), state?.mode?.silent && note(state.mode.application?.message || '静默开关已开启，尚未确认当前窗口是否已最小化；可保存设置重新应用。')),
+        category === '好友互动' && h('section', {style:column}, h('h3',null,'好友互动运行状态'), ...(state?.interactions?.rows||[]).map(item=>note(`${item.running?'运行中':'未运行'} · ${item.label}：${item.message}`,item.id)), note(state?.interactions?.note)),
         section('自动续火花', toggle('允许主动问候', 'spark'), textarea('每日问候时段（北京时间）', 'spark', 'windows'), input('每日主动问候总上限', 'spark', 'dailyLimit', { type: 'number', min: 1, max: 2 }),
           button('保存问候许可', 'spark', () => { void perform('spark', async () => { const result = await api.request('/spark/configure', { enabled: value('spark', 'enabled', false), windows: windows('spark'), dailyLimit: Number(value('spark', 'dailyLimit', 2)) }); if (!value('spark', 'enabled', false)) await api.request('/spark/stop', {}); return result; }, 'spark'); }),
           h('div', { style: row }, button('开始自动问候', 'sparkStart', () => post('sparkStart', '/spark/start', {}), runningSpark || !state?.spark?.enabled || !state?.model?.configured || dirty.current.has('spark')), button('停止自动问候', 'sparkStop', () => post('sparkStop', '/spark/stop', {}), !runningSpark)),
@@ -150,8 +169,11 @@ window.__ModuleLoader__.load({
       );
     }
     function apply(ctx) {
-      ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'douyin-browser', order: 16, label: () => '刷抖音' }, SettingsPage));
+      let rpc;
+      try { rpc = (ctx.get?.('connection') || ctx.connection)?.rpc; } catch {}
+      const Page = rpc ? () => h(SettingsPage, { rpc }) : SettingsPage;
+      ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'douyin-browser', order: 16, label: () => '刷抖音' }, Page));
     }
-    return { name: 'douyin-browser-settings', inject: ['slots'], apply, SettingsPage, createSettingsTransport };
+    return { name: 'douyin-browser-settings', inject: ['slots', 'connection'], apply, SettingsPage, createSettingsTransport };
   },
 });

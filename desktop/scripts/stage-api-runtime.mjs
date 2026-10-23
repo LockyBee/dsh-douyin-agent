@@ -17,7 +17,7 @@ const NODE_LICENSE_SHA256 = '8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b
 const NODE_ARCHIVE_SHA256 = 'f2aa33b35b75aca5f3f7b85675a6f6423201053e9381911e64961f3bda2528ab';
 const DEPENDENCIES = { 'playwright-core': '1.64.0-alpha-1790635538000', yaml: '2.9.0' };
 export const DOMAIN_FILES = Object.freeze([
-  'api-agent.mjs', 'app.mjs', 'browser-host.mjs', 'chat-agent.mjs', 'chat-browser.mjs',
+  'scheduled-watch.mjs', 'interaction-status.mjs', 'settings-sections.mjs', 'usage-ledger.mjs', 'watch-options.mjs', 'diagnostics.mjs', 'api-agent.mjs', 'app.mjs', 'browser-host.mjs', 'chat-agent.mjs', 'chat-browser.mjs',
   'chat-message.mjs', 'chat-service.mjs', 'core.mjs', 'message-tracker.mjs', 'memory.mjs',
   'qq-sync.mjs', 'runtime-paths.mjs', 'tool-definitions.mjs', 'video-forward.mjs',
   'video-limits.mjs', 'playwright-runtime.mjs',

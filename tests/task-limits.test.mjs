@@ -19,7 +19,7 @@ test('缺少设置返回有限默认值，两入口读取同一路径且返回�
   assert.deepEqual(state.policy, { maxSteps: 20, maxToolCalls: 20, timeoutSeconds: 180 }); assert.equal(state.configured, false);
   assert.equal(fs.existsSync(limits.policyFile), false);
   state.policy.maxSteps = 999; state.hardLimits.maxSteps.maximum = 9999;
-  assert.deepEqual(limits.state().policy, DEFAULT_TASK_POLICY); assert.equal(limits.state().hardLimits.maxSteps.maximum, 1000);
+  assert.deepEqual(limits.state().policy, DEFAULT_TASK_POLICY); assert.equal(limits.state().hardLimits.maxSteps.maximum, 10000);
   const other = new TaskLimits({ stateDir: directory });
   limits.configure({ maxSteps: 35, maxToolCalls: 40, timeoutSeconds: 600 }, { explicit: true });
   assert.deepEqual(other.state().policy, { maxSteps: 35, maxToolCalls: 40, timeoutSeconds: 600 }); assert.equal(other.state().configured, true);
@@ -40,12 +40,12 @@ test('仅显式用户操作可保存，完整参数与有限整数硬界共同�
 
 test('文件原子替换有版本且有界，不遗留临时文件或控制锁', t => {
   const { limits, directory } = fixture(t);
-  const policy = { maxSteps: 1000, maxToolCalls: 1000, timeoutSeconds: 86400 };
+  const policy = { maxSteps: 10000, maxToolCalls: 10000, timeoutSeconds: 604800 };
   const result = limits.configure(policy, { explicit: true });
   assert.deepEqual(result.policy, policy); assert.deepEqual(JSON.parse(fs.readFileSync(limits.policyFile, 'utf8')), { version: 1, policy });
   assert.ok(fs.statSync(limits.policyFile).size < 4096);
   assert.deepEqual(fs.readdirSync(directory), ['task-policy.json']);
-  assert.throws(() => limits.configure({ ...policy, maxToolCalls: 1001 }, { explicit: true })); assert.deepEqual(limits.state().policy, policy);
+  assert.throws(() => limits.configure({ ...policy, maxToolCalls: 10001 }, { explicit: true })); assert.deepEqual(limits.state().policy, policy);
 });
 
 test('损坏、超大、非法版本或非普通文件拒绝读取与覆盖，不静默恢复默认值', t => {
@@ -76,6 +76,6 @@ test('保存手动预算不修改视频截止、自主观看预算或其他业�
   const { directory, limits } = fixture(t);
   const files = { 'video-policy.json': '{"sessionMinutes":10}', 'video-sessions.json': '{"current":{"expiresAt":1792059000000}}', 'watch-budget.json': '{"sessions":{"合成轮次":{"requests":7,"maxRequests":30}}}' };
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(directory, name), body);
-  limits.configure({ maxSteps: 1000, maxToolCalls: 1000, timeoutSeconds: 86400 }, { explicit: true });
+  limits.configure({ maxSteps: 10000, maxToolCalls: 10000, timeoutSeconds: 604800 }, { explicit: true });
   for (const [name, body] of Object.entries(files)) assert.equal(fs.readFileSync(path.join(directory, name), 'utf8'), body);
 });

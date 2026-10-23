@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from './playwright-runtime.mjs';
 import { MemoryStore } from './memory.mjs?v=2';
-import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=10';
+import { TOOL_DEFINITIONS, validateToolArguments } from './tool-definitions.mjs?v=14';
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs?v=10';
 import { PersonaMemory } from './persona-memory.mjs?v=10';
@@ -269,22 +269,22 @@ export class BrowserController {
     return this.reportPromise;
   }
   getWatchMode() {
-    this.modePromise ??= import('./watch-mode.mjs?v=10').then(({ WatchMode }) => new WatchMode({ stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' }));
+    this.modePromise ??= import('./watch-mode.mjs?v=14').then(({ WatchMode }) => new WatchMode({ stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' }));
     return this.modePromise;
   }
   async applyWatchMode({ minimize = false } = {}) {
-    if (!['api', 'dsh'].includes(this.source) || !this.browser?.isConnected()) return { applied: false, pendingNextVideoAction: true };
-    const mode = await this.getWatchMode(), pages = this.browser.contexts().flatMap(context => context.pages());
-    const applied = [];
-    for (const page of pages) {
-      if (page.isClosed() || await page.evaluate(() => window.name).catch(() => '') !== `deepseek-douyin-${this.source}`) continue;
-      const result = await mode.apply(page);
-      if (minimize && mode.state().silent && result.applied) {
-        try { result.window = await mode.minimizeManagedWindow(page); } catch (error) { result.window = { minimized: false, reason: error.message }; }
-      }
-      applied.push(result);
-    }
-    return { applied: applied.some(item => item.applied), pages: applied, focusRequested: false };
+    if (!['api', 'dsh'].includes(this.source)) return { applied: false, reason: '当前入口不管理视频静默设置。' };
+    const mode = await this.getWatchMode();
+    return mode.applyBrowser(await this.connectExistingBrowser(), { minimize });
+  }
+  async connectExistingBrowser() {
+    if (this.browser?.isConnected()) return this.browser;
+    let owner;
+    try { owner = JSON.parse(readFileSync(path.join(CONTROL, 'browser.json'), 'utf8')); } catch { return null; }
+    if (owner.profile !== PROFILE || owner.port !== PORT || !owner.ready || !alive(owner.pid) || !await version()) return null;
+    // 保存静默设置只重新连接已经存在的专用浏览器，不启动窗口或新建标签。
+    this.browser = await connectDedicatedBrowser(`http://127.0.0.1:${PORT}`);
+    return this.browser;
   }
   openBrowser({ signal } = {}) {
     const operation = this.queue.catch(() => {}).then(async () => {
@@ -379,6 +379,11 @@ export class BrowserController {
     const definition = TOOL_DEFINITIONS.find(tool=>tool.name===name);
     if (!definition) return Promise.reject(new Error('不支持的抖音工具。'));
     try { validateToolArguments(definition,args); } catch(error) { return Promise.reject(error); }
+    if (name.startsWith('douyin_diagnostics')) {
+      if (!this.diagnosticsService) return Promise.reject(new Error('诊断服务尚未加载，请更新插件或软件。'));
+      signal?.throwIfAborted();
+      return name === 'douyin_diagnostics' ? this.diagnosticsService.run() : this.diagnosticsService.repair(args, { signal });
+    }
     const operation = this.queue.catch(()=>{}).then(async()=>{
       let releaseNativeLease;
       try {
@@ -448,8 +453,8 @@ export class BrowserController {
         if (['api', 'dsh'].includes(this.source)) {
           const mode = await this.getWatchMode();
           await mode.apply(this.page);
-          if (autonomousRunId && mode.state().silent) {
-            try { await mode.minimizeManagedWindow(this.page); } catch { /* 未核实窗口归属时继续保持静音，不隐藏其他页面。 */ }
+          if (mode.state().silent) {
+            await mode.applyBrowser(this.browser, { minimize: true });
           }
         }
         await this.checkVideoLimits(name);

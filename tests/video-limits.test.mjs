@@ -49,7 +49,7 @@ test('保存更长规则不延长已开始的轮，缩短或关闭当前时间�
 });
 test('空窗口、无穷时长、零上限、非法小时和关闭全部上限均拒绝，原设置不改', (t) => {
   const f = fixture(t); const original = fs.readFileSync(f.limits.policyFile, 'utf8');
-  for (const input of [policy([],10), policy(['00:00-24:00'],Infinity), policy(['00:00-24:00'],NaN), policy(['00:00-24:00'],0), policy(['00:00-24:00'],1441), policy(['24:00-01:00']), policy(['23:00-24:10']), policy(['12:00-12:00']), policy(['not-a-window']), { ...policy(), disabled:true }, { ...policy(), timeZone:'UTC' }]) assert.throws(() => f.limits.savePolicy(input, { explicit:true }));
+  for (const input of [policy([],10), policy(['00:00-24:00'],Infinity), policy(['00:00-24:00'],NaN), policy(['00:00-24:00'],0), policy(['00:00-24:00'],1000001), policy(['24:00-01:00']), policy(['23:00-24:10']), policy(['12:00-12:00']), policy(['not-a-window']), { ...policy(), disabled:true }, { ...policy(), timeZone:'UTC' }]) assert.throws(() => f.limits.savePolicy(input, { explicit:true }));
   assert.equal(fs.readFileSync(f.limits.policyFile,'utf8'),original);
 });
 test('到点定时调用 API、DSH 的暂停回调并发出中止信号，之后禁止继续切换', async (t) => {
@@ -75,7 +75,7 @@ async function serverFixture(t, f) {
 test('本机 API 校验参数与令牌；时间用完实际调用暂停并停止模型，私信 worker 继续运行', async (t) => {
   const f=fixture(t); const s=await serverFixture(t,f);
   assert.equal((await fetch(s.base+'/api/video/status')).status,403); assert.equal((await s.request('/api/video/policy',policy([],10))).status,400);
-  assert.equal((await s.request('/api/video/policy',{...policy(),sessionMinutes:null})).status,400);
+  assert.equal((await s.request('/api/video/policy',{...policy(),sessionMinutes:null})).status,200);
   assert.equal((await s.request('/api/task',{instruction:'尚未开始的一轮不能刷'})).status,409); assert.equal(s.modelCalls(),0);
   assert.equal((await s.request('/api/video/policy',policy(['00:00-24:00'],1))).status,200); assert.equal((await s.request('/api/video/start',{})).status,200);
   s.paused.api=false;s.paused.dsh=false; assert.equal((await s.request('/api/task',{instruction:'合成视频任务'})).status,202); f.advance(60_000); await s.server.enforceVideoLimits(); await new Promise(resolve=>setTimeout(resolve,10));

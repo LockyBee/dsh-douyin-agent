@@ -1,0 +1,11 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+const[pidText,file,hash]=process.argv.slice(2),pid=Number(pidText);
+if(!Number.isSafeInteger(pid)||pid<1||!path.isAbsolute(file||'')||!/^Dafeiyu-Douyin-API-\d+\.\d+\.\d+-win-x64\.exe$/.test(path.basename(file))||!/^[a-f0-9]{64}$/.test(hash||''))throw new Error('更新启动参数无效');
+const alive=()=>{try{process.kill(pid,0);return true;}catch(error){return error.code==='EPERM';}};
+const until=Date.now()+30000;while(alive()&&Date.now()<until)await delay(200);if(alive())throw new Error('旧版仍在退出，未重复启动');
+if(createHash('sha256').update(await fs.readFile(file)).digest('hex')!==hash)throw new Error('更新文件校验未通过');
+const child=spawn(file,[],{cwd:path.dirname(file),detached:true,windowsHide:false,stdio:'ignore',shell:false});child.unref();

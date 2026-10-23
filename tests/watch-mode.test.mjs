@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from '../playwright-runtime.mjs';
 import { WatchMode } from '../watch-mode.mjs';
+import { BrowserController } from '../core.mjs';
 
 let browser;
 before(async () => { browser = await chromium.launch({ channel: 'msedge', headless: true, args: ['--autoplay-policy=no-user-gesture-required'] }); });
@@ -113,4 +114,29 @@ test('窗口target更换或用户手改状态后不拿旧凭据恢复，外来�
   window.windows.set(1, { windowState: 'minimized' }); assert.equal((await f.mode.restoreManagedWindow(page, { explicit: true })).changed, false);
   fs.writeFileSync(f.mode.controlFile, '外来合成锁'); assert.throws(() => f.mode.configure({ silent: false }, { explicit: true }), error => error.code === 'WATCH_MODE_BUSY');
   assert.equal(fs.readFileSync(f.mode.controlFile, 'utf8'), '外来合成锁');
+});
+
+test('静默保存能最小化仅有私信或准备页的专用窗口，连接恢复不新建或启动页面', async t => {
+  const f=fixture(t), window=syntheticWindow();window.add('deepseek-douyin-dsh-chat');window.add('deepseek-douyin-api-chat');window.add('deepseek-douyin-launcher');
+  f.mode.configure({silent:true},{explicit:true});let reconnects=0;
+  const controller=new BrowserController({source:'api',videoLimits:{stateDir:f.directory}});controller.modePromise=Promise.resolve(f.mode);
+  controller.connectExistingBrowser=async()=>{reconnects++;return{isConnected:()=>true,contexts:()=>[window.pages[0].context()]};};
+  controller.connect=()=>assert.fail('保存静默不得新建页面或启动视频');
+  const result=await controller.applyWatchMode({minimize:true});
+  assert.equal(reconnects,1);assert.equal(result.minimized,true);assert.match(result.message,/已最小化/);assert.equal(result.pages.length,3);assert.equal(window.commands.length,1);assert.equal(f.mode.state().application.minimized,true);
+});
+
+test('专用窗口包含无关页或登录验证时显示真实阻止原因，没有浏览器时只保存待应用状态', async t => {
+  const f=fixture(t);f.mode.configure({silent:true},{explicit:true});
+  const make=window=>({isConnected:()=>true,contexts:()=>[window.pages[0].context()]});
+  const mixed=syntheticWindow();mixed.add('deepseek-douyin-api-chat');mixed.add('unrelated');const blocked=await f.mode.applyBrowser(make(mixed),{minimize:true});assert.equal(blocked.minimized,false);assert.match(blocked.message,/非受管/);assert.equal(mixed.commands.length,0);
+  const login=syntheticWindow();login.add('deepseek-douyin-launcher',1,{loginRequired:true});const protectedState=await f.mode.applyBrowser(make(login),{minimize:true});assert.match(protectedState.message,/登录验证/);assert.equal(login.commands.length,0);
+  const absent=await f.mode.applyBrowser(null,{minimize:true});assert.equal(absent.pendingNextVideoAction,true);assert.match(absent.message,/下次浏览/);
+});
+
+test('同一静默设置覆盖软件和插件作品页的静音，不修改私信页媒体', async t => {
+  const f=fixture(t), api=await pageFixture(t), dsh=await pageFixture(t,'deepseek-douyin-dsh'), chat=await pageFixture(t,'deepseek-douyin-dsh-chat');
+  f.mode.configure({silent:true},{explicit:true});const result=await f.mode.applyBrowser(browser);
+  assert.equal(result.applied,true);assert.equal(await api.page.locator('video').evaluate(v=>v.muted),true);assert.equal(await dsh.page.locator('video').evaluate(v=>v.muted),true);assert.equal(await chat.page.locator('video').evaluate(v=>v.muted),false);
+  f.mode.configure({silent:false},{explicit:true});await f.mode.applyBrowser(browser);assert.equal(await dsh.page.locator('video').evaluate(v=>v.muted),false);
 });

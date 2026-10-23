@@ -1,4 +1,11 @@
+import { interactionStatus } from './interaction-status.mjs';
+import { SETTINGS_SECTIONS } from './settings-sections.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+
+import { UsageLedger } from './usage-ledger.mjs';
+import { WatchOptions } from './watch-options.mjs';
+import { DiagnosticsService } from './diagnostics.mjs?v=14';
+import { resolveRuntimePaths } from './runtime-paths.mjs';
 
 const PREFIX = '/api/douyin-browser';
 const send = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(body)); };
@@ -11,18 +18,21 @@ const empty = value => { if (Object.keys(value).length) throw Object.assign(new 
 const active = state => Boolean(state?.running || state?.starting || state?.busy || state?.worker?.alive);
 
 // 复用 DSH 原生 WebServer 和设置页插槽，不启动独立软件或第二个端口。
-export function createNativeSettingsRoute({ getController, getComments, getReport, getSpark, getWatch, getMode, getShare, getChat, getMedia, modelSettings, configureMode, startWatch, startSpark, startChat } = {}) {
+export function createNativeSettingsRoute({ getController, getComments, getReport, getSpark, getWatch, getMode, getShare, getChat, getMedia, modelSettings, configureMode, startWatch, startSpark, startChat, watchSchedule, getDiagnostics } = {}) {
   const token = randomBytes(32).toString('hex');
+  let diagnostics;
   return { kind: 'prefix', path: PREFIX, async handler(req, res) {
     try {
       const host = req.headers.host;
       if (!host || !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) return send(res, 403, { error: '设置页只接受本机来源。' });
-      const origin = `http://${host}`, url = new URL(req.url, origin);
+      const origin = `${req.socket?.encrypted ? 'https' : 'http'}://${host}`, url = new URL(req.url, origin);
       if (url.origin !== origin || req.headers.origin && req.headers.origin !== origin || ['cross-site', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, { error: '拒绝跨来源设置请求。' });
       const controller = await getController();
+      const stateDir = controller.limits().stateDir ?? resolveRuntimePaths().stateDir, usageLedger = new UsageLedger({ stateDir }), optionsService = new WatchOptions({ stateDir });
+      if (!url.pathname.startsWith(`${PREFIX}/diagnostics`)) for (const getter of [getSpark, getChat]) if (getter) { const service = await getter(); if (service.agent) { service.agent.usageLedger = usageLedger; service.agent.source = 'dsh'; } }
       if (req.method === 'GET' && url.pathname === `${PREFIX}/state`) {
         const [spark, comments, reports] = await Promise.all([getSpark(), getComments(), getReport()]);
-        return send(res, 200, { token, video: controller.limits().state(), spark: spark.state(), comments: comments.state(), reports: await reports.state(), persona: controller.getPersonaMemory().snapshot(), mode: (await getMode()).state(), model: typeof modelSettings.catalog === 'function' ? await modelSettings.catalog() : modelSettings.state(), watch: (await getWatch()).state(), ...(getShare ? { share: (await getShare()).state() } : {}), ...(getChat ? { chat: (await getChat()).state() } : {}), ...(getMedia ? { media: await (await getMedia()).status() } : {}), setup: { browser: 'Microsoft Edge', audioOptional: true, independentAppRequired: false, model: '使用 DSH 已配置提供商；可选音频 Key 单独保存。' } });
+        return send(res, 200, { token, schedule: watchSchedule?.state(), interactions: interactionStatus({chat:getChat?(await getChat()).state():{},spark:spark.state(),share:getShare?(await getShare()).state():{},comments:comments.state(),watch:(await getWatch()).state(),modelReady:modelSettings.state().configured}), sections: SETTINGS_SECTIONS, usage: usageLedger.state(), watchOptions: optionsService.state(), video: controller.limits().state(), spark: spark.state(), comments: comments.state(), reports: await reports.state(), persona: controller.getPersonaMemory().snapshot(), mode: (await getMode()).state(), model: typeof modelSettings.catalog === 'function' ? await modelSettings.catalog() : modelSettings.state(), watch: (await getWatch()).state(), ...(getShare ? { share: (await getShare()).state() } : {}), ...(getChat ? { chat: (await getChat()).state() } : {}), ...(getMedia ? { media: await (await getMedia()).status() } : {}), setup: { browser: 'Microsoft Edge', audioOptional: true, independentAppRequired: false, model: '使用 DSH 已配置提供商；可选音频 Key 单独保存。' } });
       }
       if (req.method === 'GET' && url.pathname === `${PREFIX}/reports/read`) return send(res, 200, await (await getReport()).read({ date: url.searchParams.get('date') }));
       if (req.method !== 'POST') return send(res, 404, { error: '设置地址不存在。' });
@@ -30,6 +40,15 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
       if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) return send(res, 403, { error: '请刷新原生设置页后重试。' });
       const input = await body(req); let value;
       switch (url.pathname.slice(PREFIX.length)) {
+        case '/diagnostics':
+        case '/diagnostics/repair': {
+          const service = getDiagnostics ? await getDiagnostics() : diagnostics ??= new DiagnosticsService({ source: 'dsh', controller, modeService: await getMode(), modelConfigured: () => modelSettings.state().configured, videoLimits: controller.limits(), watchService: getWatch, watchSchedule, usageLedger, optionsService, paths: { ...resolveRuntimePaths(), stateDir } });
+          if (url.pathname.endsWith('/repair')) value = await service.repair(input);
+          else { empty(input); value = await service.run(); }
+          break;
+        }
+        case '/watch/schedule': if(!watchSchedule) throw new Error('自动启动调度尚未加载。'); value=watchSchedule.configure(input,{explicit:true}); break;
+        case '/watch/options': if ((await getWatch()).state().running) throw Object.assign(new Error('请先停止自主观看再保存主题。'), { status: 409 }); value = optionsService.configure(input, { explicit: true }); break;
         case '/video/configure': value = controller.limits().savePolicy(input, { explicit: true }); break;
         case '/video/start': empty(input); if ((await getWatch()).state().running) throw Object.assign(new Error('请先停止自主观看，再开始新一轮。'), { status: 409 }); await controller.pauseForLimits?.(); value = controller.limits().markSession('dsh', { explicit: true }); break;
         case '/video/stop': empty(input); value = controller.limits().endSession({ explicit: true }); await controller.pauseForLimits?.(); break;

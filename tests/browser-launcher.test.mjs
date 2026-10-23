@@ -55,6 +55,12 @@ test('共享自主观看期间仅显示原命名入口，不暂停、不导航�
   assert.equal(await page.evaluate(() => Boolean(window.__dafeiyuPreparePauseInstalled)), false);
 });
 
+test('首次打开复用唯一空白初始页，避免留下不受管空标签而阻止静默最小化', async t => {
+  const {context,scopedBrowser}=await contextFixture(t), blank=await context.newPage();
+  const launcher=new BrowserLauncher({getBrowser:async()=>scopedBrowser});const result=await launcher.open();
+  assert.equal(result.reused,true);assert.equal(context.pages().length,1);assert.equal(context.pages()[0],blank);assert.equal(await blank.evaluate(()=>window.name),PREPARE_PAGE_NAME);assert.equal(result.paused,true);
+});
+
 test('自主观看入口缺失时给出可操作错误，不创建新页或改动现有页面', async t => {
   const { context, scopedBrowser } = await contextFixture(t), page = await playingPage(context, 'unrelated-synthetic-tab');
   const launcher = new BrowserLauncher({ getBrowser: async () => scopedBrowser, getWatchState: () => ({ source: 'api' }) });

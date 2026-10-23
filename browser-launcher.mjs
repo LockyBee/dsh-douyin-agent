@@ -82,6 +82,14 @@ export class BrowserLauncher {
     if (!context) throw new Error('专用 Edge 没有可用资料窗口，请在专用窗口完成系统提示后重试。');
     let page = await this.findPage(browser, PREPARE_PAGE_NAME, signal), reused = Boolean(page);
     worker = this.getWatchState(); if (worker) return this.showWatch(browser, worker, signal);
+    if (!page) {
+      const blank = [];
+      for (const candidate of context.pages()) {
+        if (candidate.isClosed() || candidate.url() !== 'about:blank') continue;
+        if (await abortable(candidate.evaluate(() => !window.name && !document.body?.textContent?.trim() && document.querySelectorAll('body *').length === 0).catch(() => false), signal)) blank.push(candidate);
+      }
+      if (blank.length === 1) { page = blank[0]; reused = true; }
+    }
     if (!page) page = await abortable(context.newPage(), signal, value => value.close().catch(() => {}));
     worker = this.getWatchState();
     if (worker) { if (!reused) await page.close().catch(() => {}); return this.showWatch(browser, worker, signal); }

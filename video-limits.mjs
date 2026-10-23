@@ -4,6 +4,8 @@ import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
 
 const DAY = 86_400_000;
+const deadline = (...values) => { const finite = values.filter(value => value !== null); return finite.length ? Math.min(...finite) : null; };
+const durationEnd = (start, minutes) => minutes === null ? null : start + minutes * 60_000;
 const SOURCES = ['api', 'dsh'];
 const READ_ACTIONS = new Set(['douyin_status', 'douyin_pause', 'douyin_recall', 'douyin_remember', 'douyin_video_limits_status']);
 export const DEFAULT_VIDEO_POLICY = Object.freeze({ version: 1, timeZone: 'Asia/Shanghai', windows: ['00:00-24:00'], sessionMinutes: 10 });
@@ -23,23 +25,25 @@ function parseWindow(value) {
 }
 export function validateVideoPolicy(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('视频时间设置必须是对象。');
-  for (const key of Object.keys(input)) if (!['version','timeZone','windows','sessionMinutes'].includes(key)) throw new Error(`不支持的视频设置：${key}`);
+  for (const key of Object.keys(input)) if (!['version','timeZone','windows','weekendWindows','sessionMinutes'].includes(key)) throw new Error(`不支持的视频设置：${key}`);
   if (input.timeZone !== undefined && input.timeZone !== 'Asia/Shanghai') throw new Error('时间段固定按 Asia/Shanghai 计算。');
-  if (!Number.isSafeInteger(input.sessionMinutes) || input.sessionMinutes < 1 || input.sessionMinutes > 1440) throw new Error('单轮时长须是 1 至 1440 分钟的整数，不能关闭时长上限。');
+  if (input.sessionMinutes !== null && (!Number.isSafeInteger(input.sessionMinutes) || input.sessionMinutes < 1 || input.sessionMinutes > 1_000_000)) throw new Error('单轮时长须为1至1000000分钟，或选择不限单轮时长。');
   if (!Array.isArray(input.windows) || input.windows.length < 1 || input.windows.length > 16) throw new Error('请设置 1 至 16 个每日时间段，不能关闭全部时间限制。');
   for (const value of input.windows) parseWindow(value);
-  return { version: 1, timeZone: 'Asia/Shanghai', windows: [...new Set(input.windows)], sessionMinutes: input.sessionMinutes };
+  if (input.weekendWindows !== undefined && input.weekendWindows !== null) { if (!Array.isArray(input.weekendWindows) || input.weekendWindows.length < 1 || input.weekendWindows.length > 16) throw new Error('周末时段须设置1至16项。'); for (const value of input.weekendWindows) parseWindow(value); }
+  return { version: 1, timeZone: 'Asia/Shanghai', windows: [...new Set(input.windows)], sessionMinutes: input.sessionMinutes, ...(input.weekendWindows ? { weekendWindows: [...new Set(input.weekendWindows)] } : {}) };
 }
 export function allowedWindow(policy, now) {
   if (!Number.isFinite(now)) throw new Error('当前时间无效。');
   const parts = Object.fromEntries(shanghai.formatToParts(new Date(now)).filter((item) => item.type !== 'literal').map((item) => [item.type, Number(item.value)]));
   const midnight = Date.UTC(parts.year, parts.month - 1, parts.day) - 8 * 3600_000;
   const intervals = [];
-  for (const offset of [-1, 0, 1]) for (const value of policy.windows) { const { start, end } = parseWindow(value); intervals.push({ startAt: midnight + offset * DAY + start * 60_000, expiresAt: midnight + offset * DAY + end * 60_000 }); }
+  for (let offset = -8; offset <= 8; offset++) { const day = new Date(midnight + offset * DAY + 8 * 3600_000).getUTCDay(); for (const value of ([0,6].includes(day) ? policy.weekendWindows || policy.windows : policy.windows)) { const { start, end } = parseWindow(value); intervals.push({ startAt: midnight + offset * DAY + start * 60_000, expiresAt: midnight + offset * DAY + end * 60_000 }); } }
   intervals.sort((a, b) => a.startAt - b.startAt);
   const merged = [];
   for (const interval of intervals) { const previous = merged.at(-1); if (previous && interval.startAt <= previous.expiresAt) previous.expiresAt = Math.max(previous.expiresAt, interval.expiresAt); else merged.push({ ...interval }); }
-  return merged.find((interval) => now >= interval.startAt && now < interval.expiresAt) || null;
+  const current = merged.find((interval) => now >= interval.startAt && now < interval.expiresAt);
+  return current && current.expiresAt - current.startAt >= 7 * DAY ? { startAt: null, expiresAt: null } : current || null;
 }
 
 // 复用 Node.js 时间、文件与定时器，以及本项目的本机持久状态方式，无新增依赖。
@@ -60,26 +64,26 @@ export class VideoLimits {
     const policy = validateVideoPolicy(read(this.policyFile)); const sessions = read(this.sessionsFile); const now = this.now();
     if (!Number.isFinite(now)) throw new Error('当前时间无效，未允许刷视频。');
     const window = allowedWindow(policy, now); const session = sessions.current;
-    if (session && (!Number.isFinite(session.startAt) || !Number.isFinite(session.expiresAt) || session.expiresAt < session.startAt || session.expiresAt > session.startAt + 1440 * 60_000)) throw new Error('视频会话时间无效，未允许刷视频。');
-    const expiresAt = session ? Math.min(session.expiresAt, session.startAt + policy.sessionMinutes * 60_000, window?.expiresAt ?? now) : null;
+    if (session && (!Number.isFinite(session.startAt) || session.expiresAt !== null && (!Number.isFinite(session.expiresAt) || session.expiresAt < session.startAt || session.expiresAt > session.startAt + 1_000_000 * 60_000))) throw new Error('视频会话时间无效，未允许刷视频。');
+    const expiresAt = session ? deadline(session.expiresAt, durationEnd(session.startAt, policy.sessionMinutes), window ? window.expiresAt : now) : null;
     let reason = '';
     if (!window) reason = '当前不在允许刷视频的时间段。';
-    else if (!session) reason = `请点击“开始新一轮”，本轮上限 ${policy.sessionMinutes} 分钟。`;
+    else if (!session) reason = `请点击“开始新一轮”，${policy.sessionMinutes === null ? '本轮不限单轮时长，仍受每日时段控制' : `本轮上限 ${policy.sessionMinutes} 分钟`}。`;
     else if (session.status !== 'active') reason = session.reason || '当前这轮已经结束，请显式开始新一轮。';
-    else if (now < session.startAt || now >= expiresAt) reason = '本轮刷视频时间已用完，请显式开始新一轮。';
-    return { protocol: 'video-limits-v1', timeZone: 'Asia/Shanghai', now, policy, session: session ? { ...session, expiresAt } : null, window, allowed: !reason, reason, remainingSeconds: !reason ? Math.max(0, Math.ceil((expiresAt - now) / 1000)) : 0 };
+    else if (now < session.startAt || expiresAt !== null && now >= expiresAt) reason = '本轮刷视频时间已用完，请显式开始新一轮。';
+    return { protocol: 'video-limits-v1', timeZone: 'Asia/Shanghai', now, policy, session: session ? { ...session, expiresAt } : null, window, allowed: !reason, reason, remainingSeconds: !reason ? expiresAt === null ? null : Math.max(0, Math.ceil((expiresAt - now) / 1000)) : 0 };
   }
   savePolicy(input, { explicit = false } = {}) {
     if (!explicit) throw new Error('视频时间设置只能由用户在控制台明确修改。');
     const policy = validateVideoPolicy(input);
-    return this.control(() => { write(this.policyFile, policy); const sessions = read(this.sessionsFile); if (sessions.current?.status === 'active') { const now = this.now(); const window = allowedWindow(policy, now); sessions.current.expiresAt = Math.min(sessions.current.expiresAt, sessions.current.startAt + policy.sessionMinutes * 60_000, window?.expiresAt ?? now); if (!window || now >= sessions.current.expiresAt) { sessions.current.status = 'expired'; sessions.current.reason = '保存后的时间设置已结束当前这轮。'; } write(this.sessionsFile, sessions); } return this.state(); });
+    return this.control(() => { write(this.policyFile, policy); const sessions = read(this.sessionsFile); if (sessions.current?.status === 'active') { const now = this.now(); const window = allowedWindow(policy, now); sessions.current.expiresAt = deadline(sessions.current.expiresAt, durationEnd(sessions.current.startAt, policy.sessionMinutes), window ? window.expiresAt : now); if (!window || sessions.current.expiresAt !== null && now >= sessions.current.expiresAt) { sessions.current.status = 'expired'; sessions.current.reason = '保存后的时间设置已结束当前这轮。'; } write(this.sessionsFile, sessions); } return this.state(); });
   }
   markSession(source, { explicit = false } = {}) {
     sourceName(source); if (!explicit) throw new Error('不能由视频工具自动重置时钟，请在控制台显式开始新一轮。');
     return this.control(() => {
       const policy = validateVideoPolicy(read(this.policyFile)); const now = this.now(); const window = allowedWindow(policy, now);
       if (!window) throw Object.assign(new Error('当前不在允许时间段，未开始新一轮。'), { status: 409 });
-      const expiresAt = Math.min(now + policy.sessionMinutes * 60_000, window.expiresAt);
+      const expiresAt = deadline(durationEnd(now, policy.sessionMinutes), window.expiresAt);
       write(this.sessionsFile, { version: 1, current: { id: randomUUID(), startAt: now, expiresAt, startedBy: source, status: 'active', sources: { [source]: { startAt: now, expiresAt } } } });
       return this.state();
     });

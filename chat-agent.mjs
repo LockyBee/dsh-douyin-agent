@@ -49,10 +49,11 @@ export class ChatAgent {
         });
         if (!response.ok) throw new Error(`私信模型请求失败（HTTP ${response.status}）。`);
         const data = await response.json(), choice = data?.choices?.[0];
-        if (choice?.message?.tool_calls?.length || choice?.finish_reason !== 'stop') throw new Error('私信模型响应未完整结束，未发送。');
+        if (choice?.message?.tool_calls?.length || choice?.finish_reason !== 'stop') { this.usageLedger?.record({ source: this.source || 'api', kind: 'chat', model: this.config.model, usage: data.usage }); throw new Error('私信模型响应未完整结束，未发送。'); }
         return { text: choice?.message?.content, usage: data.usage };
       });
       const result = await Promise.race([generated, cancelled]);
+      this.usageLedger?.record({ source: this.source || 'api', kind: 'chat', model: this.config.model, usage: result?.usage });
       combined.throwIfAborted();
       if (result?.tool_calls?.length || result?.toolCalls?.length) throw new Error('私信回复提供器返回了工具调用，未发送。');
       const text = typeof result?.text === 'string' ? result.text.trim() : '';

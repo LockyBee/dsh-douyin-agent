@@ -3,14 +3,58 @@
   "productName": "大肥鱼抖音助手",
   "asar": true,
   "afterPack": "./scripts/after-pack-api.cjs",
-  "directories": { "output": "release-api" },
-  "files": ["app/**", "package.json", "licenses/DeepSeek-Harness-MIT.txt", "README.md", "API_REUSE.md"],
-  "extraResources": [
-    { "from": ".cache/api-runtime", "to": "api-runtime", "filter": ["**/*", "!node_modules/**", "!state/**", "!verification/**", "!**/.env"] },
-    { "from": ".cache/api-runtime/node_modules", "to": "api-runtime/node_modules", "filter": ["**/*", "!**/.env"] },
-    { "from": ".cache/generated/node", "to": "runtime/node", "filter": ["node.exe", "LICENSE", "SHASUMS256.txt", "provenance.json"] }
+  "directories": {
+    "output": "release-api"
+  },
+  "files": [
+    "app/**",
+    "package.json",
+    "licenses/DeepSeek-Harness-MIT.txt",
+    "README.md",
+    "API_REUSE.md"
   ],
-  "win": { "target": ["portable"], "signAndEditExecutable": false, "forceCodeSigning": false },
-  "portable": { "artifactName": "Dafeiyu-Douyin-API-${version}-win-x64.exe" },
+  "extraResources": [
+    {
+      "from": ".cache/api-runtime",
+      "to": "api-runtime",
+      "filter": [
+        "**/*",
+        "!node_modules/**",
+        "!state/**",
+        "!verification/**",
+        "!**/.env"
+      ]
+    },
+    {
+      "from": ".cache/api-runtime/node_modules",
+      "to": "api-runtime/node_modules",
+      "filter": [
+        "**/*",
+        "!**/.env"
+      ]
+    },
+    {
+      "from": ".cache/generated/node",
+      "to": "runtime/node",
+      "filter": [
+        "node.exe",
+        "LICENSE",
+        "SHASUMS256.txt",
+        "provenance.json"
+      ]
+    }
+  ],
+  "win": {
+    "target": [
+      "portable"
+    ],
+    "signAndEditExecutable": true,
+    "forceCodeSigning": false,
+    "icon": "assets/app.ico",
+    "signExecutable": false
+  },
+  "portable": {
+    "artifactName": "Dafeiyu-Douyin-API-${version}-win-x64.exe"
+  },
   "npmRebuild": false
 }

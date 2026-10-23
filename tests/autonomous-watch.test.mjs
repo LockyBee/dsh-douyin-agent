@@ -238,7 +238,7 @@ test('无法识别的帧、登录页和模型任意动作都失败关闭，不�
 });
 
 test('每日上限独立于新视频轮次，已死进程残留只能明确停止后清理', async t => {
-  const f = fixture(t); fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: {}, days: { '2026-10-15': 200 } }));
+  const f = fixture(t); fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: {}, days: { '2026-10-15': 20000 } }));
   assert.throws(() => f.watch.start({ startSession: true }, { explicit: true }), /预算已用完/); assert.equal(f.calls.length, 0);
   assert.equal(f.videoLimits.state().session, null);
   fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: {}, days: {} }));

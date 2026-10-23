@@ -44,10 +44,10 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
       }
       if(chunk.type==='block-end'&&chunk.block?.type==='text'&&!deltaIndexes.has(chunk.index))text+=chunk.block.text;
       if(text.length>12_000)throw new Error('自主观看决策超过长度上限。');
-      if (chunk.type === 'usage') usage = {prompt_tokens:chunk.usage.inputTokens || 0,completion_tokens:chunk.usage.outputTokens || 0,total_tokens:chunk.usage.totalTokens ?? (chunk.usage.inputTokens || 0)+(chunk.usage.outputTokens || 0)};
+      if (chunk.type === 'usage') usage = { ...chunk.usage, prompt_tokens: chunk.usage.inputTokens ?? null, completion_tokens: chunk.usage.outputTokens ?? null, total_tokens: chunk.usage.totalTokens ?? (Number.isSafeInteger(chunk.usage.inputTokens) && Number.isSafeInteger(chunk.usage.outputTokens) ? chunk.usage.inputTokens + chunk.usage.outputTokens : null) };
       if (chunk.type === 'finish') finish = chunk.reason;
     }
-    if (finish?.kind !== 'stop' || !text.trim()) throw new Error(`DSH 自主观看决策未完整返回（${finish?.kind || '缺少完成标记'}），未执行动作。`);
+    if (finish?.kind !== 'stop' || !text.trim()) throw Object.assign(new Error(`DSH 自主观看决策未完整返回（${finish?.kind || '缺少完成标记'}），未执行动作。`), { usage });
     return {text,usage};
   };
 }

@@ -1,0 +1,8 @@
+{
+  "icon": {
+    "source": "用户指定的大肥鱼启动器桌面快捷方式引用的bot-shortcut-icon.ico",
+    "sha256": "28e0a5fa638185ae3e96e2a5cbcf321b768d8267d8acedd34c567716a87335bb",
+    "reuse": "ICO原文件直接随包复制；界面PNG从ICO最大帧无损提取。",
+    "requestedAt": "2026-10-23"
+  }
+}

@@ -50,3 +50,7 @@
 
 已发布 dsh-douyin-browser-local@1.3.1，npm latest 已指向该版本。从官方 registry 在隔离目录安装成功，原生入口 apply 可导入，dsh.bundle.patch 存在，registry integrity 与已测试 tarball 一致。未重启用户 DSH，未声称本次已完成桌面端运行验收。1024Store 在线目录仍返回旧 GitHub 安装命令；awesome-dsh-plugin PR #7509 仍待合并，市场一键安装尚未验证。
 
+## 2026-10-23 1.3.2 候选更新
+
+针对多位使用者反馈的“没有可用的同源设置服务”，修复桌面载体识别、Connection 后端设置路由及断连后的刷新恢复，纳入 1.3.2 候选源码。当前只准备本地 tarball、完成隔离安装，未发布 npm、未改市场条目，不应指导使用者安装尚未发布的版本号。设置通信两代 SDK 和定向检查通过；完整回归的既有 Node 探针超时、Windows EPERM 偶发失败如实保留，详见 [验证记录](verification/settings-compatibility-20261023.md)。
+

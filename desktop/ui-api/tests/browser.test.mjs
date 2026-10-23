@@ -62,8 +62,12 @@ test('独立React界面完成IPC配置、共享目录、任务结果与显式转
   await page.getByRole('textbox', { name: 'API Key', exact: true }).fill('synthetic-only-secret');
   await page.getByRole('button', { name: '保存并连接' }).click();
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
+  await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
   assert.equal(nativeCalls.length, 1); assert.equal(nativeCalls[0].apiKey, 'synthetic-only-secret'); assert.equal(nativeCalls[0].model, '合成模型');
-  await page.getByRole('button', { name: /共享记忆/ }).click();
+  await page.getByRole('button', { name: /☷ 业务设置/ }).click();
+  await page.getByRole('tab', { name: '基础设置', exact: true }).click();
+  await page.locator('summary').filter({hasText:'检索共享记忆'}).click();
   await page.getByRole('button', { name: '打开记忆文件夹' }).click(); assert.equal(opened, 1);
   await page.getByRole('textbox', { name: '检索共享记忆' }).fill('合成偏好'); await page.getByRole('button', { name: '检索记忆', exact: true }).click();
   await page.getByText('合成视频笔记内容', { exact: true }).waitFor();
@@ -79,7 +83,7 @@ test('独立React界面完成IPC配置、共享目录、任务结果与显式转
   await page.getByRole('spinbutton', { name: '单轮上限' }).fill('5'); await page.waitForTimeout(1700);
   assert.equal(await page.getByRole('spinbutton', { name: '单轮上限' }).inputValue(), '5');
   await page.getByRole('button', { name: '保存时间设置' }).click();
-  assert.deepEqual(JSON.parse(calls.find(call => call.route === '/api/video/policy').body), { windows: ['23:00-01:00'], sessionMinutes: 5 });
+  assert.deepEqual(JSON.parse(calls.find(call => call.route === '/api/video/policy').body), { windows: ['23:00-01:00'], weekendWindows: null, sessionMinutes: 5 });
   await page.getByRole('button', { name: '读取联系人', exact: true }).click();
   await page.getByRole('checkbox', { name: /合成好友乙/ }).check();
   await page.getByRole('spinbutton', { name: '每日模型请求上限' }).fill('8');
@@ -102,7 +106,9 @@ test('独立React界面完成IPC配置、共享目录、任务结果与显式转
   await page.screenshot({ path: path.join(root, 'synthetic-ui.png'), fullPage: true });
   await page.getByRole('button', { name: /新任务/ }).click();
   await page.screenshot({ path: path.join(root, 'synthetic-welcome.png'), fullPage: true });
-  await page.getByRole('button', { name: /模型与记忆设置/ }).click();
+  await page.getByRole('button', { name: /☷ 业务设置/ }).click();
+  await page.getByRole('tab', { name: '基础设置', exact: true }).click();
+  await page.getByRole('button', { name: '配置模型与 API Key', exact: true }).click();
   assert.equal(await page.getByRole('textbox', { name: 'API Key', exact: true }).inputValue(), '');
   await page.getByRole('switch', { name: '记住 API Key' }).click();
   await page.getByRole('button', { name: '保存设置', exact: true }).click(); await page.getByRole('dialog').waitFor({ state: 'hidden' });

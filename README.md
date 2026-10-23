@@ -1,5 +1,7 @@
 # DSH 抖音助手
 
+1.4.3 增强自检与按报告修复，并汇总设置通信兼容、静默最小化、时段自动启动、用量看板和主题观看等更新。查看[功能说明](docs/features-1.4.3.md)或[下载 1.4.3 软件与插件包](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.3)。
+
 让 DSH 里的 DeepSeek（大肥鱼）自己刷抖音：搜索、换片、看真实画面，把有意思的内容记下来，并在你许可的范围内分享给好友。
 
 在专用 Edge 里浏览电脑网页版抖音，每隔几秒采样视频画面交给模型。所有外发功能默认关闭，每一项都有独立开关、次数上限和时间限制。这是第三方适配，不是 DeepSeek 官方出品。
@@ -8,7 +10,7 @@
 
 | 功能 | 说明 | 默认 |
 | --- | --- | --- |
-| 自主观看 | 按人格和兴趣自己搜索、换片、继续看或停止，并给出理由 | 需手动开始有限轮次 |
+| 自主观看 | 按人格和兴趣自己搜索、换片、继续看或停止，并给出理由；可配置每个允许时段自动开始一轮 | 自动启动关闭 |
 | 兴趣与人格 | 兴趣来自实际观看进度和已确认行为，不是看到主题就算喜欢 | 随观看自动积累 |
 | 时间限制 | 每日允许时段（北京时间）加单轮时长，到点视频真的暂停 | 单轮 10 分钟 |
 | 静默观看 | 静音，核对窗口归属后尝试最小化（仍是有窗口的 Edge，不是 headless） | 关闭 |
@@ -27,23 +29,25 @@
 | --- | --- | --- |
 | 在哪用 | DSH 的「设置 → 刷抖音」，全部用按钮操作 | 独立的 Windows 桌面软件，对话式下任务 |
 | 模型 | 用 DSH 里已配置的提供商 | 用你自己填的 DeepSeek API Key |
-| 版本 | 1.3 | 已打包的是 1.2.0，1.3 尚未打包 |
+| 版本 | 1.4.3 | 1.4.3 Windows 便携包，见 [软件说明](desktop/README.md) |
 
 两者共用同一份人格、兴趣和记忆，但同一时刻只会运行一个自主观看。
 
 ## 快速开始（插件版）
 
-### npm 安装（1.3.1）
+1.4.3 包含“没有可用的同源设置服务”兼容修复，适配常用桌面载体、Connection 设置路由和刷新恢复。更新后请完全退出并重开 DSH，无需删除记忆、登录目录或重填 Key。各第三方宿主仍以实际自检结果为准，见[验证记录](docs/verification/settings-compatibility-20261023.md)。
 
-DSH Desktop：打开“应用 → 桌面插件”，在 npm 包输入框填写 `dsh-douyin-browser-local@1.3.1` 并点击“安装”。Desktop profile 由 Electron 管理，不能用普通 CLI 修改。
+### npm 安装或更新（1.4.3）
+
+DSH Desktop：打开“应用 → 桌面插件”，在 npm 包输入框填写 `dsh-douyin-browser-local@1.4.3`，点击安装或更新。Desktop profile 由 Electron 管理，不能用普通 CLI 修改。完成后完全退出并重开 DSH。
 
 Web 版在终端运行：
 
 ```powershell
-dsh plugin --profile web add dsh-douyin-browser-local@1.3.1
+dsh plugin --profile web add dsh-douyin-browser-local@1.4.3
 ```
 
-需要 Windows、已安装 Microsoft Edge 和 DSH 0.2.0-rc.2。安装后按宿主提示重新加载，在设置中打开“刷抖音”；抖音登录和验证由使用者自行完成。市场收录与 npm 包发布分别同步，不能把发布成功当成市场已刷新。
+需要 Windows、Microsoft Edge 和 DSH 0.2.0-rc.2 至 0.2.x 兼容宿主。抖音登录和验证由使用者自行完成。npm、GitHub Release 和社区市场分别同步；市场未更新时可使用固定版本号安装。
 
 ### 从源码安装
 
@@ -77,17 +81,17 @@ $dshInstallDirectory = 'C:\Apps\DSH Desktop' # 替换为正在使用的 DSH 安�
 | 状态 | 内容 |
 | --- | --- |
 | 真实环境验证过 | 推荐播放、搜索、上下切换、暂停、画面采样、限时到点暂停；旧版 DSH 原生工具调用；表情图片采样；一次人工授权的好友转发；DSH 2.0.17 中设置页挂载并读回状态 |
-| 只有合成测试 | 自主分享、行为偏好、自动问候、自主评论、静默、日报 |
+| 通过专项或合成测试 | 自主分享、行为偏好、自动问候、自主评论、静默修复及日报；不代表全部真实外发已验证 |
 | 还没验证 | 抖音最小化后的持续播放、真实评论区、收到新私信后的完整自动回复、MiMo 与 MiniMax 云端、标准 bundle 安装 |
 
-合成测试用的是替身模型和临时页面，不能当作真实抖音上能用的证据。最新测试数字和已知失败见 [v10 验证记录](docs/verification/native-v10.md)。
+合成测试用的是替身模型和临时页面，不能当作真实抖音上能用的证据。1.4.3 的专项检查、实机自检、软件包验收及完整回归首轮失败记录见[本版验证记录](docs/verification/local-1.4.3-20261023.md)；[v10 记录](docs/verification/native-v10.md)仅对应旧版本。
 
 ## 目录
 
 | 位置 | 内容 |
 | --- | --- |
 | `dsh-plugin.mjs`、`client.js`、`cordis.bundle.yml` | 原生插件入口、设置页前端、标准 bundle 声明 |
-| `tool-definitions.mjs` | 32 项工具目录，插件和软件共用 |
+| `tool-definitions.mjs` | 34 项工具目录，插件和软件共用 |
 | `native-*.mjs` | 设置页后端、模型路由、人格注入、问候与观看决策 |
 | `core.mjs`、`browser-*.mjs` | 专用 Edge 的控制、采样、限时 |
 | `video-limits.mjs`、`task-limits.mjs`、`watch-mode.mjs` | 时段与轮次、任务预算、静默 |

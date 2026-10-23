@@ -10,6 +10,7 @@ verification/native-live-workdir/
 verification/native-chat-workdir/
 verification/native-chat-addon-workdir/
 verification/native-rich-workdir/
+/verification/plugin-local-*/
 verification/*-test.txt
 verification/*-tests.txt
 verification/*-recheck-*.txt
@@ -31,3 +32,9 @@ verification/api-software-regression.txt
 *.bak
 *.tmp
 public/*-qa.png
+
+# 原始实机诊断、聊天采样和发布临时目录只保留本机。
+/verification/diagnostics-local-*/
+/verification/silent-local-*/
+/verification/token-benchmark-20*/
+/verification/release-*/

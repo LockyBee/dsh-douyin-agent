@@ -230,9 +230,9 @@ test('公开事件去除凭据、Cookie、推理和图片数据，HTTP 错误不
 
 test('默认预算保持原值，用户可在硬上限内提高三项预算，用量仍可回读', async () => {
   assert.equal(DEFAULT_LIMITS.maxSteps, 20); assert.equal(DEFAULT_LIMITS.maxToolCalls, 20); assert.equal(DEFAULT_LIMITS.taskTimeoutMs, 180000);
-  const expanded = new ApiAgent({ controller: { execute() {} }, config, maxSteps: 1000, maxToolCalls: 1000, taskTimeoutMs: 86400000 });
+  const expanded = new ApiAgent({ controller: { execute() {} }, config, maxSteps: 10000, maxToolCalls: 10000, taskTimeoutMs: 604800000 });
   assert.equal(expanded.maxSteps, HARD_LIMITS.maxSteps); assert.equal(expanded.maxToolCalls, HARD_LIMITS.maxToolCalls); assert.equal(expanded.taskTimeoutMs, HARD_LIMITS.taskTimeoutMs);
-  for (const [name, value] of [['maxSteps', 1001], ['maxToolCalls', 1001], ['taskTimeoutMs', 86400001], ['maxFrames', 5], ['maxTokens', 2049], ['apiTimeoutMs', 60001]]) assert.throws(() => new ApiAgent({ controller: { execute() {} }, config, [name]: value }), /预算参数/);
+  for (const [name, value] of [['maxSteps', 10001], ['maxToolCalls', 10001], ['taskTimeoutMs', 604800001], ['maxFrames', 5], ['maxTokens', 2049], ['apiTimeoutMs', 60001]]) assert.throws(() => new ApiAgent({ controller: { execute() {} }, config, [name]: value }), /预算参数/);
   assert.throws(() => new ApiAgent({ controller: { execute() {} }, config, taskTimeoutMs: 0 }), /预算参数/);
   const agent = new ApiAgent({ controller: { execute() {} }, config, fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { content: '测试答复' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } })) });
   const result = await agent.runTask({ instruction: '测试。' });

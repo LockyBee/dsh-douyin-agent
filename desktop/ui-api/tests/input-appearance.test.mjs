@@ -75,13 +75,15 @@ test('官方Input包装层只保留一个焦点环，密码遮挡与数字步进
   assert.equal(passwordStyle.inner.textSecurity, 'disc'); assert.equal(await password.inputValue(), 'synthetic-input-only');
   await page.getByRole('dialog').screenshot({ path: path.join(screenshots, 'password-focus.png') });
   await page.getByRole('button', { name: '保存并连接', exact: true }).click(); await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: /◌ 对话与视频/ }).click();
+  await page.getByRole('button', { name: '展开快捷控制', exact: true }).click();
   assert.equal(native.length, 1); assert.equal(native[0].apiKey, 'synthetic-input-only');
   const minutes = page.getByRole('spinbutton', { name: '单轮上限', exact: true });
   await minutes.fill('10'); await minutes.press('ArrowUp'); assert.equal(await minutes.inputValue(), '11');
   await minutes.press('ArrowDown'); assert.equal(await minutes.inputValue(), '10');
   const numberStyle = await focusedInputStyle(minutes); assertSingleFocusRing(numberStyle, 'number', '单轮上限（分钟）');
   assert.notEqual(numberStyle.inner.appearance, 'none');
-  assert.deepEqual(await minutes.evaluate(input => ({ min: input.min, max: input.max, step: input.step })), { min: '1', max: '1440', step: '1' });
+  assert.deepEqual(await minutes.evaluate(input => ({ min: input.min, max: input.max, step: input.step })), { min: '1', max: '1000000', step: '1' });
   await minutes.hover();
   await page.locator('.panel').filter({ has: page.getByRole('heading', { name: '刷视频时间', exact: true }) }).screenshot({ path: path.join(screenshots, 'number-focus.png') });
   await fs.writeFile(path.join(screenshots, 'computed-styles.json'), JSON.stringify({ password: passwordStyle, number: numberStyle }, null, 2) + '\n');

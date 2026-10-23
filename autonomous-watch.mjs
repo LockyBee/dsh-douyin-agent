@@ -9,7 +9,10 @@ import { AutonomousComments } from './autonomous-comments.mjs?v=9';
 import { PublicCommentAgent } from './public-comment-agent.mjs?v=9';
 import { DailyReport } from './daily-report.mjs?v=9';
 
-export const WATCH_LIMITS = Object.freeze({ maxRequests: 30, hardMaxRequests: 100, dailyLimit: 200, sampleSeconds: 3 });
+import { WatchOptions } from './watch-options.mjs';
+import { UsageLedger } from './usage-ledger.mjs';
+
+export const WATCH_LIMITS = Object.freeze({ maxRequests: 30, hardMaxRequests: 10000, dailyLimit: 20000, sampleSeconds: 3 });
 const alive = pid => { if (!Number.isSafeInteger(pid) || pid < 1) return false; try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
 const read = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return fallback; throw new Error('自主观看状态文件损坏，未重置预算或运行锁。'); } };
 const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' }); fs.renameSync(temporary, file); } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } };
@@ -21,9 +24,13 @@ export class AutonomousWatch {
   constructor({ controller, config = {}, videoLimits, personaMemory, agent, shareService, commentService, commentAgent, reportService, decisionProvider, stateDir = resolveRuntimePaths().stateDir, source = 'api', fetchImpl = fetch, now = Date.now, delayImpl = (ms, signal) => delay(ms, undefined, { signal }), onEvent = () => {} } = {}) {
     if (!controller?.execute || !videoLimits?.state || !personaMemory?.context || !['api', 'dsh'].includes(source)) throw new Error('自主观看缺少浏览器、时限或共同人格接口。');
     Object.assign(this, { controller, config, videoLimits, personaMemory, shareService, decisionProvider, stateDir, source, now, delayImpl, onEvent });
+    this.optionsService = new WatchOptions({ stateDir });
+    this.usageLedger = new UsageLedger({ stateDir, now });
     this.agent = agent || new ApiAgent({ controller, config, personaMemory, fetchImpl });
     Object.assign(this, { commentService, reportService });
+    this.agent.usageLedger = this.usageLedger; this.agent.source = source;
     this.commentAgent = commentAgent || new PublicCommentAgent({ config, fetchImpl });
+    this.commentAgent.usageLedger = this.usageLedger; this.commentAgent.source = source;
     fs.mkdirSync(stateDir, { recursive: true });
     this.files = Object.fromEntries(['lock', 'guard', 'budget', 'state', 'stop'].map(name => [name, path.join(stateDir, `watch-${name === 'lock' ? 'loop.lock' : name === 'guard' ? 'control.guard' : name === 'stop' ? 'stop.request.json' : name + '.json'}`)]));
     this.files.manual = path.join(stateDir, 'watch-manual.lock');
@@ -51,7 +58,7 @@ export class AutonomousWatch {
     const sessionId = worker?.sessionId || time.session?.id || saved.sessionId || null;
     const budget = this.budget(), counts = budget.sessions[sessionId] || { requests: 0, maxRequests: WATCH_LIMITS.maxRequests };
     const request = read(this.files.stop, null), stopping = worker?.alive && request?.runId === worker.runId;
-    return redact({ protocol: 'autonomous-watch-v1', running: Boolean(worker?.alive), owned: Boolean(worker?.owned), worker, status: stopping ? 'stopping' : worker?.alive ? 'running' : ['running', 'stopping'].includes(saved.status) ? 'stopped' : saved.status || 'stopped', sessionId, counts: { ...counts, dailyRequests: budget.days[day(this.now())] || 0, dailyLimit: WATCH_LIMITS.dailyLimit }, lastDecision: saved.lastDecision || null, lastError: saved.lastError || '', remainingSeconds: time.allowed && time.session?.id === sessionId ? time.remainingSeconds : 0 }, [this.config.apiKey]);
+    return redact({ protocol: 'autonomous-watch-v1', running: Boolean(worker?.alive), owned: Boolean(worker?.owned), worker, status: stopping ? 'stopping' : worker?.alive ? 'running' : ['running', 'stopping'].includes(saved.status) ? 'stopped' : saved.status || 'stopped', sessionId, counts: { ...counts, dailyRequests: budget.days[day(this.now())] || 0, dailyLimit: WATCH_LIMITS.dailyLimit }, options: this.optionsService.state().policy, lastDecision: saved.lastDecision || null, lastError: saved.lastError || '', remainingSeconds: time.allowed && time.session?.id === sessionId ? time.remainingSeconds : 0 }, [this.config.apiKey]);
   }
   save(value) { write(this.files.state, redact({ ...read(this.files.state, {}), ...value, source: this.source, sessionId: this.sessionId, updatedAt: new Date(this.now()).toISOString() }, [this.config.apiKey])); }
   assertAllowed() {
@@ -86,9 +93,10 @@ export class AutonomousWatch {
   }
   start({ startSession = false, maxRequests = WATCH_LIMITS.maxRequests } = {}, { explicit = false } = {}) {
     if (!explicit) throw Object.assign(new Error('自主观看只能由用户明确启动。'), { status: 403 });
-    if (typeof startSession !== 'boolean' || !Number.isSafeInteger(maxRequests) || maxRequests < 1 || maxRequests > WATCH_LIMITS.hardMaxRequests) throw Object.assign(new Error('自主观看请求上限须为1至100的整数。'), { status: 400 });
+    if (typeof startSession !== 'boolean' || !Number.isSafeInteger(maxRequests) || maxRequests < 1 || maxRequests > WATCH_LIMITS.hardMaxRequests) throw Object.assign(new Error('自主观看请求上限须为1至10000的整数。'), { status: 400 });
     if (!this.decisionProvider && !this.config.apiKey) throw Object.assign(new Error('请先配置 API Key，再启动自主观看。'), { status: 400 });
     if (this.running || this.completion) throw Object.assign(new Error('当前自主观看正在执行或结束。'), { status: 409 });
+    this.optionsService.state();
     read(this.files.state, {});
     this.control(() => {
       const worker = this.worker(); if (worker) throw Object.assign(new Error(worker.alive ? '另一个入口已有自主观看运行。' : '上次自主观看留下运行锁，请先点击停止清理残留。'), { status: 409 });
@@ -116,8 +124,7 @@ export class AutonomousWatch {
         this.control(() => { const worker = this.worker(); if (!worker?.owned) throw failure('自主观看锁已改变。'); write(this.files.lock, { ...worker, heartbeatAt: this.now() }); });
       } catch (error) { if (error.code !== 'WATCH_CONTROL_BUSY') this.abort.abort(error); }
     }, 500); this.heartbeat.unref?.();
-    const remaining = this.videoLimits.state().session.expiresAt - this.now();
-    this.deadline = setTimeout(() => this.abort.abort(failure('本轮刷视频时间已用完。', 'limited')), Math.max(1, Math.min(remaining, 2_147_483_647))); this.deadline.unref?.();
+    // 心跳持续核对最新时段和截止时间，支持不限时长及超过定时器范围的长轮次。
     this.completion = Promise.resolve().then(() => this.run()).catch(error => { this.onEvent({ type: 'watch.failed', message: redact(error.message || String(error), [this.config.apiKey]) }); return { running: false, status: 'failed' }; }).finally(() => { this.completion = null; });
     return this.state();
     } catch (error) {
@@ -157,6 +164,13 @@ export class AutonomousWatch {
     try {
       let current = await this.execute('douyin_status');
       if (!(current.state || current).video?.id) current = await this.execute('douyin_open');
+      const options = this.optionsService.state().policy;
+      if (options.mode === 'topic') {
+        current = await this.execute('douyin_search', { query: options.topics[0] });
+        const first = (current.state || current).searchResults?.find(item => Number.isSafeInteger(item.index) && /^\d{10,30}$/.test(item.id));
+        if (!first) throw failure('主题搜索没有可核实的作品结果，请更换主题后重试。', 'needs_user');
+        current = await this.execute('douyin_open_video', { index: first.index });
+      }
       while (true) {
         this.assertAllowed();
         const budget = this.budget();
@@ -166,6 +180,8 @@ export class AutonomousWatch {
         let observation = await this.execute('douyin_observe', { seconds: WATCH_LIMITS.sampleSeconds });
         const observedAt = this.now(), observedState = observation.state || observation;
         watchDecisionMessages(observation);
+        const title = String(observedState.video?.title || '');
+        if (options.exclude.some(word => title.toLocaleLowerCase().includes(word.toLocaleLowerCase()))) { current = await this.execute('douyin_next'); continue; }
         const evidenceId = observation.personaEvidenceId || observation.state?.personaEvidenceId || this.personaMemory.recordObservation(observation, { source: this.source, kind: 'visual' }).evidenceId;
         let viewing = observation.viewing;
         if (viewing) {
@@ -174,7 +190,7 @@ export class AutonomousWatch {
         observation = { ...observation, ...(viewing ? { viewing } : {}) };
         const context = this.personaMemory.context(), shareContext = this.shareContext(), commentContext = this.commentContext();
         this.reserveRequest();
-        const result = await this.agent.decideWatch({ observation, context, shareContext, commentContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });
+        const result = await this.agent.decideWatch({ observation, context, watchOptions: options, shareContext, commentContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });
         this.assertAllowed();
         const decision = redact(parseWatchDecision(result.decision, { shareContext: this.shareContext(), commentContext: this.commentContext() }), [this.config.apiKey]);
         current = await this.execute('douyin_status');

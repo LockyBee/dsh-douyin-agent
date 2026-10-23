@@ -33,7 +33,7 @@ export function watchIsActive(state) {
 
 export function watchStartInput(value) {
   const maxRequests = Number(value);
-  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 100) throw new Error('本轮请求上限须为 1 至 100 的整数。');
+  if (!Number.isInteger(maxRequests) || maxRequests < 1 || maxRequests > 10000) throw new Error('本轮请求上限须为 1 至 10000 的整数。');
   return { startSession: false, maxRequests };
 }
 

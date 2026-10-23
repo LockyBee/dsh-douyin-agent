@@ -61,7 +61,7 @@ test('本机服务重建会话后给UI重置事件水位提示，不回传新旧
 
 test('自主观看预算只接受有限整数，界面启动不隐式创建新轮', () => {
   assert.deepEqual(watchStartInput('30'), { startSession: false, maxRequests: 30 });
-  for (const value of [0, 101, 2.5, '', '无上限', Infinity]) assert.throws(() => watchStartInput(value), /1 至 100/);
+  for (const value of [0, 10001, 2.5, '', '无上限', Infinity]) assert.throws(() => watchStartInput(value), /1 至 100/);
   assert.deepEqual(watchStartInput(1), { startSession: false, maxRequests: 1 });
   assert.deepEqual(watchStartInput(100), { startSession: false, maxRequests: 100 });
   assert.equal(watchIsActive({ running: false, owned: false, worker: { alive: true, source: 'dsh' } }), true);
