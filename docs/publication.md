@@ -66,3 +66,16 @@
 
 软件更新器已能从正式GitHub latest识别1.4.3；本机Node直连GitHub下载域名出现连接超时，不能据此声称内置下载在所有网络下通过。原本的便携包隔离启动、诊断和退出检查通过，详见[本机验收摘要](verification/local-1.4.3-20261023.md)。
 
+## 2026-10-23 1.4.4 公开发布
+
+用户确认本地预览后授权发布。源码提交`9eea353c5e342e8d25090398b9dec16d15ed512c`，公开标签`v1.4.4`；后续发布记录提交不移动该标签。
+
+- [GitHub Release](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.4)已公开并设为latest，包含Windows x64 EXE、同名SHA256文件和插件tarball。三份附件的长度与GitHub返回的digest逐一匹配本地文件。
+- 正式EXE为124625601字节，SHA256为`6b9e844b679c46c85e845298f31df65ef31fd06719c443c304619e7fea139527`。它在本地预览基础上更新随包README，35份领域源码及运行资源摘要不变，并重新通过隔离启动、实际界面保存、15个接口与正常退出检查。正在运行的本地预览没有被关闭或覆盖。
+- [npm 1.4.4](https://www.npmjs.com/package/dsh-douyin-browser-local/v/1.4.4)已发布，公共registry的版本及latest均为1.4.4。首个非交互发布请求被npm二次认证拒绝，随后由用户本人在浏览器完成认证，再由公共registry确认实际发布；没有接收密码或验证码。
+- 插件包88个文件、597749字节，SHA512 integrity为`sha512-XOHLBqgcq7z9muC+9DMhemrxqsACyybmQbuVCs/5cH31pmJmrozdRDLIIpU8aldKDb6CNNzIpmoOzDec2KSZ/g==`。从公共registry重新下载后与已审查tarball完全匹配，随后在仓库外临时项目按固定版本全新安装，apply、34项工具、bundle、客户端三项修正及共用模块均可读取。未安装到用户Desktop profile，未启动真实模型或外发。
+- 发布复用白名单、许可证与既有隔离安装流程。本轮没有将本机Key、人格、联系人、浏览器资料、原始诊断、聊天采样或QQ合并启动器加入源码与发布包。公开改动的凭据模式扫描没有候选；此项不是对任意隐藏引用的全面安全证明。
+- 软件更新器按旧版1.4.3执行真实GitHub检查，已识别1.4.4及正确文件大小；匿名下载公开SHA256文件成功，校验值与本地EXE相同。本轮没有通过更新器重新下载并安装整个EXE，不将检查结果当成完整更新安装验收。
+
+市场索引与npm分别同步，本次没有修改或重新验收市场条目。需要固定版本时在Desktop的npm包入口填写`dsh-douyin-browser-local@1.4.4`，更新后完全退出并重开DSH。功能与验证边界见[本版说明](features-1.4.4.md)和[输入、停止原因与名单记录](verification/ui-feedback-20261023.md)。
+
