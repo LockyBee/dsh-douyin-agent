@@ -96,3 +96,17 @@
 
 本轮没有中断用户正在运行的本地预览、修改许可名单或清空预算。功能与已知限制见 [1.4.5 使用说明](features-1.4.5.md) 和 [候选实机验证](verification/local-1.4.5-beta.2-20261025.md)。本机原始发布回执位于忽略目录 `verification/release-1.4.5/`，不随包上传。
 
+
+## 2026-10-30 1.4.6 发布结果
+
+[GitHub v1.4.6](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.6) 已公开并设为 latest，非预发布，正式源码为 `912873e2556d16a088d81dcbc6f7c0060614dd58`。包含 Windows x64 EXE、同名 SHA256 和插件 tarball；三份附件的长度、服务器 digest 与本地审查文件一致，匿名下载校验文件也一致。EXE 为 124851972 字节，SHA256 为 `14238f49f24953e16f8fb30240f3add81f464d811dfc22f2a4bc13a3cb16454f`。
+
+[npm 1.4.6](https://www.npmjs.com/package/dsh-douyin-browser-local/v/1.4.6) 已公开，公共 registry 的版本与 latest 均为 1.4.6。包内 124 个文件、782184 字节，integrity 为 `sha512-vKKXLbqhemazQLHxfqO2Bd7diYGj3WnEr823OXBZxVG1VQwFtcWN5xGGnNjcHUxGYQ7t0Lz6XZfJbz4gJu0Rsw==`；重新下载后的摘要与本地包相同，在新目录安装及导入原生入口、35 项工具和 bundle 通过，未使用 legacy-peer-deps。用户完成了 npm 要求的本次发布认证，没有向协作者提供密码或验证码。
+
+最终领域回归 1347 项：1340 通过、7 项可选跳过、0 失败；桌面 67/67、插件定向 66/66。正式包重新编译 UI 和版本标记，45 个领域模块、图标、15 个只读接口及退出释放端口通过，另有 14 次隔离后台 HTTP 请求。旧版 1.4.5 的真实检查更新请求能识别 1.4.6；没有将元数据检查当作完整更新安装验收。
+
+公开源码审查 355 个文件，首次发布提交涉及 156 个文件；白名单及凭据模式检查通过。原始私信、联系人、人格卡、密钥、登录目录、内存原始记录、录屏素材和本机 QQ 合并启动器不进入发布包或本次源码提交。第三方分镜与编解码许可保留。
+
+[市场条目](https://awesome-dsh-plugin.com/p/LockyBee/dsh-douyin-agent/)已收录，描述已合并，当前线上索引仍显示 1.4.5，等待社区构建同步；没有提交重复收录 PR 或更改不支持的版本字段。立即安装可在 DSH Desktop 的桌面插件入口指定 `dsh-douyin-browser-local@1.4.6`，Web profile 执行 `dsh plugin --profile web add dsh-douyin-browser-local@1.4.6`。更新插件后完全退出并重开 DSH。
+
+已知换片失败、正式包长期播放内存、DSH rc.3 正文显示反馈、真实评论确认和部分媒体读取边界仍明确保留，见[验证范围](verification/local-1.4.6-20261030.md)。本次未关闭 issue，未重启用户的 DSH 或修改许可、Key、记忆及每日预算。
