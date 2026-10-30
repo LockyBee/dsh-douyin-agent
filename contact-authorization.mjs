@@ -22,7 +22,8 @@ export function canAuthorizeConversation(value) {
 
 export function isStoredContactAuthorized(value) {
   if (!conversation(value) || typeof value.verifiedAt !== 'string' || !Number.isFinite(Date.parse(value.verifiedAt))) return false;
-  if (value.identityVersion !== undefined && !hasStableConversationIdentity(value)) return false;
+  if (['identityVersion', 'identityKind', 'identityHash'].some(key => value[key] !== undefined) && !hasStableConversationIdentity(value)) return false;
+  if (value.authorizationKind === 'manual') return true;
   if (value.authorizationKind === 'existing-group') return value.isGroup === true && canAuthorizeConversation(value);
   if (value.authorizationKind === 'existing-conversation') return value.isGroup === false && canAuthorizeConversation(value);
   return value.isGroup === false && value.followed === true && (value.authorizationKind === undefined || value.authorizationKind === 'following');
@@ -30,6 +31,7 @@ export function isStoredContactAuthorized(value) {
 
 export function matchesAuthorizedContact(stored, current) {
   if (!isStoredContactAuthorized(stored) || !conversation(current) || current.id !== stored.id || current.isGroup !== stored.isGroup) return false;
+  if (stored.authorizationKind === 'manual') return true;
   if (hasStableConversationIdentity(stored)) return hasStableConversationIdentity(current) && current.identityKind === stored.identityKind && current.identityHash === stored.identityHash && current.identityBinding === stored.identityBinding && (['existing-conversation', 'existing-group'].includes(stored.authorizationKind) || current.followed === true);
   if (stored.identityVersion !== undefined) return false;
   if (['existing-conversation', 'existing-group'].includes(stored.authorizationKind)) {

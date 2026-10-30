@@ -7,29 +7,69 @@ const exists = file => fs.access(file).then(() => true, error => error.code === 
 const absolute = (value, label) => { if (typeof value !== 'string' || !path.isAbsolute(value) || /[\0\r\n]/.test(value)) throw new Error(`${label}必须是绝对路径。`); return path.normalize(value); };
 const locationFields = { stateDir: 'DOUYIN_STATE_DIR', mediaEnvFile: 'DOUYIN_MEDIA_ENV_FILE', mediaSettingsFile: 'DOUYIN_MEDIA_SETTINGS_FILE', mediaRuntimeRoot: 'DOUYIN_MEDIA_RUNTIME_ROOT', mediaModelsDir: 'DOUYIN_MEDIA_MODELS_DIR' };
 
-export async function prepareApiRuntime({ seedDir, userData, manifestFile }) {
-  const manifest = JSON.parse(await fs.readFile(manifestFile, 'utf8'));
-  if (!/^[a-f0-9]{64}$/.test(manifest.runtimeId)) throw new Error('软件资源摘要无效。');
-  const runtime = path.join(userData, 'runtimes', manifest.runtimeId.slice(0, 20));
-  const ready = path.join(runtime, '.runtime-ready.json');
-  const required = ['friend-interactions.mjs', 'friend-interactions-guard.mjs', 'api-worker.mjs', 'app.mjs', 'api-agent.mjs', 'core.mjs', 'runtime-paths.mjs', 'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-service.mjs', 'spark-agent.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'daily-report.mjs', 'watch-mode.mjs', 'media/index.mjs', 'media/key-store.mjs', 'public/index.html', 'node_modules/playwright-core/package.json', 'node_modules/yaml/package.json'];
-  if (await exists(ready)) {
-    if (JSON.parse(await fs.readFile(ready, 'utf8')).runtimeId !== manifest.runtimeId) throw new Error('软件资源版本不匹配。');
-    for (const file of required) if (!await exists(path.join(runtime, file))) throw new Error('已安装的软件资源不完整，请重新准备此版本。');
+async function verifyRuntimeTree(directory,manifest,{ready=false}={}){
+  const hash=createHash('sha256');let files=0;
+  const root=await fs.lstat(directory);if(!root.isDirectory()||root.isSymbolicLink())throw new Error('运行资源目录不是普通目录，未确认就绪。');
+  async function visit(folder,prefix=''){
+    for(const entry of (await fs.readdir(folder,{withFileTypes:true})).sort((a,b)=>a.name.localeCompare(b.name,'en'))){
+      const filename=path.join(folder,entry.name),relative=prefix?`${prefix}/${entry.name}`:entry.name;
+      if(entry.isSymbolicLink()||!entry.isDirectory()&&!entry.isFile())throw new Error('运行资源包含链接或特殊文件，未确认就绪。');
+      if(!prefix&&entry.name==='.runtime-ready.json'){
+        if(!ready||!entry.isFile())throw new Error('初始运行资源包含非预期就绪标记。');
+        continue;
+      }
+      if(entry.isDirectory())await visit(filename,relative);
+      else{
+        if(++files>manifest.files)throw new Error('运行资源存在额外文件，未确认就绪。');
+        const before=await fs.lstat(filename);if(!before.isFile()||before.isSymbolicLink())throw new Error('运行文件类型已变化，未确认就绪。');
+        hash.update(relative);hash.update('\0');hash.update(await fs.readFile(filename));hash.update('\0');
+        const after=await fs.lstat(filename);if(!after.isFile()||after.isSymbolicLink()||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ino!==after.ino)throw new Error('运行文件在核对期间变化，未确认就绪。');
+      }
+    }
+  }
+  await visit(directory);
+  if(files!==manifest.files||hash.digest('hex')!==manifest.runtimeId)throw new Error('运行资源完整摘要或文件数不符，未确认就绪。');
+}
+
+export async function prepareApiRuntime({seedDir,userData,manifestFile}){
+  seedDir=absolute(seedDir,'初始运行资源');userData=absolute(userData,'软件用户目录');manifestFile=absolute(manifestFile,'软件资源清单');
+  const manifest=JSON.parse(await fs.readFile(manifestFile,'utf8'));
+  if(!/^[a-f0-9]{64}$/.test(manifest.runtimeId)||!Number.isSafeInteger(manifest.files)||manifest.files<1||manifest.files>100000)throw new Error('软件资源摘要或文件数无效。');
+  await fs.mkdir(userData,{recursive:true});
+  const userStat=await fs.lstat(userData);if(!userStat.isDirectory()||userStat.isSymbolicLink())throw new Error('软件用户目录不能使用链接。');
+  const runtimeRoot=path.join(userData,'runtimes');await fs.mkdir(runtimeRoot,{recursive:true});
+  const rootStat=await fs.lstat(runtimeRoot);if(!rootStat.isDirectory()||rootStat.isSymbolicLink())throw new Error('软件运行目录不能使用链接。');
+  const rootReal=await fs.realpath(runtimeRoot),userReal=await fs.realpath(userData);if(path.dirname(rootReal)!==userReal)throw new Error('软件运行目录实际位置越界。');
+  const runtime=path.join(runtimeRoot,manifest.runtimeId.slice(0,20)),ready=path.join(runtime,'.runtime-ready.json');
+  const required=['friend-interactions.mjs','friend-interactions-guard.mjs','receipt-baseline.mjs','api-worker.mjs','app.mjs','api-agent.mjs','core.mjs','runtime-paths.mjs','persona-memory.mjs','autonomous-watch.mjs','browser-launcher.mjs','autonomous-share.mjs','task-limits.mjs','outbound-send.mjs','spark-service.mjs','spark-agent.mjs','autonomous-comments.mjs','comment-browser.mjs','public-comment-agent.mjs','daily-report.mjs','watch-mode.mjs','media/index.mjs','media/key-store.mjs','public/index.html','node_modules/playwright-core/package.json','node_modules/yaml/package.json'];
+  const requiredFiles=async directory=>{for(const file of required){const stat=await fs.lstat(path.join(directory,file));if(!stat.isFile()||stat.isSymbolicLink())throw new Error('软件运行资源缺失或类型错误。');}};
+  if(await exists(ready)){
+    const stat=await fs.lstat(ready);if(!stat.isFile()||stat.isSymbolicLink())throw new Error('就绪标记不能使用链接。');
+    if(JSON.parse(await fs.readFile(ready,'utf8')).runtimeId!==manifest.runtimeId)throw new Error('软件资源版本不匹配。');
+    await requiredFiles(runtime);await verifyRuntimeTree(runtime,manifest,{ready:true});return runtime;
+  }
+  if(await exists(runtime))throw new Error('软件运行资源尚未完整就绪，已保留原目录，未覆盖。');
+  await requiredFiles(seedDir);await verifyRuntimeTree(seedDir,manifest);
+  const temporary=await fs.mkdtemp(path.join(runtimeRoot,'.p-'));let renamed=false;
+  const temporaryName=path.basename(temporary);
+  if(path.dirname(path.resolve(temporary))!==path.resolve(runtimeRoot)||!/^\.p-[A-Za-z0-9]{6}$/.test(temporaryName)||temporaryName.length>20)throw new Error('软件临时目录名称或位置不符合约束。');
+  try{
+    for(const entry of await fs.readdir(seedDir,{withFileTypes:true})){
+      if(entry.isSymbolicLink()||!entry.isDirectory()&&!entry.isFile())throw new Error('初始运行资源在复制前出现链接或特殊文件。');
+      await fs.cp(path.join(seedDir,entry.name),path.join(temporary,entry.name),{recursive:true,dereference:false,force:false,errorOnExist:true});
+    }
+    await requiredFiles(temporary);await verifyRuntimeTree(temporary,manifest);
+    await fs.writeFile(path.join(temporary,'.runtime-ready.json'),JSON.stringify({runtimeId:manifest.runtimeId})+'\n',{flag:'wx'});
+    await fs.rename(temporary,runtime);renamed=true;
+    try{await verifyRuntimeTree(runtime,manifest,{ready:true});}catch(error){await fs.unlink(ready);throw error;}
     return runtime;
+  }finally{
+    if(!renamed&&await exists(temporary)){
+      const stat=await fs.lstat(temporary),resolved=await fs.realpath(temporary);
+      if(!stat.isDirectory()||stat.isSymbolicLink()||path.dirname(resolved)!==rootReal||path.dirname(path.resolve(temporary))!==path.resolve(runtimeRoot)||!/^\.p-[A-Za-z0-9]{6}$/.test(path.basename(temporary)))throw new Error('软件临时目录清理边界无法核对，未递归删除。');
+      await fs.rm(temporary,{recursive:true,force:true});
+    }
   }
-  await fs.mkdir(path.dirname(runtime), { recursive: true });
-  const temporary = path.join(path.dirname(runtime), `.preparing-${randomUUID()}`);
-  try {
-    await fs.cp(seedDir, temporary, { recursive: true, dereference: true, force: false, errorOnExist: true });
-    for (const file of required) await fs.access(path.join(temporary, file));
-    await fs.writeFile(path.join(temporary, '.runtime-ready.json'), JSON.stringify({ runtimeId: manifest.runtimeId }) + '\n');
-    await fs.rename(temporary, runtime);
-  } finally {
-    const relative = path.relative(path.join(userData, 'runtimes'), temporary);
-    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative) && path.basename(temporary).startsWith('.preparing-')) await fs.rm(temporary, { recursive: true, force: true });
-  }
-  return runtime;
 }
 
 export async function ensureSharedLocation({ env = process.env, home = homedir(), resolve }) {

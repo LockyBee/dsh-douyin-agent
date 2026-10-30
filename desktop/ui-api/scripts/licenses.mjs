@@ -23,10 +23,17 @@ async function ownerOf(file) {
 async function legalFiles(directory, relative = '', depth = 0) {
   const result = [];
   for (const entry of (await fs.readdir(path.join(directory, relative), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
-    if (entry.name === 'node_modules' || entry.name === '.git' || entry.isSymbolicLink()) continue;
+    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.cache' || entry.isSymbolicLink()) continue;
     const current = path.join(relative, entry.name);
     if (entry.isFile() && legalName(entry.name)) result.push(current);
-    else if (entry.isDirectory() && depth < 3) result.push(...await legalFiles(directory, current, depth + 1));
+    else if (entry.isDirectory() && depth < 3) {
+      let nestedPackage = false;
+      try {
+        const manifest = JSON.parse(await fs.readFile(path.join(directory, current, 'package.json'), 'utf8'));
+        nestedPackage = typeof manifest.name === 'string' && Boolean(manifest.name) && typeof manifest.version === 'string' && Boolean(manifest.version);
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (!nestedPackage) result.push(...await legalFiles(directory, current, depth + 1));
+    }
   }
   return result;
 }

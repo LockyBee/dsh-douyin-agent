@@ -440,11 +440,12 @@ function queryTerms(query) {
 }
 
 /** 跨来源检索必须有查询词；结果不包含内部幂等键或源库路径。 */
-export function recallCentralMemory({ centralDb, centralPath, query = '', limit = 10, kind, origins, allowQQSources = true } = {}) {
+export function recallCentralMemory({ centralDb, centralPath, query = '', limit = 10, kind, origins, allowQQSources = true, chatShareableOnly = false } = {}) {
   if (typeof query !== 'string' || query.length > 200) throw new TypeError('query 必须是最多 200 字的字符串');
   if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RangeError('limit 必须是 1–100 的整数');
   if (kind != null && (typeof kind !== 'string' || kind.length > 40)) throw new TypeError('kind 无效');
   if (origins != null && (!Array.isArray(origins) || !origins.every(origin => ['video', 'qq', 'qq-history'].includes(origin)))) throw new TypeError('origins 无效');
+  if (typeof chatShareableOnly !== 'boolean') throw new TypeError('chatShareableOnly 必须是布尔值');
   if (!query.trim() || origins?.length === 0) return [];
   const terms = queryTerms(query);
   if (!terms.length) return [];
@@ -455,6 +456,14 @@ export function recallCentralMemory({ centralDb, centralPath, query = '', limit 
     const clauses = [], args = [];
     if (kind) { clauses.push('kind=?'); args.push(kind); }
     if (origins) { clauses.push(`origin IN (${origins.map(() => '?').join(',')})`); args.push(...origins); }
+    if (chatShareableOnly) {
+      const metadata = "CASE WHEN json_valid(metadata_json) THEN metadata_json ELSE '{}' END";
+      clauses.push(`COALESCE(json_extract(${metadata},'$.sourceType'),'')!='private'
+        AND COALESCE(json_extract(${metadata},'$.privacy'),'')!='internal-reference'
+        AND COALESCE(json_extract(${metadata},'$.visibility'),'') NOT LIKE 'private%'
+        AND (origin='video' OR (json_extract(${metadata},'$.sourceType')='group'
+          AND ((origin='qq' AND status='confirmed') OR (origin='qq-history' AND status='observed-history'))))`);
+    }
     clauses.push(`(${terms.map(() => "instr(lower(content || ' ' || COALESCE(title,'') || ' ' || COALESCE(author,'')),?)>0").join(' OR ')})`);
     args.push(...terms);
     const rows = db.prepare(`SELECT * FROM memory_entries WHERE ${clauses.join(' AND ')} ORDER BY updated_at DESC,id DESC LIMIT 1000`).all(...args);
@@ -462,6 +471,7 @@ export function recallCentralMemory({ centralDb, centralPath, query = '', limit 
     const ranked = rows.map(row => {
       const item = sourceAwareEntry(db, row, { allowQQSources });
       if (!item) return null;
+      if (chatShareableOnly && (privateMetadata(item.metadata) || String(item.metadata.visibility || '').startsWith('private'))) return null;
       const haystack = `${row.content} ${row.title || ''} ${row.author || ''}`.toLowerCase();
       return { row, item, score: (haystack.includes(full) ? 50 : 0) + terms.reduce((sum, term) => sum + (haystack.includes(term) ? Math.min(term.length, 8) : 0), 0) };
     }).filter(Boolean).sort((a, b) => b.score - a.score || Number(b.row.updated_at) - Number(a.row.updated_at) || Number(b.row.id) - Number(a.row.id));

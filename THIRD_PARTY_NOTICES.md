@@ -40,3 +40,9 @@
 桌面构建使用 Electron `44.0.0`、electron-builder `26.15.3`、esbuild `0.28.1`；后台使用 Node.js `24.17.0`、`playwright-core` `1.64.0-alpha-1790635538000` 和 `yaml` `2.9.0`。Node 完整许可、Playwright 的 Apache-2.0/NOTICE/ThirdPartyNotices 和 YAML 的 ISC 许可随后台实际运行包保留。React、KaTeX 字体、Markdown、Shiki 及其他前端组件以 `desktop/ui-api` 的锁文件和实际构建产物为准，各自版权与许可证随界面产物保存；Electron/Chromium 的通知由桌面分发层保留。
 
 上述依赖的许可不代替模型接口服务的条款，也不构成软件联调保证。可选音频仍使用前述三个社区项目的来源与 MIT；Python、FFmpeg、音频模型及个人密钥不随基础软件提供。构建与验收范围见 [desktop/README.md](desktop/README.md)。
+
+## 省图片成本的视频分镜
+
+复用 SAOS-3624/dsh-video-storyboard 0.4.4 固定提交 2ba682d471a0e63defdb5e8e023465ab59806b05 的纯 RGB 布局、编号和拼图代码，按 MIT 分发。适配只作用于本项目已核实的视频采样，不启用上游下载器、全局 ASR 或进程托管。版权及完整许可见 storyboard/vendor/LICENSE，原 NOTICE 与逐文件来源见 storyboard/PROVENANCE.json。上游文档中的作者视频图片未复制。
+
+JPEG 编解码复用 jpeg-js 0.4.4，保留 BSD-3-Clause 许可证；其 decoder.js 原有 Copyright 2011 notmasteryet 的 Apache-2.0 声明及完整 Apache 文本均保留，encoder.js 的 Adobe BSD 声明也保留。文件见 storyboard/vendor/jpeg-js/。不新增原生图片库或自动下载运行依赖。拼成一张图不等于所有模型固定计费384 token，实际以所选模型返回的用量为准。

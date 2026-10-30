@@ -9,7 +9,9 @@ import { OutboundCoordinator } from './outbound-send.mjs';
 import { VideoLimits } from './video-limits.mjs';
 
 const stop = signal => signal?.throwIfAborted();
-const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 }); fs.renameSync(temporary, file); };
+import {writeDurableReceiptFile as write,createCommentReceiptBaseline,createShareReceiptBaseline,checkReceiptBaseline,preserveReceiptBaseline} from './receipt-baseline.mjs';
+import {readCommentSelfIdentity} from './comment-browser.mjs';
+import {isRecoverableSharePreflight} from './autonomous-share.mjs';
 
 export function canonicalVideoUrl(value) {
   if (typeof value !== 'string' || value.length > 300) throw new TypeError('请提供抖音公开作品链接。');
@@ -17,6 +19,21 @@ export function canonicalVideoUrl(value) {
   const id = /^\/video\/(\d+)\/?$/.exec(url.pathname)?.[1];
   if (url.protocol !== 'https:' || url.hostname !== 'www.douyin.com' || url.port || url.username || url.password || !id) throw new TypeError('只接受 https://www.douyin.com/video/数字 的公开作品链接。');
   return { videoId: id, url: `https://www.douyin.com/video/${id}` };
+}
+
+function sharedCardReceiptIdentity(media) {
+  if (media?.type !== 'shared-work' || media.identityConflict === true) return { videoId: null, rejected: true };
+  let direct = null, linked = null;
+  if (media.videoId !== undefined && media.videoId !== null) {
+    if (typeof media.videoId !== 'string' || !/^\d{1,64}$/.test(media.videoId)) return { videoId: null, rejected: true };
+    direct = media.videoId;
+  }
+  if (media.url !== undefined && media.url !== null) {
+    try { linked = canonicalVideoUrl(media.url).videoId; if (!/^\d{1,64}$/.test(linked)) return { videoId: null, rejected: true }; }
+    catch { return { videoId: null, rejected: true }; }
+  }
+  if (direct && linked && direct !== linked) return { videoId: null, rejected: true };
+  return { videoId: direct || linked, rejected: false };
 }
 
 // 同一头像在聊天和分享面板使用不同代理前缀与图片格式，保留资源路径核对。
@@ -47,7 +64,7 @@ function forwardRowKey(row, kind) {
   const values = row.identity || {}, raw = kind === 'native-conversation' ? boundedId(row.nativeId) : kind === 'rendered-user' ? boundedId(values.secUid) : kind === 'rendered-user-id' ? boundedId(values.userId) : kind === 'rendered-group' ? boundedId(values.groupId) : kind === 'rendered-conversation' ? boundedId(values.conversationId) : kind === 'rendered-conversation-short' ? boundedId(values.conversationShortId) : null;
   return raw ? kind === 'native-conversation' ? `native:${raw}` : `rendered:${kind.slice(9)}:${hash(raw)}` : null;
 }
-export function readForwardPanelDom({ markedId } = {}) {
+export function readForwardPanelDom({ markedId, includeOffscreen = false } = {}) {
   const own = (value, key) => value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
   const props = element => { if (!element) return null; const keys = Object.getOwnPropertyNames(element).filter(key => key.startsWith('__reactProps$')); return keys.length === 1 ? own(element, keys[0]) : null; };
   const child = (value, index) => { const children = own(value, 'children'); return own((Array.isArray(children) ? children : [children])[index], 'props'); };
@@ -57,7 +74,9 @@ export function readForwardPanelDom({ markedId } = {}) {
   for (const [panelIndex, panel] of [...document.querySelectorAll('[data-e2e="video-share-container"],.lC5eOSqy')].entries()) {
     if (!visible(panel) || !panel.matches('[data-e2e="video-share-container"]') && panel.querySelector('.S874re0p')?.textContent.trim() !== '分享给朋友') continue;
     for (const [rowIndex, row] of [...panel.querySelectorAll('.otFjqQEX,[data-e2e="share-friend-row"],[data-e2e="share-group-row"]')].entries()) {
-      if (!visible(row) || markedId && row.getAttribute('data-deepseek-forward-id') !== markedId) continue;
+      const style = getComputedStyle(row), bounds = row.getBoundingClientRect();
+      const rendered = bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      if (!(includeOffscreen ? rendered : visible(row)) || markedId && row.getAttribute('data-deepseek-forward-id') !== markedId) continue;
       const button = row.querySelector('.xu0OjnsQ,[data-e2e="share-friend-send"],[data-e2e="share-group-send"]');
       const group = row.querySelector('[data-e2e="group-avatar"],[class*="GroupAvatar"]');
       // 只读当前渲染行父节点的固定 user props，不访问 infoDict、store 或其他会话正文。
@@ -87,14 +106,32 @@ export function readForwardPanelDom({ markedId } = {}) {
 export function selectForwardRecipient(rows, contact) {
   if (!hasStableConversationIdentity(contact)) throw Object.assign(new Error('许可会话缺少完整稳定身份，未转发。'), { code: 'FORWARD_IDENTITY_REQUIRED', stage: 'recipient' });
   const matched = rows.filter(row => { const key = forwardRowKey(row, contact.identityKind); return key && row.isGroup === contact.isGroup && hash(key) === contact.identityHash && `binding:${hash(`${contact.isGroup ? 'group' : 'direct'}\0${key}`)}` === contact.identityBinding; });
-  if (matched.length !== 1) throw Object.assign(new Error('分享面板没有唯一匹配许可稳定身份和类型的收件人，未转发。'), { code: 'FORWARD_RECIPIENT_IDENTITY_MISMATCH', stage: 'recipient' });
+  if (matched.length !== 1) throw Object.assign(new Error('分享面板没有唯一匹配许可稳定身份和类型的收件人，未转发。'), { code: 'FORWARD_RECIPIENT_IDENTITY_MISMATCH', stage: 'recipient', matchCount: matched.length });
   const row = matched[0];
   if (row.sendTargetVerified !== true) throw Object.assign(new Error('分享按钮的目标标识未与许可收件人绑定，未点击发送。'), { code: 'FORWARD_BUTTON_TARGET_MISMATCH', stage: 'recipient' });
-  if (row.disabled || !['分享', '发送'].includes(row.sendLabel)) throw new Error('好友的分享按钮不可用或已经发生变化，未点击发送。');
+  if (row.disabled || !['分享', '发送'].includes(row.sendLabel)) throw Object.assign(new Error('好友的分享按钮不可用或已经发生变化，未点击发送。'),{code:'FORWARD_BUTTON_UNAVAILABLE',stage:'recipient'});
   return row;
 }
 
 const sameForwardRow = (left, right, contact) => left.isGroup === right.isGroup && left.sendTargetVerified === true && right.sendTargetVerified === true && forwardRowKey(left, contact.identityKind) === forwardRowKey(right, contact.identityKind) && left.identity?.userId === right.identity?.userId && left.buttonTargetId === right.buttonTargetId;
+
+function moveForwardList({ reset = false } = {}) {
+  const visible = element => { const r = element.getBoundingClientRect(), s = getComputedStyle(element); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; };
+  const panels = [...document.querySelectorAll('[data-e2e="video-share-container"],.lC5eOSqy')].filter(panel => visible(panel) && (panel.matches('[data-e2e="video-share-container"]') || panel.querySelector('.S874re0p')?.textContent.trim() === '分享给朋友') && panel.querySelector('.otFjqQEX,[data-e2e="share-friend-row"],[data-e2e="share-group-row"]'));
+  if (panels.length !== 1) return { moved: false };
+  const panel = panels[0], first = panel.querySelector('.otFjqQEX,[data-e2e="share-friend-row"],[data-e2e="share-group-row"]');
+  let container = first.parentElement;
+  while (container && panel.contains(container)) {
+    if (/(auto|scroll)/.test(getComputedStyle(container).overflowY) && container.scrollHeight > container.clientHeight + 1) break;
+    if (container === panel) { container = null; break; }
+    container = container.parentElement;
+  }
+  if (!container) return { moved: false };
+  const before = container.scrollTop, maximum = Math.max(0, container.scrollHeight - container.clientHeight);
+  const target = reset && before > 0 ? 0 : Math.min(maximum, before + Math.max(1, Math.floor(container.clientHeight * 0.8)));
+  container.scrollTo({ top: target, behavior: 'instant' });
+  return { moved: Math.abs(container.scrollTop - before) > 0.5 };
+}
 
 function assertVideo(state, videoId) {
   if (state.loginRequired || state.verificationRequired || state.unsupportedPage || state.privateChatVisible) throw new Error('当前页面需要登录、验证或仍有私信遮挡，未转发。');
@@ -145,9 +182,10 @@ export class VideoForwarder {
   policyContact(recipientId) {
     if (typeof recipientId !== 'string' || !/^conv:[a-f0-9]{64}$/.test(recipientId)) throw new TypeError('请在本机选择已核对的联系人。');
     let policy; try { policy = JSON.parse(fs.readFileSync(this.policyFile, 'utf8')); } catch { throw new Error('本机联系人白名单不可读，未转发。'); }
-    if (!Array.isArray(policy.allowlist) || new Set(policy.allowlist.map(item => item?.id)).size !== policy.allowlist.length || policy.allowlist.some(item => !isStoredContactAuthorized(item) || !hasStableConversationIdentity(item))) throw new Error('本机会话名单不符合当前稳定身份授权范围。');
+    if (!Array.isArray(policy.allowlist) || new Set(policy.allowlist.map(item => item?.id)).size !== policy.allowlist.length || policy.allowlist.some(item => !isStoredContactAuthorized(item))) throw new Error('本机会话名单包含损坏或未授权的记录，未转发。');
     const matched = policy.allowlist.filter(item => item.id === recipientId);
     if (matched.length !== 1 || !isStoredContactAuthorized(matched[0])) throw new Error('收件人不在已核对的会话名单内，未转发。');
+    if (!hasStableConversationIdentity(matched[0])) throw Object.assign(new Error('目标会话缺少完整稳定身份，不能作为原生卡片收件人。'), { code: 'FORWARD_IDENTITY_REQUIRED', stage: 'recipient' });
     return matched[0];
   }
   async gate(signal) {
@@ -157,24 +195,48 @@ export class VideoForwarder {
     return decision;
   }
   receipts() {
-    try { const value = JSON.parse(fs.readFileSync(this.receiptsFile, 'utf8')); if (!Array.isArray(value.operations)) throw new Error(); return value; }
+    try { const value = JSON.parse(fs.readFileSync(this.receiptsFile, 'utf8')); if (!Array.isArray(value.operations) || value.operations.some(item => item?.baseline && !checkReceiptBaseline(item, 'native-card').available)) throw new Error(); return value; }
     catch (error) { if (error.code === 'ENOENT') return { version: 1, operations: [] }; throw new Error('转发收据不可读，需要人工核对，未再次发送。'); }
   }
-  record(operation) { const value = this.receipts(); const index = value.operations.findIndex(item => item.operationId === operation.operationId); if (index < 0) value.operations.push(operation); else value.operations[index] = operation; write(this.receiptsFile, value); }
+  record(operation) { const value = this.receipts(); const index = value.operations.findIndex(item => item.operationId === operation.operationId), stored = preserveReceiptBaseline(index < 0 ? null : value.operations[index], operation, 'native-card'); if (index < 0) value.operations.push(stored); else value.operations[index] = stored; write(this.receiptsFile, value); }
   acquire() {
     let descriptor; try { descriptor = fs.openSync(this.guardFile, 'wx', 0o600); } catch (error) { if (error.code === 'EEXIST') throw new Error('另一项转发正在执行，或转发锁需要人工核对，未再次发送。'); throw error; }
     const token = randomUUID(); try { fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid, token })); } finally { fs.closeSync(descriptor); }
     return () => { try { const owner = JSON.parse(fs.readFileSync(this.guardFile, 'utf8')); if (owner.pid === process.pid && owner.token === token) fs.unlinkSync(this.guardFile); } catch {} };
   }
-  async prepareContact(recipientId, signal) {
+  async prepareContact(recipientId, signal, { backgroundOnly = false } = {}) {
     const stored = this.policyContact(recipientId);
-    const list = await this.chatBrowser.listContacts({ signal, verifyFollowing: true });
+    const list = await this.chatBrowser.listContacts({ signal, verifyFollowing: !backgroundOnly, backgroundOnly });
     if (list.blocked || list.loginRequired || list.verificationRequired) throw new Error('联系人关系核对需要登录或验证，未转发。');
+    // 后台分享沿用本机许可；未知关注关系不等于撤权，稳定身份仍须完整相符。
+    const matches = current => matchesAuthorizedContact(stored, backgroundOnly && current?.followed == null && hasStableConversationIdentity(current) ? { ...current, followed: stored.followed } : current);
     const contacts = list.contacts.filter(item => item.id === recipientId);
-    if (contacts.length !== 1 || !matchesAuthorizedContact(stored, contacts[0])) throw new Error('收件人的当前身份或关注关系与固定名单不一致，未转发。');
+    if (contacts.length !== 1 || !matches(contacts[0])) throw new Error('收件人的当前身份或关注关系与固定名单不一致，未转发。');
     const contact = this.chatBrowser.contacts.get(recipientId);
-    if (!contact || !hasStableConversationIdentity(contact) || !matchesAuthorizedContact(stored, contact)) throw new Error('收件人的当前稳定身份不可核对，未转发。');
+    if (!contact || !hasStableConversationIdentity(contact) || !matches(contact)) throw new Error('收件人的当前稳定身份不可核对，未转发。');
     return contact;
+  }
+  async locateRecipient(page, contact, signal) {
+    const deadline = Date.now() + 4000;
+    let first = true, lastError;
+    do {
+      stop(signal); if(!first)await this.gate(signal); this.policyContact(contact.id);
+      try {
+        const selected = selectForwardRecipient((await page.evaluate(readForwardPanelDom, { includeOffscreen: true })).rows, contact);
+        const row = page.locator(panelSelector).nth(selected.panelIndex).locator(rowSelector).nth(selected.rowIndex);
+        await row.evaluate(element => element.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' }));
+        await page.waitForTimeout(50);
+        stop(signal);
+        return selectForwardRecipient((await page.evaluate(readForwardPanelDom)).rows, contact);
+      } catch (error) {
+        if (error.code !== 'FORWARD_RECIPIENT_IDENTITY_MISMATCH' || error.matchCount !== 0) throw error;
+        lastError = error;
+      }
+      if (!(await page.evaluate(moveForwardList, { reset: first })).moved) break;
+      first = false;
+      await page.waitForTimeout(75);
+    } while (Date.now() < deadline);
+    throw lastError;
   }
   async openPanel(page, signal) {
     stop(signal);
@@ -200,14 +262,25 @@ export class VideoForwarder {
     return this.#forward({ recipientId, expectedVideoId }, { signal, authorize, autonomousRunId });
   }
   async #forward(input = {}, options = {}) {
-    return this.outbound.run({ recipientId: input.recipientId, purpose: 'video', signal: options.signal }, () => this.#sendTransaction(input, options));
+    let entered = false;
+    try {
+      return await this.outbound.run({ recipientId: input.recipientId, purpose: 'video', signal: options.signal }, () => { entered = true; return this.#sendTransaction(input, options); });
+    } catch (error) {
+      if (!entered && options.authorize && !options.signal?.aborted && error.code === 'OUTBOUND_BUSY' && error.beforeDelivery === true) {
+        const forwardOperationId = randomUUID(), failure = safeForwardFailure(error,'outbound-wait');
+        error.failure=failure;error.forwardOperationId=forwardOperationId;
+        error.preflight={protocol:'share-preflight-v1',outcome:'not-sent',forwardOperationId,videoId:input.expectedVideoId,recipientId:input.recipientId,sendClicks:0,dispatchAuthorized:false,failureCode:failure.code,failureStage:failure.stage};
+      }
+      throw error;
+    }
   }
   async #sendTransaction({ recipientId, url, expectedVideoId } = {}, { signal: parentSignal, authorize, autonomousRunId } = {}) {
     const interrupt = new AbortController(), signal = AbortSignal.any([interrupt.signal, ...(parentSignal ? [parentSignal] : [])]);
     const operation = { operationId: randomUUID(), recipientId, ...(expectedVideoId ? { videoId: expectedVideoId } : {}), startedAt: new Date().toISOString(), status: 'preparing', sendClicks: 0 };
-    let clicked = false, release, stage = 'authorization';
+    let clicked = false, dispatchAuthorized = false, release, stage = 'authorization';
     const authorized = async phase => {
       if (authorize && await authorize({ phase, recipientId, videoId: expectedVideoId }) !== true) throw new Error('自主分享许可已撤回或检查未通过，未发送。');
+      if (phase === 'before-click') dispatchAuthorized = true;
       stop(signal);
     };
     try {
@@ -222,28 +295,32 @@ export class VideoForwarder {
     this.policyContact(recipientId);
     release = this.acquire();
       stage = 'contact-identity';
-      const contact = await this.prepareContact(recipientId, signal);
+      const contact = await this.prepareContact(recipientId, signal, { backgroundOnly: Boolean(authorize) });
       stage = 'conversation-baseline';
-      const before = await this.chatBrowser.readConversation(recipientId, { allowed: true, signal });
+      const before = await this.chatBrowser.readConversation(recipientId, { allowed: true, signal, backgroundOnly: Boolean(authorize) });
       if (before.blocked || before.conversation?.id !== recipientId) throw new Error('指定会话的转发前快照未通过身份核对。');
-      const beforeIds = new Set(before.messages.map(message => message.id));
+      if (!Array.isArray(before.messages) || before.messages.length > 2000) throw new Error('点击前消息窗口超出收据基线边界，未发送。');
+      const beforeMessages = before.messages.map(message => ({ id: message?.id })), baselineCapturedAt = new Date().toISOString();
+      const beforeIds = new Set(beforeMessages.map(message => message.id));
       const newCardIds = new Set();
       const sendResult = await this.controller.withPage(async page => {
         stage = 'video';
         await this.gate(signal);
         if (target) { await page.goto(target.url, { waitUntil: 'domcontentloaded' }); await this.controller.settle(signal, { kind: 'video', videoId: target.videoId }); }
         const video = assertVideo(await page.evaluate(readPageState), expectedVideoId ?? target?.videoId);
+        const receiptSelf = await page.evaluate(readCommentSelfIdentity);
         operation.videoId = video.videoId;
         if (authorize && this.receipts().operations.some(item => item.recipientId === recipientId && item.videoId === video.videoId && item.status === 'confirmed')) throw new Error('这位好友已收到同一作品的已确认卡片，未自主重复分享。');
         if (this.receipts().operations.some(item => item.recipientId === recipientId && item.videoId === video.videoId && ['clicking', 'uncertain'].includes(item.status))) throw new Error('该好友与作品存在未确认的转发记录，请先人工核对，未再次发送。');
         stage = 'open-panel';
         if (!await this.openPanel(page, signal)) {
           const failure = safeForwardFailure({ code: 'FORWARD_SHARE_PANEL_UNAVAILABLE', stage, message: '当前作品的好友分享面板未能打开或没有可核对的收件人，未发送。' }, stage);
+          if (authorize) throw Object.assign(new Error(failure.message), failure);
           this.record({ ...operation, status: 'not-sent', completedAt: new Date().toISOString(), failure });
           return { confirmed: false, deliveryUncertain: false, needsFallback: true, deliveryType: 'native-card', operationId: operation.operationId, failure, reason: failure.message };
         }
         stage = 'recipient';
-        const selected = selectForwardRecipient((await page.evaluate(readForwardPanelDom)).rows, contact);
+        const selected = await this.locateRecipient(page, contact, signal);
         const row = page.locator(panelSelector).nth(selected.panelIndex).locator(rowSelector).nth(selected.rowIndex);
         await row.evaluate((element, id) => element.setAttribute('data-deepseek-forward-id', id), operation.operationId);
         await this.gate(signal);
@@ -327,8 +404,13 @@ export class VideoForwarder {
           const finalPoint = await readSendPoint();
           if (!sameGeometry(finalPoint, stablePoint)) throw new Error('最终输入前分享控件移动、替换或被遮挡，未点击发送。');
           stop(signal);
+          if (receiptSelf.ready) { const currentSelf = await page.evaluate(readCommentSelfIdentity); if (!currentSelf.ready || currentSelf.ownProfileId !== receiptSelf.ownProfileId) throw new Error('最终分享输入前登录本人身份已变化，未点击。'); }
+          operation.baseline = createShareReceiptBaseline(operation, { messages: beforeMessages, contact, ownProfileId: receiptSelf.ready ? receiptSelf.ownProfileId : null, capturedAt: baselineCapturedAt });
           operation.status = 'clicking'; operation.sendClicks = 1; this.record(operation);
-          clicked = true;
+          stop(signal); await checkPendingInput(); await this.gate(signal);
+          if (receiptSelf.ready) { const currentSelf = await page.evaluate(readCommentSelfIdentity); if (!currentSelf.ready || currentSelf.ownProfileId !== receiptSelf.ownProfileId) throw new Error('收据保存后登录本人身份已变化，未点击。'); }
+          if (!sameGeometry(await readSendPoint(), finalPoint)) throw new Error('收据保存后分享控件移动、替换或被遮挡，未点击。');
+          stop(signal); clicked = true;
           const armed = await send.evaluate((button, token) => { const entry = window.__deepseekForwardInputs?.[token]; if (!entry || button.getAttribute('data-deepseek-forward-token') !== token) return false; entry.armedAt = Date.now(); entry.armed = true; return true; }, operation.operationId);
           if (!armed) throw new Error('最终分享事件门禁未能启用，分享结果需要核对。');
           // 真实输入只有一次；短最终输入仍受监测，结果不明时保留 uncertain 收据。
@@ -352,15 +434,16 @@ export class VideoForwarder {
       stage = 'receipt';
       for (let attempt = 0; attempt < 8; attempt += 1) {
         stop(signal);
-        const after = await this.chatBrowser.readConversation(recipientId, { allowed: true, signal, refresh: attempt === 0 });
+        const after = await this.chatBrowser.readConversation(recipientId, { allowed: true, signal, refresh: attempt === 0, backgroundOnly: Boolean(authorize) });
         if (after.blocked || after.conversation?.id !== recipientId) break;
         for (const message of after.messages) if (!beforeIds.has(message.id) && message.arrivalClassification === 'new-tail') newCardIds.add(message.id);
         const candidates = after.messages.filter(message => newCardIds.has(message.id) && message.sender === 'outgoing' && message.media?.type === 'shared-work' && !message.failed && !message.pending);
         const matches = [];
         for (const candidate of candidates) {
-          let observed = candidate.media.videoId;
-          if (!observed && candidate.media.url) observed = canonicalVideoUrl(candidate.media.url).videoId;
-          if (!observed) { await this.gate(signal); const resolved = await this.chatBrowser.openSharedVideo(recipientId, candidate.id, { allowed: true, signal }); if (!resolved.blocked) observed = resolved.videoId; }
+          const work = sharedCardReceiptIdentity(candidate.media);
+          if (work.rejected) continue;
+          let observed = work.videoId;
+          if (!observed && !authorize) { await this.gate(signal); const resolved = await this.chatBrowser.openSharedVideo(recipientId, candidate.id, { allowed: true, signal }); if (!resolved.blocked) observed = resolved.videoId; }
           if (observed === sendResult.videoId) matches.push(candidate);
         }
         if (matches.length > 1) break;
@@ -379,7 +462,10 @@ export class VideoForwarder {
       const failure = safeForwardFailure(error, stage);
       if (!clicked) {
         const rejected = error instanceof Error ? error : new Error(failure.message); rejected.failure = failure; rejected.forwardOperationId = operation.operationId;
-        try { this.record({ ...operation, status: 'not-sent', completedAt: new Date().toISOString(), failure }); } catch { rejected.receiptWarning = '发送前的诊断收据未能保存，请核对本机记录。'; }
+        const preflight = authorize && !signal.aborted && !dispatchAuthorized && operation.sendClicks === 0 && isRecoverableSharePreflight(failure.code, stage)
+          ? { protocol: 'share-preflight-v1', outcome: 'not-sent', forwardOperationId: operation.operationId, videoId: operation.videoId, recipientId, sendClicks: 0, dispatchAuthorized: false, failureCode: failure.code, failureStage: stage } : null;
+        if (preflight) rejected.preflight = preflight;
+        try { this.record({ ...operation, status: 'not-sent', completedAt: new Date().toISOString(), failure, ...(preflight ? { preflight } : {}) }); } catch { rejected.receiptWarning = '发送前的诊断收据未能保存，请核对本机记录。'; }
         throw rejected;
       }
       const result = { confirmed: false, deliveryUncertain: true, deliveryType: 'native-card', operationId: operation.operationId, videoId: operation.videoId, failure, reason: '分享点击后的结果未确认，请人工核对，未再次发送。' };

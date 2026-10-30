@@ -320,6 +320,50 @@ test('每日上限独立于新视频轮次，已死进程残留只能明确停�
   assert.throws(() => f.watch.start({}, { explicit: true }), /残留/); await f.watch.stop({ explicit: true }); assert.equal(fs.existsSync(f.watch.files.lock), false); assert.equal(f.calls.length, 0);
 });
 
+test('无活 worker 时失败 A 的状态、计数和剩余不混入后来手动 B', async t => {
+  const f = fixture(t);
+  const a = f.videoLimits.markSession('api', { explicit: true }).session.id;
+  f.watch.runId = 'run-failed-a'; f.watch.sessionId = a;
+  f.watch.save({ status: 'failed', lastDecision: { action: 'skip', reason: 'A失败' }, lastError: 'A失败' });
+  f.videoLimits.endSession({ explicit: true, reason: 'A失败' });
+  const b = f.videoLimits.markSession('api', { explicit: true }).session.id;
+  fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: { [a]: { requests: 5 }, [b]: { requests: 9 } }, days: { '2026-10-15': 14 } }));
+  const state = f.watch.state();
+  assert.equal(state.sessionId, a);
+  assert.equal(state.status, 'failed');
+  assert.equal(state.lastDecision.action, 'skip');
+  assert.equal(state.counts.requests, 5);
+  assert.equal(state.remainingSeconds, 0);
+});
+
+test('显式共享暂停只请求当前全局活worker，不拼历史A、不结束当前会话或清空预算', async t => {
+  const f = fixture(t);
+  const a = f.videoLimits.markSession('api', { explicit: true }).session.id;
+  f.watch.runId = 'run-failed-a'; f.watch.sessionId = a;
+  f.watch.save({ status: 'failed', lastDecision: { action: 'skip', reason: 'A失败' }, lastError: 'A失败' });
+  f.videoLimits.endSession({ explicit: true, reason: 'A失败' });
+  const b = f.videoLimits.markSession('api', { explicit: true }).session.id;
+  fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: { [a]: { requests: 5 }, [b]: { requests: 9 } }, days: { '2026-10-15': 14 } }));
+  fs.writeFileSync(f.watch.files.lock, JSON.stringify({ version: 1, pid: process.pid, runId: 'other-live-run', sessionId: b, source: 'dsh', status: 'running', heartbeatAt: new Date(f.now()).toISOString() }));
+  const previousBudget = fs.readFileSync(f.watch.files.budget, 'utf8'), previousState = fs.readFileSync(f.watch.files.state, 'utf8');
+  const manual = JSON.stringify({ pid: process.pid, token: 'synthetic-manual-owner', kind: 'manual-task' });
+  fs.writeFileSync(f.watch.files.manual, manual);
+  const stopped = await f.watch.stop({ explicit: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(f.watch.files.stop, 'utf8')), { runId: 'other-live-run', requestedAt: f.now() });
+  assert.equal(JSON.parse(fs.readFileSync(f.watch.files.lock, 'utf8')).runId, 'other-live-run');
+  assert.equal(stopped.status, 'stopping');
+  assert.equal(stopped.sessionId, b);
+  assert.equal(stopped.lastDecision, null);
+  assert.equal(stopped.lastError, '');
+  assert.equal(stopped.worker.source, 'dsh');
+  assert.equal(stopped.counts.requests, 9);
+  assert.equal(f.videoLimits.state().session.id, b);
+  assert.equal(fs.readFileSync(f.watch.files.budget, 'utf8'), previousBudget);
+  assert.equal(fs.readFileSync(f.watch.files.state, 'utf8'), previousState);
+  assert.equal(fs.readFileSync(f.watch.files.manual, 'utf8'), manual);
+  assert.equal(f.calls.length, 0);
+});
+
 test('普通ApiAgent每次请求重读人格；结构化解析拒绝越权与不完整字段', async () => {
   let counter = 0; const prompts = [];
   const agent = new ApiAgent({ controller: { execute: async () => ({}) }, config: { apiKey: 'synthetic', baseUrl: 'https://synthetic.example', model: 'synthetic' }, personaMemory: { context: () => `共享人格版本${++counter}` }, fetchImpl: async (_url, options) => { const body = JSON.parse(options.body); prompts.push(body.messages[0].content); return new Response(JSON.stringify({ choices: [{ message: prompts.length === 1 ? { tool_calls: [{ id: 'synthetic-call', type: 'function', function: { name: 'douyin_status', arguments: '{}' } }] } : { content: '已读取共同人格。' } }] })); } });

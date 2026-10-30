@@ -14,7 +14,7 @@ function fixture(t,initial=[{}]) {
   function page(input={}) {
     const value={name:input.name||'',address:input.url||'about:blank',text:input.text||'',elements:input.elements||0,closed:false,navigations:[],writes:[]};
     Object.assign(value,{
-      isClosed:()=>value.closed,url:()=>value.address,setDefaultTimeout(){},setDefaultNavigationTimeout(){},
+      isClosed:()=>value.closed,url:()=>value.address,async close(){value.closed=true;},setDefaultTimeout(){},setDefaultNavigationTimeout(){},
       async evaluate(fn,arg){
         await setImmediate();const window={name:value.name},document={body:{textContent:value.text},querySelectorAll:()=>({length:value.elements})};
         const result=vm.runInNewContext(`(${fn.toString()})(__argument)`,{window,document,__argument:arg});
@@ -76,8 +76,45 @@ test('多个未命名空白页来源不明时新建标签，不随意挑选其�
   assert.equal(f.pages.length,3);assert.ok(!original.includes(owned));assert.ok(original.every(page=>page.name===''&&page.navigations.length===0));
 });
 
-test('verification显式注入的合成缓存页保留例外，绝不据此扩大普通入口归属',async t=>{
-  const f=fixture(t,[{name:'synthetic-fixture',url:'https://fixture.invalid/'}]),controller=f.controller('verification');controller.page=f.pages[0];
-  assert.equal(await controller.connect(),f.pages[0]);assert.equal(f.pages.length,1);assert.equal(f.pages[0].name,'synthetic-fixture');
-  assert.equal(f.pages[0].navigations.length,0);assert.equal(f.pages[0].writes.length,0);
+test('后台连接禁止新建或导航空白标签，失败时保持原页面不变',async t=>{
+  const f=fixture(t,[{}]),controller=f.controller('api-chat');
+  await assert.rejects(controller.connect(undefined,{launch:false,create:false}),error=>error.code==='CHAT_PAGE_NOT_OPEN');
+  assert.equal(f.pages.length,1);assert.deepEqual(f.pages[0].navigations,[]);assert.equal(f.pages[0].writes.length,0);
+});
+
+test('后台连接遇到已归属但空白页时不导航，交由前台人工打开',async t=>{
+  const f=fixture(t,[{name:'deepseek-douyin-api-chat',url:'about:blank'}]),controller=f.controller('api-chat');
+  for(let i=0;i<3;i++) await assert.rejects(controller.connect(undefined,{launch:false,create:false}),error=>error.code==='CHAT_PAGE_NOT_OPEN');
+  assert.equal(f.pages.length,1);assert.deepEqual(f.pages[0].navigations,[]);
+});
+
+test('新控制器可只重连已有专用浏览器，不误报关闭也不创建页面',async t=>{
+  const f=fixture(t,[{name:'deepseek-douyin-api-chat',url:'https://www.douyin.com/'}]),controller=f.controller('api-chat');
+  controller.browser=null;let reconnects=0;
+  controller.connectExistingBrowser=async()=>{reconnects++;controller.browser=f.browser;return f.browser;};
+  const page=await controller.connect(undefined,{launch:false,create:false});
+  assert.equal(reconnects,1);assert.equal(page,f.pages[0]);assert.equal(f.pages.length,1);assert.deepEqual(page.navigations,[]);
+});
+
+test('初始化导航失败后关闭本次新建页，连续重试不积累存活标签',async t=>{
+  const f=fixture(t,[]),controller=f.controller('api-chat');
+  f.context.newPage=async()=>{const page=f.page();page.goto=async()=>{throw new Error('合成导航超时');};return page;};
+  for(let i=0;i<10;i++)await assert.rejects(controller.connect(),/合成导航超时/);
+  assert.equal(f.pages.filter(page=>!page.closed).length,0);assert.equal(controller.page,null);
+});
+
+test('借用初始空白页的导航失败后，下次会重新初始化，不把空白页当作就绪',async t=>{
+  const f=fixture(t),controller=f.controller('api-chat'),page=f.pages[0],goto=page.goto;let attempts=0;
+  page.goto=async(...args)=>{if(++attempts===1)throw new Error('合成首次导航失败');return goto(...args);};
+  await assert.rejects(controller.connect(),/合成首次导航失败/);
+  assert.equal(page.closed,false);assert.equal(await controller.connect(),page);assert.equal(attempts,2);assert.equal(f.pages.length,1);
+});
+
+test('同名离站缓存页保留原状，新的受管聊天入口可创建且后续不因旧页重复归属被拒',async t=>{
+  const f=fixture(t,[{name:'deepseek-douyin-api-chat',url:'https://foreign.invalid/left',text:'离站旧页'}]);const foreign=f.pages[0],controller=f.controller('api-chat');
+  const first=await controller.connect();
+  assert.notEqual(first,foreign);assert.equal(first.name,'deepseek-douyin-api-chat');assert.equal(f.pages.length,2);
+  assert.equal(foreign.address,'https://foreign.invalid/left');assert.equal(foreign.name,'deepseek-douyin-api-chat');assert.deepEqual(foreign.navigations,[]);assert.deepEqual(foreign.writes,[]);
+  const second=await controller.connect();assert.equal(second,first);assert.equal(f.pages.length,2);
+  assert.equal(foreign.address,'https://foreign.invalid/left');assert.deepEqual(foreign.navigations,[]);assert.deepEqual(foreign.writes,[]);
 });

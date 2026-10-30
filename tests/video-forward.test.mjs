@@ -6,6 +6,7 @@ import path from 'node:path';
 import { chromium } from '../playwright-runtime.mjs';
 import { createHash } from 'node:crypto';
 import { readPageState } from '../core.mjs?v=9';
+import { ChatBrowser } from '../chat-browser.mjs';
 import { VideoForwarder, canonicalVideoUrl, forwardAvatarIdentity, readForwardPanelDom, selectForwardRecipient, safeForwardFailure } from '../video-forward.mjs';
 
 let browser;
@@ -16,6 +17,7 @@ const stable = (nativeId, isGroup = false) => ({ id: `conv:${hash(`native:${nati
 const recipientId = stable('fixture-person').id;
 const contact = { ...stable('fixture-person'), name: '合成好友甲', displayName: '合成好友甲', followed: true, avatar: '/img/aweme-avatar/fixture-avatar' };
 const card = { id: `msg:${'b'.repeat(64)}`, sender: 'outgoing', arrivalClassification: 'new-tail', media: { type: 'shared-work', videoId: '12345', url: 'https://www.douyin.com/video/12345' } };
+const autonomousAuthorization = () => { const authorize = () => true; authorize.beginDispatch = () => () => {}; return authorize; };
 
 async function fixture({ rows = [{ name: '合成好友甲', avatar: 'https://fixture.local/aweme/aweme-avatar/fixture-avatar.jpeg', label: '分享' }], follow = true, shareResult = [card], existing = [], gateHook, contactData = contact } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-forward-test-'));
@@ -49,7 +51,7 @@ async function fixture({ rows = [{ name: '合成好友甲', avatar: 'https://fix
   const controller = { source: 'api', withPage: async fn => { connected += 1; return fn(page); }, pauseForLimits: async () => { pauses += 1; }, settle: async () => {} };
   const chatBrowser = {
     contacts: new Map([[recipientId, contactData]]),
-    listContacts: async options => { assert.equal(options.verifyFollowing, true); verified += 1; return { contacts: [{ ...contactData, followed: follow }] }; },
+    listContacts: async options => { assert.equal(options.verifyFollowing, options.backgroundOnly !== true); verified += 1; return { contacts: [{ ...contactData, followed: follow }] }; },
     readConversation: async (id, options) => { assert.equal(id, recipientId); assert.equal(options.allowed, true); return { conversation: { id: recipientId }, messages: await realEvaluate(() => window.messages) }; },
     openSharedVideo: async (id, messageId, options) => { opened += 1; assert.equal(id, recipientId); assert.equal(options.allowed, true); return { videoId: '12345', url: 'https://www.douyin.com/video/12345' }; },
     sendMessage: async () => { throw new Error('测试禁止文字链接自动降级'); },
@@ -59,9 +61,130 @@ async function fixture({ rows = [{ name: '合成好友甲', avatar: 'https://fix
   return { page, forwarder, stateDir, stats: () => ({ gates, pauses, verified, opened, connected }), cleanup: async () => { await page.close(); fs.rmSync(stateDir, { recursive: true, force: true }); } };
 }
 
+test('长分享列表按稳定身份找到下方对象，只给目标发送一次原生卡片',async()=>{
+  const rows=Array.from({length:60},(_,i)=>({name:`合成对象${i}`,nativeId:i===59?contact.nativeId:`synthetic-other-${i}`,avatar:'/avatar.png',label:'分享'}));
+  const f=await fixture({rows});
+  try{
+    await f.page.evaluate(()=>{const panel=document.querySelector('[data-e2e="video-share-container"]');panel.style.cssText='height:180px;width:350px;overflow-y:auto';for(const row of panel.children)row.style.height='70px';document.addEventListener('click',e=>{window.lastInputTrusted=e.isTrusted;},{capture:true});});
+    const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});
+    assert.equal(result.confirmed,true);assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(await f.page.evaluate(()=>window.lastInputTrusted),true);
+    assert.equal(await f.page.locator('[data-deepseek-forward-id]').getAttribute('data-conversation-id'),contact.nativeId);
+    assert.ok(await f.page.locator('[data-e2e="video-share-container"]').evaluate(p=>p.scrollTop)>0);
+  }finally{await f.cleanup();}
+});
+
+test('虚拟化分享列表有界遍历到未挂载对象，重绘后重新核对目标而非按昵称猜测',async()=>{
+  const f=await fixture();
+  try{
+    await f.page.evaluate(nativeId=>{
+      const panel=document.querySelector('[data-e2e="video-share-container"]');panel.innerHTML='';panel.style.cssText='height:180px;width:350px;overflow-y:auto;position:relative';
+      const spacer=document.createElement('div');spacer.style.height='3500px';const windowEl=document.createElement('div');windowEl.style.cssText='position:absolute;left:0;right:0;top:0';panel.append(spacer,windowEl);
+      const render=()=>{const first=Math.floor(panel.scrollTop/70);windowEl.style.top=first*70+'px';windowEl.innerHTML='';for(let i=first;i<Math.min(50,first+7);i++){
+        const row=document.createElement('div');row.className='otFjqQEX';row.style.height='70px';row.dataset.conversationType='direct';row.dataset.conversationId=i===38?nativeId:'synthetic-row-'+i;
+        row.innerHTML='<span class="EnYt_IKl">合成同名好友</span><div class="xu0OjnsQ" style="width:70px;height:30px">分享</div>';
+        row.querySelector('.xu0OjnsQ').onclick=()=>{window.sent++;window.messages=[...window.messages,...window.shareResult];};windowEl.append(row);
+      }};panel.addEventListener('scroll',render);render();
+    },contact.nativeId);
+    const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});
+    assert.equal(result.confirmed,true);assert.equal(await f.page.evaluate(()=>window.sent),1);
+    assert.equal(await f.page.locator('[data-deepseek-forward-id]').getAttribute('data-conversation-id'),contact.nativeId);
+  }finally{await f.cleanup();}
+});
+
+test('正式转发器在零授权零点击的身份或几何失败上出具绑定回执，最终输入后仍不明',async()=>{
+  for(const mode of ['recipient','geometry']){
+    const f=await fixture({rows:mode==='recipient'?[{name:'相同昵称但错误账号',nativeId:'unrelated',avatar:'/avatar.png',label:'分享'}]:undefined});
+    try{
+      if(mode==='geometry')await f.page.locator('.xu0OjnsQ').evaluate(e=>{e.style.pointerEvents='none';});
+      let authorized=false;const authorize=({phase})=>{if(phase==='before-click')authorized=true;return true;};authorize.beginDispatch=()=>()=>{};
+      await assert.rejects(f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize}),error=>{
+        assert.equal(error.preflight.sendClicks,0);assert.equal(error.preflight.dispatchAuthorized,false);assert.equal(error.preflight.recipientId,recipientId);assert.equal(error.preflight.videoId,'12345');assert.equal(error.preflight.failureStage,mode);return true;
+      });
+      assert.equal(authorized,false);assert.equal(await f.page.evaluate(()=>window.sent),0);assert.equal(f.forwarder.receipts().operations.at(-1).status,'not-sent');
+    }finally{await f.cleanup();}
+  }
+});
+
 test('可信人类入口未授权时只提示本机选择，不进入浏览器', async () => {
   const f = await fixture();
   try { const result = await f.forwarder.forward({ recipientId }); assert.equal(result.humanActionRequired, true); assert.equal(result.confirmed, false); assert.deepEqual(f.stats(), { gates: 0, pauses: 0, verified: 0, opened: 0, connected: 0 }); } finally { await f.cleanup(); }
+});
+
+test('后台分享准备复用现有稳定许可，不导航关注页或关闭已打开的消息面板', async () => {
+  const f = await fixture(), chatPage = await browser.newPage();
+  try {
+    await chatPage.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><html><body></body></html>' }));
+    await chatPage.goto('https://www.douyin.com/');
+    await chatPage.setContent('<section data-e2e="im-dialog" style="width:500px;height:400px"><div data-e2e="conversation-item" data-conversation-type="direct" data-conversation-id="fixture-person" style="width:400px;height:70px"><img src="/avatar.png" width="24" height="24"><span data-e2e="conversation-name">合成好友甲</span></div></section>');
+    const controls = [], chat = new ChatBrowser({ controller: { withPage: async (fn, options) => { controls.push(options); return fn(chatPage); } } });
+    chat.isForeground = async () => false;
+    chat.verifyFollowing = async () => { assert.fail('后台分享不得重新导航关注页'); };
+    f.forwarder.chatBrowser = chat;
+    const selected = await f.forwarder.prepareContact(recipientId, undefined, { backgroundOnly: true });
+    assert.equal(selected.id, recipientId); assert.equal(selected.followed, null);
+    assert.equal(selected.identityBinding, contact.identityBinding); assert.equal(await chatPage.locator('[data-e2e="im-dialog"]').isVisible(), true);
+    assert.equal(chatPage.url(), 'https://www.douyin.com/'); assert.equal(chat.following, null);
+    assert.equal(controls.length, 1); assert.equal(controls[0].launch, false); assert.equal(controls[0].create, false);
+    assert.equal(await f.page.evaluate(() => window.sent), 0);
+  } finally { await chatPage.close(); await f.cleanup(); }
+});
+
+test('人工群混在许可中不阻断稳定好友分享，基线和卡片回读都只使用现有后台页', async () => {
+  const f = await fixture();
+  try {
+    const policy = JSON.parse(fs.readFileSync(f.forwarder.policyFile));
+    policy.allowlist.push({ id: `conv:${'e'.repeat(64)}`, name: '合成人工群', isGroup: true, identityVerified: false, authorizationKind: 'manual', verifiedAt: '2026-10-14T00:00:00Z', relationshipStatus: 'unavailable' });
+    fs.writeFileSync(f.forwarder.policyFile, JSON.stringify(policy));
+    const read = f.forwarder.chatBrowser.readConversation, options = [];
+    f.forwarder.chatBrowser.readConversation = (id, controls) => { options.push(controls); assert.equal(controls.backgroundOnly, true); return read(id, controls); };
+    const result = await f.forwarder.forwardAutonomous({ recipientId, expectedVideoId: '12345' }, { authorize: autonomousAuthorization() });
+    assert.equal(result.confirmed, true); assert.equal(result.messageId, card.id); assert.equal(options.length, 2);
+    assert.equal(await f.page.evaluate(() => window.sent), 1); assert.equal(f.forwarder.receipts().operations.at(-1).status, 'confirmed');
+  } finally { await f.cleanup(); }
+});
+
+test('缺页或前台的准备失败附零发送证明，身份、未知、撤权错误不冒充可恢复缺页', async () => {
+  for (const stage of ['contact-identity', 'conversation-baseline']) for (const code of ['CHAT_PAGE_NOT_OPEN', 'CHAT_FOREGROUND', 'CHAT_CONVERSATION_IDENTITY_MISMATCH', 'SYNTHETIC_UNKNOWN']) {
+    const f = await fixture();
+    try {
+      const fail = async () => { throw Object.assign(new Error('合成准备失败'), { code }); };
+      if (stage === 'contact-identity') f.forwarder.chatBrowser.listContacts = fail; else f.forwarder.chatBrowser.readConversation = fail;
+      await assert.rejects(f.forwarder.forwardAutonomous({ recipientId, expectedVideoId: '12345' }, { authorize: autonomousAuthorization() }), error => {
+        assert.equal(error.failure.code, code); assert.equal(error.failure.stage, stage);
+        if (['CHAT_PAGE_NOT_OPEN', 'CHAT_FOREGROUND'].includes(code)) { assert.equal(error.preflight.sendClicks, 0); assert.equal(error.preflight.dispatchAuthorized, false); assert.equal(error.preflight.videoId, '12345'); assert.equal(error.preflight.recipientId, recipientId); }
+        else assert.equal(error.preflight, undefined);
+        return true;
+      });
+      assert.equal(await f.page.evaluate(() => window.sent), 0); assert.equal(f.stats().connected, 0);
+      const record = f.forwarder.receipts().operations.at(-1); assert.equal(record.status, 'not-sent'); assert.equal(record.sendClicks, 0);
+    } finally { await f.cleanup(); }
+  }
+});
+
+test('自主分享卡片缺少作品身份时保留 uncertain，不点击卡片导航或重新发送', async () => {
+  const f = await fixture({ shareResult: [{ ...card, media: { type: 'shared-work' } }] });
+  try {
+    const result = await f.forwarder.forwardAutonomous({ recipientId, expectedVideoId: '12345' }, { authorize: autonomousAuthorization() });
+    assert.equal(result.confirmed, false); assert.equal(result.deliveryUncertain, true); assert.equal(result.failure.stage, 'receipt');
+    assert.equal(await f.page.evaluate(() => window.sent), 1); assert.equal(f.stats().opened, 0);
+    assert.equal(f.forwarder.receipts().operations.at(-1).status, 'uncertain');
+    await assert.rejects(f.forwarder.forwardAutonomous({ recipientId, expectedVideoId: '12345' }, { authorize: autonomousAuthorization() }), /未确认/);
+    assert.equal(await f.page.evaluate(() => window.sent), 1);
+  } finally { await f.cleanup(); }
+});
+
+test('可信点击后的缺页或前台错误属于回执不确定，不生成零发送恢复证明', async () => {
+  for (const code of ['CHAT_PAGE_NOT_OPEN', 'CHAT_FOREGROUND']) {
+    const f = await fixture();
+    try {
+      const read = f.forwarder.chatBrowser.readConversation; let reads = 0;
+      f.forwarder.chatBrowser.readConversation = async (...args) => { if (++reads > 1) throw Object.assign(new Error('合成发送后消息页不可用'), { code }); return read(...args); };
+      const result = await f.forwarder.forwardAutonomous({ recipientId, expectedVideoId: '12345' }, { authorize: autonomousAuthorization() });
+      assert.equal(result.confirmed, false); assert.equal(result.deliveryUncertain, true); assert.equal(result.preflight, undefined);
+      assert.equal(result.failure.code, code); assert.equal(result.failure.stage, 'receipt'); assert.equal(await f.page.evaluate(() => window.sent), 1);
+      const record = f.forwarder.receipts().operations.at(-1); assert.equal(record.status, 'uncertain'); assert.equal(record.sendClicks, 1); assert.equal(record.preflight, undefined);
+    } finally { await f.cleanup(); }
+  }
 });
 
 test('作品链接只保留公开作品路径，拒绝其他站点及链接和 ID 不一致', async () => {
@@ -386,8 +509,11 @@ test('超过50个完整稳定许可仍可选择，重复或不完整许可名单
   const f = await fixture();
   try {
     const many = [contact, ...Array.from({ length: 60 }, (_, index) => ({ ...contact, ...stable(`合成其他账号${index}`) }))].map(item => ({ ...item, verifiedAt: '2026-10-14T00:00:00Z' }));
-    fs.writeFileSync(f.forwarder.policyFile, JSON.stringify({ allowlist: many }));
+    fs.writeFileSync(f.forwarder.policyFile, JSON.stringify({ allowlist: many })); assert.equal(f.forwarder.policyContact(recipientId).id, recipientId);
+    const manualGroup = { id: `conv:${'c'.repeat(64)}`, name: '合成人工群', isGroup: true, identityVerified: false, authorizationKind: 'manual', verifiedAt: '2026-10-14T00:00:00Z', relationshipStatus: 'unavailable' };
+    fs.writeFileSync(f.forwarder.policyFile, JSON.stringify({ allowlist: [{ ...contact, verifiedAt: '2026-10-14T00:00:00Z' }, manualGroup] }));
     assert.equal(f.forwarder.policyContact(recipientId).id, recipientId);
+    assert.throws(() => f.forwarder.policyContact(manualGroup.id), error => error.code === 'FORWARD_IDENTITY_REQUIRED');
     fs.writeFileSync(f.forwarder.policyFile, JSON.stringify({ allowlist: [...many, many[0]] })); assert.throws(() => f.forwarder.policyContact(recipientId), /名单/);
     delete many[1].identityHash; fs.writeFileSync(f.forwarder.policyFile, JSON.stringify({ allowlist: many })); assert.throws(() => f.forwarder.policyContact(recipientId), /名单/);
   } finally { await f.cleanup(); }
@@ -397,4 +523,73 @@ test('分享失败诊断保留阶段原因并隐藏凭据、平台原标识和�
   const failure = safeForwardFailure({ code: 'FORWARD_SYNTHETIC_FAILURE', stage: 'recipient', message: `合成原因 token=private-token Cookie=private-cookie Bearer private-bearer sk-private-key https://example.invalid/private C:\\private\\key.txt MS4PrivateAccount ${'a'.repeat(64)} 1234567890123456\n后续内容不保留` });
   assert.equal(failure.code, 'FORWARD_SYNTHETIC_FAILURE'); assert.equal(failure.stage, 'recipient'); assert.match(failure.message, /合成原因/);
   for (const secret of ['private-token', 'private-cookie', 'private-bearer', 'sk-private-key', 'example.invalid', 'key.txt', 'MS4PrivateAccount', 'a'.repeat(64), '1234567890123456', '后续内容']) assert.equal(failure.message.includes(secret), false, secret);
+});
+
+
+import {readConversationDom as readNativeItemConversationDom} from '../chat-browser.mjs';
+
+test('原生itemId收据补测：真实读取合成DOM无href卡片，经稳定消息跟踪后确认新收据',async()=>{
+  const f=await fixture(),chatPage=await browser.newPage(),reader=new ChatBrowser({voiceCaptureDir:f.stateDir,controller:{withPage:async action=>action(chatPage),close:async()=>{}}});
+  try{
+    await chatPage.route('**/*',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html><body></body></html>'}));await chatPage.goto('https://www.douyin.com/');
+    await chatPage.evaluate(()=>{
+      document.body.insertAdjacentHTML('beforeend','<div data-e2e="im-dialog"><div data-e2e="chat-page"><div data-e2e="chat-header" data-conversation-id="fixture-person" data-conversation-type="direct" style="height:35px"><span data-e2e="chat-title">合成好友甲</span></div><div data-e2e="message-list" style="display:flex;flex-direction:column-reverse"><div data-index="0"><div data-e2e="message-row" data-message-id="7111111111111111111" data-direction="incoming"><div data-e2e="msg-item-content"><span data-e2e="message-text">合成旧消息</span></div></div></div></div></div></div>');
+    });
+    f.forwarder.chatBrowser.readConversation=async(id,options)=>{
+      assert.equal(id,recipientId);assert.equal(options.allowed,true);
+      await chatPage.evaluate(sent=>{
+        if(!sent||window.nativeReceiptMounted)return;
+        window.nativeReceiptMounted=true;const list=document.querySelector('[data-e2e="message-list"]');list.firstElementChild.dataset.index='1';
+        const wrapper=document.createElement('div');wrapper.dataset.index='0';wrapper.innerHTML='<div data-e2e="message-row" data-direction="outgoing"><div data-e2e="msg-item-content"><div class="MessageItemShareAwemecontainer"><span data-e2e="shared-video-title">合成原生分享</span></div></div></div>';
+        const node=wrapper.querySelector('[data-e2e="msg-item-content"]'),prototype=Object.create(null);Object.defineProperties(prototype,{conversationId:{value:'fixture-person'},serverId:{value:'7222222222222222222'},createdAt:{value:new Date()}});
+        const message=Object.create(prototype);Object.defineProperty(message,'_parsedContent',{value:{itemId:'12345'}});Object.defineProperty(node,'__reactProps$nativeReceipt',{value:{children:[{props:{message}}]}});list.prepend(wrapper);
+      },await f.page.evaluate(()=>window.sent));
+      const raw=await chatPage.evaluate(readNativeItemConversationDom);return{conversation:{id:recipientId},messages:reader.publicMessages(recipientId,raw.messages)};
+    };
+    const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,true,JSON.stringify(result));assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(f.stats().opened,0);assert.equal(f.forwarder.receipts().operations.at(-1).status,'confirmed');
+  }finally{await chatPage.close();await f.cleanup();}
+});
+
+test('原生itemId收据补测：已由绑定消息读取的native作品身份可匹配新发卡片一次',async()=>{
+  const f=await fixture({shareResult:[{...card,media:{type:'shared-work',videoId:'12345',url:'https://www.douyin.com/video/12345',publicUrlSource:'rendered-message-item-id',identityConflict:false}}]});
+  try{const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,true);assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(f.stats().opened,0);assert.equal(f.forwarder.receipts().operations.at(-1).status,'confirmed');}finally{await f.cleanup();}
+});
+for(const human of [false,true])test(`原生itemId收据补测：${human?'本人':'自主'}分享遇DOM/native冲突均uncertain，不点击卡片补证`,async()=>{
+  const cases=[{videoId:'12345',url:'https://www.douyin.com/video/99999'},{videoId:'12345',url:'https://www.douyin.com/video/12345',identityConflict:true},{videoId:'12345',url:'https://fixture:credential@www.douyin.com/video/12345'},{videoId:'12345',url:'https://untrusted.invalid/video/12345'},{videoId:'1'.repeat(65)}];
+  for(const media of cases){const f=await fixture({shareResult:[{...card,media:{type:'shared-work',...media}}]});try{const result=human?await f.forwarder.forward({recipientId,expectedVideoId:'12345'},{humanAuthorized:true}):await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,false);assert.equal(result.deliveryUncertain,true);assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(f.stats().opened,0);assert.equal(f.forwarder.receipts().operations.at(-1).status,'uncertain');}finally{await f.cleanup();}}
+});
+test('原生itemId收据补测：旧卡片、其他作品、pending和failed仍不是本次新发确认',async()=>{
+  for(const change of ['old-id','other-video','pending','failed']){const next={...card,media:{type:'shared-work',videoId:'12345',url:'https://www.douyin.com/video/12345',publicUrlSource:'rendered-message-item-id'},...(change==='pending'?{pending:true}:change==='failed'?{failed:true}:{})};if(change==='other-video')next.media={...next.media,videoId:'99999',url:'https://www.douyin.com/video/99999'};const f=await fixture({existing:change==='old-id'?[next]:[],shareResult:[next]});try{const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,false);assert.equal(result.deliveryUncertain,true);assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(f.stats().opened,0);}finally{await f.cleanup();}}
+});
+test('原生itemId收据补测：已结案resolved-confirmed字段不能代替本次平台新卡片',async()=>{
+  const old={...card,arrivalClassification:'known-old-window',resolvedStatus:'resolved-confirmed',media:{type:'shared-work',videoId:'12345',url:'https://www.douyin.com/video/12345',publicUrlSource:'rendered-message-item-id'}};
+  const f=await fixture({existing:[old],shareResult:[old]});try{const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,false);assert.equal(result.deliveryUncertain,true);assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(f.stats().opened,0);}finally{await f.cleanup();}
+});
+
+import {checkReceiptBaseline as checkShareBaseline,matchShareReceiptBaseline as matchSavedShareBaseline} from '../receipt-baseline.mjs';
+function installShareBaselineFault(file,mode){
+  const originals={openSync:fs.openSync,writeFileSync:fs.writeFileSync,fsyncSync:fs.fsyncSync,renameSync:fs.renameSync},descriptors=new Set();
+  fs.openSync=(target,...args)=>{const descriptor=originals.openSync(target,...args);if(typeof target==='string'&&target.startsWith(file+'.'))descriptors.add(descriptor);return descriptor;};
+  fs.writeFileSync=(target,...args)=>{if(mode==='write'&&descriptors.has(target))throw Object.assign(Error('合成分享基线写失败'),{code:'EIO'});return originals.writeFileSync(target,...args);};
+  fs.fsyncSync=descriptor=>{if(mode==='fsync'&&descriptors.has(descriptor))throw Object.assign(Error('合成分享基线刷盘失败'),{code:'EIO'});return originals.fsyncSync(descriptor);};
+  fs.renameSync=(from,to)=>{if(mode==='rename'&&to===file)throw Object.assign(Error('合成分享基线原子换入失败'),{code:'EIO'});return originals.renameSync(from,to);};return()=>Object.assign(fs,originals);
+}
+test('持久基线分享：本人未知不阻断本次在线确认，但未来跨重启匹配明确不可用',async()=>{
+  const old={...card,id:'msg:'+'c'.repeat(64)},f=await fixture({existing:[old]});try{const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,true);assert.equal(await f.page.evaluate(()=>window.sent),1);const row=f.forwarder.receipts().operations.at(-1);assert.equal(checkShareBaseline(row,'native-card').available,true);assert.equal(row.baseline.recheckable,false);assert.equal(row.baseline.reasonCode,'self-identity-unavailable');assert.deepEqual(row.baseline.knownIds,[old.id]);assert.equal(matchSavedShareBaseline({...row,status:'uncertain'},{ownProfileId:'synthetic-self-profile',contact,snapshots:[]}).available,false);}finally{await f.cleanup();}
+});
+test('持久基线分享：有本人身份时紧邻点击复核，点击前收据已包含稳定会话与旧ID',async()=>{
+  const old={...card,id:'msg:'+'c'.repeat(64)},f=await fixture({existing:[old]});try{
+    await f.page.evaluate(()=>document.body.insertAdjacentHTML('beforeend','<div class="tab-user_self"><a href="/user/synthetic-self-profile">我的</a></div>'));let checked=0;const click=f.page.mouse.click.bind(f.page.mouse);
+    f.page.mouse.click=async(...args)=>{if(fs.existsSync(f.forwarder.receiptsFile)){const row=f.forwarder.receipts().operations.at(-1);assert.equal(row.status,'clicking');assert.equal(checkShareBaseline(row,'native-card').available,true);assert.equal(row.baseline.ownProfileHash,hash('synthetic-self-profile'));assert.equal(JSON.stringify(row.baseline).includes('synthetic-self-profile'),false);assert.equal(row.baseline.recheckable,true);assert.equal(row.baseline.contact.identityBinding,contact.identityBinding);assert.deepEqual(row.baseline.knownIds,[old.id]);checked++;}return click(...args);};
+    const result=await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()});assert.equal(result.confirmed,true);assert.equal(checked,1);assert.equal(await f.page.evaluate(()=>window.sent),1);assert.equal(checkShareBaseline(f.forwarder.receipts().operations.at(-1),'native-card').available,true);
+  }finally{await f.cleanup();}
+});
+test('持久基线分享：已核实本人在最终许可间变化时零发送，未知本人兼容不被误作已核实',async()=>{
+  const f=await fixture();try{await f.page.evaluate(()=>document.body.insertAdjacentHTML('beforeend','<div class="tab-user_self"><a href="/user/synthetic-self-profile">我的</a></div>'));const authorize=async({phase})=>{if(phase==='before-click')await f.page.locator('.tab-user_self a').evaluate(anchor=>anchor.href='/user/another-self-profile');return true;};authorize.beginDispatch=()=>()=>{};await assert.rejects(f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize}),/本人身份/);assert.equal(await f.page.evaluate(()=>window.sent),0);assert.equal(f.forwarder.receipts().operations.at(-1).status,'not-sent');}finally{await f.cleanup();}
+});
+test('持久基线分享：写入、刷盘、换入失败均零发送点击，旧收据字节不变',async()=>{
+  for(const mode of ['write','fsync','rename']){const f=await fixture();try{const legacy={version:1,operations:[{operationId:'legacy-share',recipientId,videoId:'88888',status:'uncertain'}]};fs.writeFileSync(f.forwarder.receiptsFile,JSON.stringify(legacy));const before=fs.readFileSync(f.forwarder.receiptsFile),restore=installShareBaselineFault(f.forwarder.receiptsFile,mode);try{await assert.rejects(f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization()}),/失败/);}finally{restore();}assert.equal(await f.page.evaluate(()=>window.sent),0,mode);assert.deepEqual(fs.readFileSync(f.forwarder.receiptsFile),before,mode);assert.equal(fs.readdirSync(f.stateDir).some(name=>name.endsWith('.tmp')),false,mode);}finally{await f.cleanup();}}
+});
+test('持久基线分享：收据刷盘期间取消后不迟发，保留基线而不再次输入',async()=>{
+  const f=await fixture(),abort=new AbortController();try{const record=f.forwarder.record.bind(f.forwarder);f.forwarder.record=operation=>{record(operation);if(operation.status==='clicking'&&operation.baseline)abort.abort(new Error('合成刷盘期间取消'));};let rejected;try{await f.forwarder.forwardAutonomous({recipientId,expectedVideoId:'12345'},{authorize:autonomousAuthorization(),signal:abort.signal});}catch(error){rejected=error;}assert.equal(await f.page.evaluate(()=>window.sent),0);assert.match(rejected?.message||'',/取消/);const row=f.forwarder.receipts().operations.at(-1);assert.equal(row.status,'not-sent');assert.equal(checkShareBaseline(row,'native-card').available,true);}finally{await f.cleanup();}
 });

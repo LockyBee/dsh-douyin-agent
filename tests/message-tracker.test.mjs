@@ -203,3 +203,70 @@ test('legacy无法核实序号及非文字无媒体的消息不误判，重复�
   const media = tracker.identify('兼容未知媒体', [absolute(0, '', { kind: 'video' }), absolute(1, '', { kind: 'emoji' })]); assert.equal(media.every(row => row.unsupported), true);
   assert.throws(() => tracker.identify('兼容重复身份', [absolute(0, '你好'), absolute(0, '你好')]), /身份重复/);
 });
+
+
+test('首次非空窗口未核实后，同一完整窗口连续核实两次只建新基线，其后新尾才合格', () => {
+  for (const flag of [false, undefined]) {
+    const tracker = new MessageIdentityTracker(), key = `恢复最新端-${flag}`;
+    const window = latest => [relative(0, '旧锚点甲', { latestEndVerified: latest }), relative(1, '大肥鱼既有待核对消息', { latestEndVerified: latest })];
+    const initial = tracker.identify(key, window(flag)); noneEligible(initial); assert.equal(tracker.latestWindows.has(key), false);
+    const firstVerified = tracker.identify(key, window(true)); noneEligible(firstVerified); assert.equal(tracker.latestWindows.has(key), false);
+    const secondVerified = tracker.identify(key, window(true)); noneEligible(secondVerified); assert.equal(tracker.latestWindows.has(key), true);
+    assert.deepEqual(ids(secondVerified), ids(initial));
+    const after = tracker.identify(key, [...window(true), relative(2, '大肥鱼这条才是真正新消息')]);
+    assert.deepEqual(ids(after.slice(0, 2)), ids(initial)); assert.equal(after.at(-1).arrivalClassification, 'new-tail'); assert.equal(after.at(-1).eligibleForReply, true);
+    noneEligible(tracker.identify(key, [...window(true), relative(2, '大肥鱼这条才是真正新消息')]));
+  }
+});
+
+test('重新核实过程中前插历史、重排或换窗不能给当前内容回复资格或种锚', () => {
+  for (const mode of ['prefix', 'reorder', 'stranger', 'changed-content', 'changed-native-content', 'unknown', 'direction-conflict', 'order-changed']) {
+    const tracker = new MessageIdentityTracker(), key = `恢复拒绝-${mode}`;
+    const initial = [relative(0, '原甲', { latestEndVerified: false }), relative(1, '原乙', { latestEndVerified: false })];
+    if (mode === 'changed-native-content') { initial[0].nativeId = 'stable-native-a'; initial[1].nativeId = 'stable-native-b'; }
+    tracker.identify(key, initial);
+    const verified = initial.map(item => ({ ...item, latestEndVerified: true }));
+    let altered = verified.map(item => ({ ...item }));
+    if (mode === 'prefix') altered = [relative(0, '补载旧历史'), ...altered.map((item, index) => ({ ...item, order: index + 1 }))];
+    if (mode === 'reorder') altered = altered.reverse().map((item, order) => ({ ...item, order }));
+    if (mode === 'stranger') altered = [relative(0, '陌生甲'), relative(1, '陌生乙')];
+    if (mode === 'changed-content' || mode === 'changed-native-content') altered[1].text = '旧内容已经变化';
+    if (mode === 'unknown') altered[1].sender = altered[1].direction = 'unknown';
+    if (mode === 'direction-conflict') altered[1].direction = 'outgoing';
+    if (mode === 'order-changed') altered = altered.map(item => ({ ...item, order: item.order + 4 }));
+    for (let i = 0; i < 4; i++) { noneEligible(tracker.identify(key, altered)); assert.equal(tracker.latestWindows.has(key), false, mode); }
+    noneEligible(tracker.identify(key, verified)); assert.equal(tracker.latestWindows.has(key), false);
+    noneEligible(tracker.identify(key, verified)); assert.equal(tracker.latestWindows.has(key), true);
+  }
+});
+
+test('最新端重新变为未知或临时空窗会打断连续核实计数', () => {
+  for (const interruption of ['unknown', 'empty']) {
+    const tracker = new MessageIdentityTracker(), key = '恢复中断-' + interruption;
+    tracker.identify(key, [relative(0, '原消息', { latestEndVerified: false })]);
+    noneEligible(tracker.identify(key, [relative(0, '原消息')])); assert.equal(tracker.latestWindows.has(key), false);
+    noneEligible(tracker.identify(key, interruption === 'empty' ? [] : [relative(0, '原消息', { latestEndVerified: false })]));
+    noneEligible(tracker.identify(key, [relative(0, '原消息')])); assert.equal(tracker.latestWindows.has(key), false);
+    noneEligible(tracker.identify(key, [relative(0, '原消息')])); assert.equal(tracker.latestWindows.has(key), true);
+  }
+});
+
+test('初始空基线后的首个未核实非空窗口也只可重新建立基线', () => {
+  const tracker = new MessageIdentityTracker(), key = '空基线恢复'; tracker.identify(key, []);
+  noneEligible(tracker.identify(key, [relative(0, '首条位置未知', { latestEndVerified: false })]));
+  noneEligible(tracker.identify(key, [relative(0, '首条位置未知')])); assert.equal(tracker.latestWindows.has(key), false);
+  noneEligible(tracker.identify(key, [relative(0, '首条位置未知')])); assert.equal(tracker.latestWindows.has(key), true);
+  assert.equal(tracker.identify(key, [relative(0, '首条位置未知'), relative(1, '核实完成后的新消息')]).at(-1).eligibleForReply, true);
+});
+
+test('已有可信最新锚、模式变化和不可靠定位不能借恢复支路升级', () => {
+  const trusted = new MessageIdentityTracker(), key = '不覆盖可信锚'; trusted.identify(key, [relative(0, '可信甲'), relative(1, '可信乙')]);
+  const before = ids(trusted.latestWindows.get(key));
+  for (let i = 0; i < 4; i++) noneEligible(trusted.identify(key, [relative(0, '陌生历史甲'), relative(1, '陌生历史乙')]));
+  assert.deepEqual(ids(trusted.latestWindows.get(key)), before);
+  const noOrder = new MessageIdentityTracker();
+  for (const latest of [false, true, true, true]) { noneEligible(noOrder.identify('无定位', [{ sender: 'incoming', direction: 'incoming', kind: 'text', text: '无法定位', orderMode: 'relative', latestEndVerified: latest }])); assert.equal(noOrder.latestWindows.has('无定位'), false); }
+  const mode = new MessageIdentityTracker(); mode.identify('模式隔离', [relative(0, '旧消息', { latestEndVerified: false })]); mode.identify('模式隔离', [relative(0, '旧消息')]); mode.identify('模式隔离', [absolute(0, '绝对消息')]);
+  const changed = mode.identify('模式隔离', [relative(0, '新相对基线', { latestEndVerified: false })]); noneEligible(changed); assert.equal(mode.latestWindows.has('模式隔离'), false);
+  noneEligible(mode.identify('模式隔离', [relative(0, '新相对基线')])); assert.equal(mode.latestWindows.has('模式隔离'), false);
+});

@@ -192,8 +192,8 @@ function atomic(file, value, { createOnly = false, expected } = {}) {
       if (expected !== undefined && read(file, MAX_CARD_BYTES, true) !== expected) throw error('PERSONA_REVISION_CONFLICT', '人格卡在替换前被手工修改，已保留该文件。');
       try { fs.renameSync(temporary, file); break; }
       catch (failure) {
-        if (!['EPERM', 'EACCES', 'EBUSY'].includes(failure.code) || attempt >= 11) throw failure;
-        // Windows 扫描器可能短暂占用新卡；累计等待最多 900 毫秒，每次仍复查手编正文。
+        if (!['EPERM', 'EACCES', 'EBUSY'].includes(failure.code) || attempt >= 24) throw failure;
+        // Windows 可能占用文件超过一秒；累计等待最多 2.2 秒，每次仍复查手编正文。
         Atomics.wait(WAIT, 0, 0, Math.min(100, (attempt + 1) * 20));
       }
     }

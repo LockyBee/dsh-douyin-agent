@@ -124,3 +124,35 @@ test('符号链接和跨入口生成锁不被跟随或自动清除', t => {
   assert.throws(() => f.report.generate(), error => error.code === 'DAILY_REPORT_PATH');
   assert.equal(fs.existsSync(path.join(destination, 'secret.md')), false);
 });
+
+test('日报正文按重点作品、其他作品和明细分层，重点最多三条', t => {
+  const f = fixture(t), ids = ['100001', '100002', '100003', '100004', '100005'];
+  const evidence = ids.map(id => observed(f, id, { title: `合成作品${id}` }));
+  action(f, evidence[0], 'share', 'share-featured');
+  viewing(f, evidence[1], 0, 10, 'view-second'); action(f, evidence[1], 'stay', 'stay-second');
+  viewing(f, evidence[2], 0, 5, 'view-third'); action(f, evidence[2], 'stay', 'stay-third');
+  viewing(f, evidence[3], 0, 1, 'view-fourth'); action(f, evidence[3], 'skip', 'skip-fourth');
+  const report = f.report.generate(), body = report.markdown;
+  assert.match(body, /## 今天的重点作品/);
+  assert.match(body, /## 其他作品/);
+  assert.match(body, /## 全部作品明细/);
+  assert.ok(body.indexOf('## 今天的重点作品') < body.indexOf('## 全部作品明细'));
+  const featured = body.slice(body.indexOf('## 今天的重点作品'), body.indexOf('## 其他作品'));
+  assert.equal((featured.match(/^### /gm) || []).length, 3);
+  assert.match(featured, /合成作品100001/); assert.match(featured, /合成作品100002/); assert.match(featured, /合成作品100003/);
+  assert.doesNotMatch(featured, /合成作品100004/); assert.doesNotMatch(featured, /合成作品100005/);
+  const others = body.slice(body.indexOf('## 其他作品'), body.indexOf('## 题材倾向'));
+  assert.match(others, /合成作品100004/); assert.match(others, /合成作品100005/);
+  assert.equal((others.match(/^- /gm) || []).length, 2);
+  assert.match(report.markdown, /全部作品明细[\s\S]*合成作品100001/);
+});
+
+test('没有留存证据时给出空状态，不编造观看时长', t => {
+  const f = fixture(t), report = f.report.generate();
+  assert.equal(report.observedCount, 0); assert.equal(report.verifiedProgressSeconds, 0);
+  assert.match(report.markdown, /今天没有留下可核对的作品记录/);
+  assert.match(report.markdown, /今天没有可作为重点展示的作品/);
+  assert.match(report.markdown, /本日暂无留存作品/);
+  assert.match(report.markdown, /无法据此判断是否实际刷过视频/);
+  assert.doesNotMatch(report.markdown, /观看 \d+\/\d+ 秒/);
+});

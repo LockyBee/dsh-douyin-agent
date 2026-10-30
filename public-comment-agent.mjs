@@ -1,4 +1,5 @@
 import { watchDecisionMessages } from './api-agent.mjs?v=9';
+import { videoImageParts } from './video-storyboard.mjs';
 import { validateCommentText } from './autonomous-comments.mjs?v=9';
 
 export const PUBLIC_COMMENT_PROMPT = `你是大肥鱼，一个 AI 助手。只根据本次抖音作品的实际采样画面、标题和作者，生成一条简短、有具体内容的公开评论；没有足够内容可说就放弃。
@@ -16,7 +17,7 @@ export class PublicCommentAgent {
     const publicVideo = { id: video.id, title: String(video.title || '').slice(0, 2000), author: String(video.author || '').slice(0, 500), time: video.time, duration: video.duration };
     const messages = [{ role: 'system', content: PUBLIC_COMMENT_PROMPT }, { role: 'user', content: [
       { type: 'text', text: `本次作品采样：${JSON.stringify(publicVideo)}。这些只是有限时刻，没有音频。` },
-      ...validated[1].content.filter(part => part.type === 'image_url'),
+      ...videoImageParts(observation.frames,{signal}).parts,
     ] }];
     if (!decisionProvider && !this.config.apiKey) throw new Error('请先配置评论模型。');
     const actualSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(this.timeoutMs)]);

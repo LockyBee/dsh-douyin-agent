@@ -129,13 +129,57 @@ function summarize(source, date, now) {
 }
 function render(date, summary) {
   const { counts, rows, topics } = summary;
-  const lines = [`# 大肥鱼刷视频日报 · ${date}`, '', '按上海时区汇总共用抖音记忆中的实际作品观察和宿主确认行为。仅供本机查看，不包含人格正文、QQ、私信或联系人资料。', '', `记录涉及 ${counts.observedCount} 条作品，当日新增观察 ${counts.observationCount} 条，可核采样进度 ${counts.verifiedProgressSeconds} 秒；确认停留 ${counts.actions.stay} 次、跳过 ${counts.actions.skip} 次、分享 ${counts.actions.share} 次。`, '', '## 作品及行为证据', '', '| 作品 | 作者 | 当日观察 | 可核采样进度 | 已确认行为 | 当日依据 |', '| --- | --- | ---: | ---: | --- | --- |'];
-  for (const row of rows) lines.push(`| ${markdown(row.title || '无文案作品')} · [${row.videoId}](${row.url}) | ${markdown(row.author || '未登记作者')} | ${row.observations} | ${row.seconds} 秒 | 停留 ${row.actions.stay} / 跳过 ${row.actions.skip} / 分享 ${row.actions.share} | ${{ like: '有正向行为依据', dislike: '有快划依据', neutral: '证据不足，待观察' }[row.signal]} |`);
-  if (!rows.length) lines.push('| 本日暂无留存作品证据 | — | 0 | 0 秒 | — | 无法据此判断是否实际刷过视频 |');
-  lines.push('', '## 当日证据支持的题材倾向', '', '以下按当日作品行为重新计数，不代表今天新产生的兴趣，也不把历史累计喜好算作今天的变化。');
+  const signalText = { like: '有正向行为依据', dislike: '有快划依据', neutral: '证据不足，待观察' };
+  const progressText = row => row.seconds > 0 ? `观看 ${row.seconds}/${row.duration} 秒` : '暂无可核进度';
+  const behaviorText = row => `停留 ${row.actions.stay} / 跳过 ${row.actions.skip} / 分享 ${row.actions.share}`;
+  const featured = [...rows].sort((left, right) =>
+    right.actions.share - left.actions.share
+    || right.actions.stay - left.actions.stay
+    || right.seconds - left.seconds
+    || left.videoId.localeCompare(right.videoId)
+  ).slice(0, 3);
+  const featuredIds = new Set(featured.map(row => row.videoId));
+  const others = rows.filter(row => !featuredIds.has(row.videoId));
+  const lines = [
+    `# 大肥鱼刷视频日报 · ${date}`,
+    '',
+    '按上海时区汇总共用抖音记忆中的实际作品观察和宿主确认行为。仅供本机查看，不包含人格正文、QQ、私信或联系人资料。',
+    '',
+    rows.length
+      ? `今天留下 ${counts.observedCount} 条作品记录、${counts.observationCount} 次新观察，可核进度 ${counts.verifiedProgressSeconds} 秒；确认停留 ${counts.actions.stay} 次、跳过 ${counts.actions.skip} 次、分享 ${counts.actions.share} 次。`
+      : '今天没有留下可核对的作品记录；下方不会用空数据推断观看时长或兴趣。',
+    '',
+    '## 今天的重点作品',
+    '',
+  ];
+  if (!featured.length) lines.push('今天没有可作为重点展示的作品。', '');
+  else {
+    for (const row of featured) lines.push(
+      `### ${markdown(row.title || '无文案作品')}`,
+      '',
+      `${markdown(row.author || '未登记作者')} · ${progressText(row)} · ${behaviorText(row)}`,
+      '',
+      `当日依据：${signalText[row.signal]}。`,
+      '',
+      `[打开作品](${row.url})`,
+      ''
+    );
+  }
+  lines.push('## 其他作品', '');
+  if (!others.length) lines.push(featured.length ? '今天没有更多留存作品。' : '本日暂无留存作品。', '');
+  else {
+    for (const row of others.slice(0, 5)) lines.push(`- ${markdown(row.title || '无文案作品')} · ${markdown(row.author || '未登记作者')} · ${progressText(row)} · ${behaviorText(row)} · [打开作品](${row.url})`);
+    if (others.length > 5) lines.push(`- 其余 ${others.length - 5} 条作品见下方明细。`);
+    lines.push('');
+  }
+  lines.push('## 题材倾向', '', '以下按当日作品行为重新计数，不代表今天新产生的兴趣，也不把历史累计喜好算作今天的变化。', '');
   for (const topic of topics) lines.push(`- ${markdown(topic.topic)}：${topic.counts.like} 条作品有正向依据、${topic.counts.dislike} 条有快划依据、${topic.counts.neutral} 条待观察；涉及作品 ${topic.videoIds.map(id => `[${id}](https://www.douyin.com/video/${id})`).join('、')}。`);
   if (!topics.length) lines.push('- 本日没有可关联题材的留存证据，未推断偏好变化。');
-  lines.push('', '## 记录覆盖范围', '', '- 只汇总共用记忆已留存的记录，不代表当天全部浏览。观察会去重，重复浏览可能没有新的观察时间戳。', '- 采样进度来自同作品、可播放状态的真实进度与墙钟间隔；暂停、倒退、明显拖动不计，同作品重叠区间在本日不重复累计。这不是全天观看总时长。', '- 按记录结束时间归入上海日期，没有把跨午夜采样推算分拆；未留存的时段不补记。', '- 当日停留、快划和确认分享只支持代理自己的题材倾向，不表示用户喜好。画面采样不表示完整观看或听懂音频。', '- 作品链接沿用已登记的规范抖音地址；只核对了本机账号可见，未验证当前仍可播放或对外可见范围。');
+  if (summary.interactions) lines.push('', '## 今日互动', '', `- 私信回复成功 ${summary.interactions.replies} 条。`, `- 作品分享 ${summary.interactions.shares} 次（确认 ${summary.interactions.confirmed} 次、未确认 ${summary.interactions.uncertain} 次）。`, '- 这里只统计数量，不读取私信或评论正文。公开评论的发布记录暂未纳入这一节。');
+  lines.push('', '## 全部作品明细', '', '| 作品 | 作者 | 当日观察 | 可核采样进度 | 已确认行为 | 当日依据 |', '| --- | --- | ---: | ---: | --- | --- |');
+  for (const row of rows) lines.push(`| ${markdown(row.title || '无文案作品')} · [${row.videoId}](${row.url}) | ${markdown(row.author || '未登记作者')} | ${row.observations} | ${row.seconds} 秒 | 停留 ${row.actions.stay} / 跳过 ${row.actions.skip} / 分享 ${row.actions.share} | ${signalText[row.signal]} |`);
+  if (!rows.length) lines.push('| 本日暂无留存作品证据 | — | 0 | 0 秒 | — | 无法据此判断是否实际刷过视频 |');
+  lines.push('', '## 记录覆盖范围', '', '- 只汇总已留存的记录，不代表当天全部浏览；观察会去重，重复浏览可能没有新的观察时间戳。按记录结束时间归入上海日期，未留存的时段不补记。', '- 采样进度来自同作品、可播放状态的真实进度与墙钟间隔；暂停、倒退、明显拖动不计，同作品重叠区间在本日不重复累计。这不是全天观看总时长。', '- 当日停留、快划和确认分享只支持代理自己的题材倾向，不表示用户喜好，也不代表今天新产生的兴趣；画面采样不表示完整观看或听懂音频。作品链接只核对本机账号可见，未验证当前仍可播放或对外可见范围。');
   if (!summary.sourceAvailable) lines.push('- 共用作品证据文件尚未建立；本报告没有以空记录冒充完成观看。');
   return lines.join('\n') + '\n';
 }
@@ -152,10 +196,32 @@ function managed(raw, expectedDate) {
 }
 
 export class DailyReport {
-  constructor({ personaMemory, now = Date.now } = {}) {
+  constructor({ personaMemory, now = Date.now, stateDir = null } = {}) {
     if (!personaMemory || typeof personaMemory.personaFolder !== 'string' || !path.isAbsolute(personaMemory.personaFolder) || typeof personaMemory.stateFile !== 'string' || !path.isAbsolute(personaMemory.stateFile) || path.dirname(path.normalize(personaMemory.stateFile)) !== path.normalize(personaMemory.personaFolder) || typeof now !== 'function') throw new TypeError('日报需要共享人格中的独立作品证据路径。');
-    this.personaFolder = path.normalize(personaMemory.personaFolder); this.stateFile = path.normalize(personaMemory.stateFile); this.now = now;
+    this.personaFolder = path.normalize(personaMemory.personaFolder); this.stateFile = path.normalize(personaMemory.stateFile); this.now = now; this.stateDir = stateDir ? path.normalize(stateDir) : null;
     this.folder = path.join(path.dirname(this.personaFolder), 'reports', 'videos'); this.guardFile = path.join(this.folder, '.daily-report.guard');
+  }
+  interactions(date) {
+    if (!this.stateDir) return null;
+    let replies = 0;
+    try {
+      const file = path.join(this.stateDir, 'chat-events.jsonl');
+      if (fs.existsSync(file)) for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+        if (!line.includes('"type":"reply.sent"')) continue;
+        try { const event = JSON.parse(line); if (event?.type === 'reply.sent' && event.at && day(event.at) === date) replies += 1; } catch {}
+      }
+    } catch {}
+    let shares = 0, confirmed = 0, uncertain = 0;
+    try {
+      const ledger = JSON.parse(fs.readFileSync(path.join(this.stateDir, 'share-ledger.json'), 'utf8'));
+      for (const item of Array.isArray(ledger?.operations) ? ledger.operations : []) {
+        if (item?.day !== date) continue;
+        shares += 1;
+        if (['confirmed', 'resolved-confirmed'].includes(item.status)) confirmed += 1;
+        if (['uncertain', 'reserved', 'clicking'].includes(item.status)) uncertain += 1;
+      }
+    } catch {}
+    return { replies, shares, confirmed, uncertain };
   }
   date(value) { return validateDate(value === undefined ? day(this.now()) : value); }
   file(date) { return path.join(this.folder, `${this.date(date)}.md`); }
@@ -189,6 +255,7 @@ export class DailyReport {
     try {
       const source = parseSource(readFile(this.stateFile, MAX_SOURCE, true));
       const summary = summarize(source, selected, this.now());
+      summary.interactions = this.interactions(selected);
       const file = this.file(selected), original = readFile(file, MAX_REPORT, true), previous = managed(original, selected);
       if (previous?.metadata.sourceDigest === summary.sourceDigest) return this.result(selected, original, previous, false);
       const body = render(selected, summary), unsigned = { version: 1, date: selected, timeZone: 'Asia/Shanghai', generatedAt: new Date(this.now()).toISOString(), reason, sourceDigest: summary.sourceDigest, bodySha256: hash(body), ...summary.counts, coverage: 'stored-video-evidence-only' }, metadata = { ...unsigned, metadataSha256: hash(JSON.stringify(unsigned)) };

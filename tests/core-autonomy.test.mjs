@@ -183,7 +183,7 @@ test('无有效视频轮次时仍只读返回共享自主状态，不触浏览�
   const records = {
     'watch-loop.lock': { version: 1, pid: process.pid, runId, sessionId, source: 'dsh', status: 'running' },
     'watch-budget.json': { version: 1, sessions: { [sessionId]: { requests: 7, maxRequests: 9 } }, days: { [date]: 7 } },
-    'watch-state.json': { status: 'running', sessionId, lastDecision: { action: 'stay', reason: '合成来源状态', seconds: 2 } },
+    'watch-state.json': { status: 'running', sessionId, runId, source: 'dsh', lastDecision: { action: 'stay', reason: '合成来源状态', seconds: 2 } },
   };
   for (const [file, value] of Object.entries(records)) fs.writeFileSync(path.join(f.stateDir, file), JSON.stringify(value));
   for (const controller of controllers) {
@@ -192,6 +192,14 @@ test('无有效视频轮次时仍只读返回共享自主状态，不触浏览�
     assert.equal(status.counts.requests, 7); assert.equal(status.counts.maxRequests, null); assert.equal(status.counts.dailyRequests, 7);
     assert.equal(status.lastDecision.reason, '合成来源状态'); assert.equal(status.remainingSeconds, 0);
     assert.equal(controller.browser, null); assert.equal(controller.memory, undefined);
+  }
+  for (const [file, value] of Object.entries(records)) assert.equal(fs.readFileSync(path.join(f.stateDir, file), 'utf8'), JSON.stringify(value));
+  records['watch-state.json'] = { ...records['watch-state.json'], runId: 'synthetic-previous-owner', lastError: '旧运行错误' };
+  fs.writeFileSync(path.join(f.stateDir, 'watch-state.json'), JSON.stringify(records['watch-state.json']));
+  for (const controller of controllers) {
+    const status = await controller.execute('douyin_watch_status');
+    assert.equal(status.worker.runId, runId); assert.equal(status.sessionId, sessionId);
+    assert.equal(status.lastDecision, null); assert.equal(status.lastError, ''); assert.equal(status.counts.requests, 7);
   }
   for (const [file, value] of Object.entries(records)) assert.equal(fs.readFileSync(path.join(f.stateDir, file), 'utf8'), JSON.stringify(value));
   assert.equal(requests, 0); assert.equal(connections, 0); assert.equal(fs.existsSync(memoryDir), false);

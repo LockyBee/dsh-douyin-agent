@@ -4,6 +4,7 @@ import { messageFingerprint } from './chat-message.mjs';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const reliableOrder = row => Number.isSafeInteger(row.order) && row.order >= 0;
 const nativeId = row => typeof row.nativeId === 'string' && row.nativeId.length > 0 ? row.nativeId : null;
+const unsettledOutgoing = row => (row.sender || row.direction) === 'outgoing' && (row.serverConfirmed === false || row.pending === true || row.failed === true);
 const sameMessage = (left, right) => nativeId(left) || nativeId(right)
   ? Boolean(nativeId(left) && nativeId(right) && nativeId(left) === nativeId(right)) : left.signature === right.signature;
 
@@ -44,7 +45,7 @@ function knownWindow(snapshots, current) {
 // 完全相同、没有nativeId的重复窗口无法证明发生过替换，不自动回复不可区分的重复消息。
 export class MessageIdentityTracker {
   constructor() {
-    this.windows = new Map(); this.known = new Map(); this.frontiers = new Map();
+    this.windows = new Map(); this.known = new Map(); this.frontiers = new Map(); this.unverifiedBaselines = new Map();
     this.snapshots = new Map(); this.nativeIds = new Map(); this.counters = new Map(); this.modes = new Map(); this.emptyBaselines = new Map(); this.latestWindows = new Map();
   }
   identify(conversationId, rows) {
@@ -63,7 +64,7 @@ export class MessageIdentityTracker {
     const initialized = this.windows.has(conversationId) && !modeChanged;
     const previous = initialized ? this.windows.get(conversationId) : [];
     if (!this.windows.has(conversationId)) this.emptyBaselines.set(conversationId, current.length === 0);
-    if (modeChanged) { this.known.delete(conversationId); this.frontiers.delete(conversationId); this.snapshots.delete(conversationId); this.latestWindows.delete(conversationId); this.emptyBaselines.set(conversationId, false); }
+    if (modeChanged) { this.known.delete(conversationId); this.frontiers.delete(conversationId); this.snapshots.delete(conversationId); this.latestWindows.delete(conversationId); this.unverifiedBaselines.delete(conversationId); this.emptyBaselines.set(conversationId, false); }
     const identified = mode === 'relative'
       ? this.identifyRelative(conversationId, current, previous, initialized)
       : this.identifyAbsolute(conversationId, current, previous, initialized);
@@ -102,6 +103,8 @@ export class MessageIdentityTracker {
   identifyRelative(conversationId, current, previous, initialized) {
     const latestVerified = current.length > 0 && current.every(row => row.latestEndVerified === true);
     const trusted = this.latestWindows.get(conversationId) ?? [];
+    const windowSignature = rows => hash(JSON.stringify(rows.map(row => [nativeId(row), row.signature, row.order ?? null])));
+    if (!latestVerified && current.length && (!initialized || !previous.length && this.emptyBaselines.get(conversationId))) this.unverifiedBaselines.set(conversationId, { signature: windowSignature(current), verifiedSamples: 0 });
     const trustedOverlap = initialized && trusted.length ? relativeOverlap(trusted, current) : null;
     const previousOverlap = initialized && previous.length ? relativeOverlap(previous, current) : null;
     const matched = new Map(), overlap = trustedOverlap ?? previousOverlap;
@@ -141,8 +144,19 @@ export class MessageIdentityTracker {
       return this.result(row, id, classification, nativeId(row) ? 'dom-message-id' : 'chronological-window-overlap');
     });
     // 陌生历史窗口不能替换此前可信的最新锚点，即使调用方误标了latestEndVerified。
-    if (latestVerified && identified.length && (nativeId(identified.at(-1)) || reliableOrder(identified.at(-1)))
-      && (!initialized || emptyFirst || trustedOverlap)) this.latestWindows.set(conversationId, identified);
+    const trustedPrefix=identified.slice();
+    while(trustedPrefix.length&&unsettledOutgoing(trustedPrefix.at(-1)))trustedPrefix.pop();
+    if (latestVerified && trustedPrefix.length && (nativeId(trustedPrefix.at(-1)) || reliableOrder(trustedPrefix.at(-1)))
+      && (!initialized || emptyFirst || trustedOverlap)) this.latestWindows.set(conversationId, trustedPrefix);
+    const provisional = this.unverifiedBaselines.get(conversationId);
+    if (provisional && !this.latestWindows.has(conversationId)) {
+      const safeDirection = row => ['incoming', 'outgoing'].includes(row.sender || row.direction) && !(row.sender && row.direction && row.sender !== row.direction);
+      const sameInitialWindow = initialized && latestVerified && windowSignature(current) === provisional.signature && current.every(row => safeDirection(row) && (nativeId(row) || reliableOrder(row)));
+      provisional.verifiedSamples = sameInitialWindow ? provisional.verifiedSamples + 1 : 0;
+      // 重新核实只建立基线，当前窗口不获得新消息资格。
+      if (provisional.verifiedSamples >= 2 && trustedPrefix.length) this.latestWindows.set(conversationId, trustedPrefix);
+    }
+    if (this.latestWindows.has(conversationId)) this.unverifiedBaselines.delete(conversationId);
     return identified;
   }
   identifyAbsolute(conversationId, current, previous, initialized) {

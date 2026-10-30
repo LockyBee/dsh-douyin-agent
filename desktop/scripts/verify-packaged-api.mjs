@@ -104,7 +104,9 @@ try {
   const diagnostics = JSON.parse(await page.getByRole('textbox', { name: '诊断报告', exact: true }).inputValue());
   assert.equal(diagnostics.protocol, 'diagnostics-v2'); assert.equal(diagnostics.pluginVersion, version);
   assert.ok(diagnostics.checks.some(item => item.id === 'silent_window'));
-  await page.getByRole('button', { name:'查看好友互动状态', exact:true }).waitFor();
+  await page.getByLabel('好友互动状态', { exact:true }).waitFor();
+  assert.equal(await page.getByRole('button', { name:/^(?:查看好友互动状态|查看遗留待处理消息|现在处理|已人工核对该会话)$/ }).count(), 0, '未答消息不提供人工清除入口');
+  assert.equal(await page.getByRole('dialog', { name:'遗留待处理消息', exact:true }).count(), 0);
   const readStatus = route => page.evaluate(async route => {
     const boot = await (await fetch('/api/bootstrap')).json();
     const response = await fetch(route, { headers: { 'x-session-token': boot.token } });
@@ -140,7 +142,9 @@ try {
   await until(async () => (await readStatus('/api/video/status')).policy.dailyRequests === 66);
   await page.getByRole('tab', { name: '好友互动', exact: true }).click();
   await page.getByRole('switch', { name: '允许好友互动', exact: true }).waitFor();
+  if (!(await readStatus('/api/interactions/state')).policy.enabled) { await page.getByRole('switch', { name: '允许好友互动', exact: true }).click(); await until(async () => (await readStatus('/api/interactions/state')).policy.enabled === true); }
   await until(async () => (await readStatus('/api/interactions/state')).policy.enabled === true);
+  await until(async () => await page.getByRole('switch', { name: '允许好友互动', exact: true }).getAttribute('aria-checked') === 'true');
   assert.equal(await page.getByRole('switch', { name: '允许好友互动', exact: true }).getAttribute('aria-checked'), 'true');
   assert.equal(await page.getByRole('heading', { name: /续火花|自动问候/ }).count(), 0);
   assert.equal(await page.getByRole('switch', { name: /续火花|自动问候|允许自主分享/ }).count(), 0, '好友互动只保留统一总开关');
@@ -148,7 +152,7 @@ try {
     await page.getByRole('switch', { name: '允许好友互动', exact: true }).click();
     await until(async () => (await readStatus('/api/interactions/state')).policy.enabled === enabled);
     await until(async () => await page.getByRole('switch', { name: '允许好友互动', exact: true }).getAttribute('aria-checked') === String(enabled));
-    if (!enabled) await until(async()=> (await page.getByRole('button',{name:'查看好友互动状态',exact:true}).innerText()).includes('离线'));
+    if (!enabled) await until(async()=> (await page.getByLabel('好友互动状态',{exact:true}).innerText()).includes('回复已关闭'));
   }
   assert.equal((await readStatus('/api/chat/state')).running, false, '空名单切换总开关不会启动回复');
   await page.getByRole('textbox', { name: '群聊响应昵称', exact: true }).waitFor();
@@ -212,7 +216,7 @@ try {
   assert.deepEqual(forbiddenActions, [], '验收不得发起真实观看、模型或发送动作');
   const saved = await readJson(path.join(userData, 'api-settings.json'));
   assert.equal('encryptedApiKey' in saved, false); assert.equal(JSON.stringify(saved).includes('synthetic-packaged-check-only'), false);
-  const receipt = { version, executable: path.basename(executable), bytes: bytes.length, sha256, archiveSourcesMatch: true, iconsMatch:true, domainFilesMatch: DOMAIN_FILES.length, runtimeId: manifest.runtimeId, startup: { ready: true, packaged: true, visible: false, isolated: true, version: ready.version }, renderer: { loaded: true, privateKeyIpc: true, apiKeyBlurAutoSaved:true, syntheticKeyCleared: true, dailyReportRendered: true, navDeduplicated:true, brandLoaded:true, updateIpc:true, dailyAdvancedAutoSaved:true, unlimitedDailyDurationEditable:true, topicAutoSaved:true, friendMasterDefaultEnabled:true, friendMasterToggledWithoutRecipients:true, noSparkEntry:true, noSaveButtons:true, syntheticGroupSelectionAutoSaved:true, groupPreviewCaptured, pageErrors: errors.length }, readOnlyEndpoints: Object.keys(checks.status).length, automatedWorkersStarted: false, realModelCalled: false, realMessageSent:false, smokeDirectory: directory };
+  const receipt = { version, executable: path.basename(executable), bytes: bytes.length, sha256, archiveSourcesMatch: true, iconsMatch:true, domainFilesMatch: DOMAIN_FILES.length, runtimeId: manifest.runtimeId, startup: { ready: true, packaged: true, visible: false, isolated: true, version: ready.version }, renderer: { loaded: true, privateKeyIpc: true, apiKeyBlurAutoSaved:true, syntheticKeyCleared: true, dailyReportRendered: true, navDeduplicated:true, brandLoaded:true, updateIpc:true, dailyAdvancedAutoSaved:true, unlimitedDailyDurationEditable:true, topicAutoSaved:true, friendMasterDefaultEnabled:true, friendMasterToggledWithoutRecipients:true, noSparkEntry:true, noSaveButtons:true, syntheticGroupSelectionAutoSaved:true, manualUnansweredEntryRemoved:true, groupPreviewCaptured, pageErrors: errors.length }, readOnlyEndpoints: Object.keys(checks.status).length, automatedWorkersStarted: false, realModelCalled: false, realMessageSent:false, smokeDirectory: directory };
   await page.evaluate(() => window.close());
   assert.equal(await Promise.race([exited, delay(12_000, null, { ref: false }).then(() => { throw new Error('便携包未正常退出。'); })]), 0);
   await until(async () => { try { await fetch(ready.origin, { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 12_000);

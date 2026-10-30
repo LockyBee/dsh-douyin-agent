@@ -1,0 +1,64 @@
+{
+  "upstream": {
+    "url": "https://github.com/SAOS-3624/dsh-video-storyboard",
+    "commit": "2ba682d471a0e63defdb5e8e023465ab59806b05",
+    "version": "0.4.4",
+    "license": "MIT",
+    "adaptations": [
+      "Pure RGB layout/numbering/composition only; upstream download/ASR/subprocess pipeline excluded."
+    ]
+  },
+  "codec": {
+    "url": "https://github.com/jpeg-js/jpeg-js",
+    "registry": "https://registry.npmjs.org/jpeg-js/-/jpeg-js-0.4.4.tgz",
+    "version": "0.4.4",
+    "license": "BSD-3-Clause AND Apache-2.0",
+    "adaptations": [
+      "Explicit CommonJS package boundary; codec source unmodified."
+    ],
+    "decoderCopyright": "Copyright 2011 notmasteryet; Apache-2.0",
+    "encoderCopyright": "Copyright 2008 Adobe Systems Incorporated; retained BSD notice in lib/encoder.js"
+  },
+  "files": [
+    {
+      "file": "vendor/sheet.mjs",
+      "sha256": "61cd4b5aeb952df2e1aa6046fc4464e8b590ea3617ef2baac4460e8e105a3b6e"
+    },
+    {
+      "file": "vendor/plan.mjs",
+      "sha256": "349b1443c1cda818753ede9c9dd01cc5dd9bf7dcd2d5464f73f10d48fb2c0fef"
+    },
+    {
+      "file": "vendor/LICENSE",
+      "sha256": "a512631e8dd57ca0581d2ab4f48e4dd25375e0c6ad0ec797f5ffb5a8cb58d703"
+    },
+    {
+      "file": "vendor/NOTICE",
+      "sha256": "70fd9cad76f0f37a96ddb349a1b86668ce89489798a2a92be623f695901f8398"
+    },
+    {
+      "file": "vendor/jpeg-js/LICENSE",
+      "sha256": "c0a8512eabe960492fefd4f287523eb3b5ca1518ca37ef0ec83344cd7f089cb8"
+    },
+    {
+      "file": "vendor/jpeg-js/index.js",
+      "sha256": "404574b5cede8905627bff9b05975c0472d50425feb6906b0a55335e6743c4b4"
+    },
+    {
+      "file": "vendor/jpeg-js/lib/decoder.js",
+      "sha256": "a3f175fd6f62d142aad94d3bd90f3a30be4e076baf9b6a6fa31c8e84d9d4aa9f"
+    },
+    {
+      "file": "vendor/jpeg-js/lib/encoder.js",
+      "sha256": "00bde8df2517eca556669ab6fc27b414e9ba3fc52a0a71e1e37ec7c5f19c3d34"
+    },
+    {
+      "file": "vendor/jpeg-js/package.json",
+      "sha256": "a1112e12bcc2eebe337c9be8074fdd412e8ac61ad01dc2834a241a192b6dd9f8"
+    },
+    {
+      "file": "vendor/jpeg-js/LICENSE-APACHE-2.0.txt",
+      "sha256": "45873d00a0dd243596deb4aa23b2493b3d1f0671921bf2538ea431d7380220eb"
+    }
+  ]
+}

@@ -16,6 +16,7 @@ export function ShareReceipts({ state, api, run, busy, connected = true }) {
     });
   }
   return <div aria-label="分享收据">
+    {!!state?.unavailableRecipients?.length && <div className="paused-contact" aria-label="暂不可分享的许可会话"><strong>暂不能自主分享</strong>{state.unavailableRecipients.map(item => <p key={item.id}>{item.name || '许可会话'}：{item.reason}</p>)}</div>}
     {state?.busy && <p className="notice">正在处理分享。关闭好友互动可请求停止。</p>}
     {state?.paused && !state?.busy && <p className="notice error">分享暂已暂停，请在抖音核对异常收据。</p>}
     {state?.recoveryRequired && <p className="notice error">上次发送需要恢复核对，总开关不会清除收据。</p>}

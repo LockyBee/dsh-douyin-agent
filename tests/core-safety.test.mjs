@@ -37,6 +37,22 @@ test('active feed与播放器ID冲突时保持未知，不取一个猜测身份'
   assert.equal(state.video.id,null);assert.equal(state.videoSelection.identityConflict,true);assert.equal(state.videoSelection.ambiguous,true);
 });
 
+test('作者链接误含长页面内容时保持未知，不截成虚构作者', async t => {
+  const body = videoMarkup('111').replace('>合成作者</a>', `>${'合成无关页面内容'.repeat(150)}</a>`);
+  const f = await fixture(t, { url: 'https://www.douyin.com/', body });
+  const state = await f.page.evaluate(readPageState);
+  assert.equal(state.video.author, null); assert.equal(state.video.title, '合成公开作品');
+  assert.equal(state.video.id, '111'); assert.ok(state.video.readyState >= 2);
+});
+
+test('长文案有界保留，超长作者候选可由当前文案中的明确作者补足', async t => {
+  const body = videoMarkup('111', `@合成当前作者 · ${'合成作品文案'.repeat(250)}`).replace('>合成作者</a>', `>${'合成无关页面内容'.repeat(150)}</a>`);
+  const f = await fixture(t, { url: 'https://www.douyin.com/', body });
+  const state = await f.page.evaluate(readPageState);
+  assert.equal(state.video.author, '合成当前作者'); assert.equal(state.video.title.length, 1000);
+  assert.match(state.video.title, /^@合成当前作者/); assert.equal(state.video.id, '111');
+});
+
 function documentHtml(body) {
   return `<!doctype html><html><head><meta charset="utf-8"><title>合成页面测试</title>
     <style>body{margin:0;font:16px sans-serif}section{position:relative;width:260px}video{background:#143447}a,span{display:inline-block}</style>

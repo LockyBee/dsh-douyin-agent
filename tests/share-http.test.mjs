@@ -17,7 +17,7 @@ async function fixture(t, send = async () => { throw new Error('设置接口不�
   const personaMemory = new PersonaMemory({ memoryDir, legacyRoleCardFile: path.join(root, 'absent-card.md') }); personaMemory.initialize();
   const now = () => Date.parse('2026-10-15T04:00:00Z'), videoLimits = new VideoLimits({ stateDir, now });
   videoLimits.savePolicy({ windows: ['00:00-24:00'], sessionMinutes: 10 }, { explicit: true }); videoLimits.markSession('api', { explicit: true });
-  fs.writeFileSync(path.join(stateDir, 'chat-policy.json'), JSON.stringify({ allowlist: [{ id: friend, name: '合成已验证好友', followed: true, isGroup: false, verifiedAt: '2026-10-15T01:00:00Z' }] }));
+  fs.writeFileSync(path.join(stateDir, 'chat-policy.json'), JSON.stringify({ allowlist: [{ id: friend, name: '合成已验证好友', followed: true, isGroup: false, verifiedAt: '2026-10-15T01:00:00Z', identityVersion: 2, identityKind: 'rendered-user', identityHash: 'e'.repeat(64), identityVerified: true, identityBinding: `binding:${'f'.repeat(64)}` }] }));
   const evidenceId = personaMemory.recordObservation({ url: 'https://www.douyin.com/video/12345', loginRequired: false, verificationRequired: false, privateChatVisible: false, video: { id: '12345', url: 'https://www.douyin.com/video/12345', time: 2, duration: 50, readyState: 4, paused: false } }, { source: 'api' }).evidenceId;
   const shareService = new AutonomousShare({ personaMemory, videoLimits, stateDir, now, send });
   let browserCalls = 0, closed = 0;

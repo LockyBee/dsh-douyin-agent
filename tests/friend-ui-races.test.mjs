@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { hasStableConversationIdentity, matchesAuthorizedContact } from '../contact-authorization.mjs';
+import { matchesAuthorizedContact } from '../contact-authorization.mjs';
 
 const native = await fs.readFile(new URL('../client.js', import.meta.url), 'utf8');
 const software = await fs.readFile(new URL('../desktop/ui-api/src/main.jsx', import.meta.url), 'utf8');
@@ -39,26 +39,19 @@ for (const [label, source, startText, endText] of [
   assert.equal(calls.length, 2); assert.deepEqual(calls[1], { ids: ['a', 'b'], name: '大肥鱼完整昵称' });
 });
 
-for (const [label, source, endText] of [['软件', software, '\nfunction FriendPresence'], ['插件', native, '\n    function useAutosave']]) test(`${label}稳定身份许可不依赖昵称，其他账号或缺身份不能冒充已许可`, () => {
-  const code = extract(source, 'function contactPermissionLabel(', endText), labelFor = new Function('hasStableConversationIdentity', 'matchesAuthorizedContact', `return (${code});`)(hasStableConversationIdentity, matchesAuthorizedContact);
-  const contact = { id: `conv:${'a'.repeat(64)}`, name: '合成许可好友', isGroup: false, followed: null, identityVerified: true, identityVersion: 2, identityKind: 'rendered-user', identityHash: 'a'.repeat(64), identityBinding: `binding:${'b'.repeat(64)}`, relationshipStatus: 'unavailable' }, state = { policy: { allowlist: [{ ...contact, verifiedAt: '2026-10-24T00:00:00.000Z', authorizationKind: 'existing-conversation' }] } };
-  assert.equal(labelFor(contact, state, { recipientIds: [contact.id] }, {}), '已许可');
-  assert.equal(labelFor({ ...contact, name: '合成改过的昵称', avatarRef: '合成新头像' }, state, { recipientIds: [contact.id] }, {}), '已许可');
-  const other = { ...contact, id: `conv:${'c'.repeat(64)}`, identityHash: 'c'.repeat(64), identityBinding: `binding:${'d'.repeat(64)}` };
-  assert.notEqual(labelFor(other, state, { recipientIds: [other.id] }, {}), '已许可');
-  assert.notEqual(labelFor({ ...contact, identityVersion: undefined }, state, { recipientIds: [contact.id] }, {}), '已许可');
-  assert.notEqual(labelFor({ ...contact, identityHash: undefined }, state, { recipientIds: [contact.id] }, {}), '已许可');
-  assert.notEqual(labelFor(contact, { policy: { allowlist: [{ ...state.policy.allowlist[0], verifiedAt: undefined }] } }, { recipientIds: [contact.id] }, {}), '已许可');
-  assert.equal(labelFor(contact, { policy: { allowlist: [] } }, { recipientIds: [contact.id] }, { kind: 'saving' }), '正在保存许可');
-  assert.equal(labelFor(contact, { policy: { allowlist: [] } }, { recipientIds: [contact.id] }, { kind: 'error' }), '许可未保存');
-  assert.notEqual(labelFor({ ...contact, identityBinding: `binding:${'e'.repeat(64)}` }, state, { recipientIds: [contact.id] }, {}), '已许可');
-  assert.equal(labelFor(contact, state, { recipientIds: [] }, { kind: 'saving' }), '正在取消许可');
+test('两端名单去掉身份旁注，授权仍由稳定身份核对', () => {
+  for (const source of [software, native]) assert.doesNotMatch(source, /contactPermissionLabel|稳定身份已核对|关注关系未核实/);
+  const current = { id: `conv:${'a'.repeat(64)}`, name: '合成许可好友', isGroup: false, followed: null, identityVerified: true, identityVersion: 2, identityKind: 'rendered-user', identityHash: 'a'.repeat(64), identityBinding: `binding:${'b'.repeat(64)}`, relationshipStatus: 'unavailable' };
+  const saved = { ...current, verifiedAt: '2026-10-24T00:00:00.000Z', authorizationKind: 'existing-conversation' };
+  assert.equal(matchesAuthorizedContact(saved, { ...current, name: '合成新昵称' }), true);
+  assert.equal(matchesAuthorizedContact(saved, { ...current, id: `conv:${'c'.repeat(64)}` }), false);
+  assert.equal(matchesAuthorizedContact(saved, { ...current, identityBinding: `binding:${'d'.repeat(64)}` }), false);
 });
 
 test('软件状态栏直接渲染后端presence；断连不继续显示旧在线，attention展示原因', async () => {
   const require = createRequire(new URL('../desktop/ui-api/package.json', import.meta.url)), desktopRequire = createRequire(new URL('../desktop/package.json', import.meta.url));
   const React = require('react'), { renderToStaticMarkup } = require('react-dom/server');
-  const code = extract(software, 'function FriendPresence(', '\nfunction ApiSettings');
+  const code = extract(software, 'function FriendPresence(', '\nfunction ReviewDialog');
   const transformed = await desktopRequire('esbuild').transform(code, { loader: 'jsx', jsx: 'transform' });
   const Button = ({ children, size, variant, ...props }) => React.createElement('button', props, children);
   const Presence = new Function('React', 'Button', `${transformed.code};return FriendPresence;`)(React, Button);

@@ -55,3 +55,22 @@ test('新的实际运行依赖没有许可证时拒绝构建，内部type包声�
   await fs.writeFile(path.join(pkg, 'LICENSE'), '合成许可证，仅用于验证缺失时拒绝与归属查找。');
   const result = await dependencyOwners(meta, options); assert.equal(result[0].name, 'synthetic-runtime'); assert.equal(result[0].inputs[0].file, 'lib/index.js');
 });
+
+test('许可证只属于实际输入包，嵌套软件包和构建缓存不被递归收录', async t => {
+  const temporaryRoot = path.join(root, '.test-temp'); await fs.mkdir(temporaryRoot, { recursive: true });
+  const directory = await fs.mkdtemp(path.join(temporaryRoot, 'license-boundary-'));
+  t.after(async () => { assert.equal(path.dirname(directory), temporaryRoot); await fs.rm(directory, { recursive: true, force: true }); });
+  const pkg = path.join(directory, 'node_modules', 'synthetic-runtime');
+  for (const relative of ['', 'lib', 'desktop/release-api/win-unpacked', '.cache/old-build', 'docs']) await fs.mkdir(path.join(pkg, relative), { recursive: true });
+  await fs.writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: 'synthetic-runtime', version: '1.0.0', license: 'MIT' }));
+  await fs.writeFile(path.join(pkg, 'LICENSE'), '合成包自身的许可证原文。');
+  await fs.writeFile(path.join(pkg, 'lib/index.js'), 'export const value = 1;');
+  await fs.writeFile(path.join(pkg, 'desktop/package.json'), JSON.stringify({ name: 'synthetic-desktop', version: '1.0.0' }));
+  await fs.writeFile(path.join(pkg, 'desktop/release-api/win-unpacked/LICENSE.electron.txt'), '其他构建的许可证，不属于当前输入包。');
+  await fs.writeFile(path.join(pkg, '.cache/old-build/LICENSE'), '缓存中的许可证，不属于当前输入包。');
+  await fs.writeFile(path.join(pkg, 'docs/NOTICE'), '当前输入包自身的附加版权声明。');
+  const options = { projectRoot: directory, upstreamRoot: path.join(directory, 'upstream'), workingDirectory: directory };
+  const meta = { outputs: { 'dist/app.js': { inputs: { 'node_modules/synthetic-runtime/lib/index.js': { bytesInOutput: 10 } } } } };
+  const result = await dependencyOwners(meta, options);
+  assert.deepEqual(result[0].legalFiles.map(file => file.split(path.sep).join('/')).sort(), ['LICENSE', 'docs/NOTICE']);
+});

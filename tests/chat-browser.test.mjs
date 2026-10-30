@@ -11,6 +11,58 @@ let browser;
 before(async () => { browser = await chromium.launch({ channel: 'msedge', headless: true }); });
 after(async () => { await browser?.close(); });
 
+test('消息列表变化只重取一次快照，持续变化仍拒绝读取且不发送', async () => {
+  const f = await fixture();
+  try {
+    const contact = (await f.chat.listContacts()).contacts[0];
+    const original = f.chat.markMessages.bind(f.chat); let calls = 0;
+    f.chat.markMessages = async (page, messages) => {
+      calls++;
+      if (calls === 1) await page.evaluate(() => { const row = document.querySelector('[data-e2e="msg-item-content"],[data-e2e="message-content"]'); if (!row) throw new Error('合成消息不存在'); const added = row.cloneNode(true); added.querySelector('.MessageItemTextcontainer').textContent = '合成列表更新的新消息'; row.parentElement.append(added); });
+      return original(page, messages);
+    };
+    const read = await f.chat.readConversation(contact.id, { allowed: true });
+    assert.equal(calls, 2); assert.ok(read.messages.length > 0); assert.equal(await f.page.evaluate(() => window.sent), 0);
+    calls = 0;
+    f.chat.markMessages = async () => { calls++; throw Object.assign(new Error('合成列表持续变化'), { code: 'CHAT_SNAPSHOT_CHANGED' }); };
+    await assert.rejects(f.chat.readConversation(contact.id, { allowed: true }), error => error.code === 'CHAT_SNAPSHOT_CHANGED');
+    assert.equal(calls, 2); assert.equal(await f.page.evaluate(() => window.sent), 0);
+  } finally { await f.chat.close(); }
+});
+
+test('群聊人数后缀仅兼容原群名追加的计数，支持名称本身含括号', async () => {
+  const f = await fixture();
+  try {
+    await f.page.evaluate(() => {
+      const row = document.querySelector('[data-e2e="conversation-item"]');
+      row.setAttribute('data-conversation-type', 'group'); row.querySelector('.conversationConversationItemtitle').textContent = '合成群(2)';
+      row.addEventListener('click', () => { document.querySelector('.StackLayoutStackChatHeadertitle').textContent = '合成群(2)（3）'; });
+    });
+    const list = await f.chat.listContacts({ verifyFollowing: false });
+    const result = await f.chat.readConversation(list.contacts[0].id, { allowed: true, weak: true });
+    assert.equal(result.conversation.isGroup, true); assert.equal(result.conversation.id, list.contacts[0].id);
+    assert.equal(await f.page.evaluate(() => window.sent), 0);
+  } finally { await f.chat.close(); }
+});
+
+test('缺少稳定身份的旧会话不接受不同群名，个人昵称也不剥离人数样式', async () => {
+  for (const group of [true, false]) {
+    const f = await fixture();
+    try {
+      await f.page.evaluate(group => {
+        const row = document.querySelector('[data-e2e="conversation-item"]');
+        row.removeAttribute('data-conversation-id'); document.querySelector('.StackLayoutStackChatHeaderuser').removeAttribute('data-conversation-id');
+        row.setAttribute('data-conversation-type', group ? 'group' : 'direct');
+        row.querySelector('.conversationConversationItemtitle').textContent = group ? '合成群(2)' : '合成个人';
+        row.addEventListener('click', () => { document.querySelector('.StackLayoutStackChatHeadertitle').textContent = group ? '合成群(5)' : '合成个人(3)'; });
+      }, group);
+      const list = await f.chat.listContacts({ verifyFollowing: false });
+      await assert.rejects(f.chat.readConversation(list.contacts[0].id, { allowed: true, weak: true }), error => error.code === 'CHAT_CONVERSATION_IDENTITY_MISMATCH');
+      assert.equal(await f.page.evaluate(() => window.sent), 0);
+    } finally { await f.chat.close(); }
+  }
+});
+
 async function virtualContactFixture() {
   const f = await fixture();
   await f.page.evaluate(() => {
@@ -73,6 +125,36 @@ async function fixture() {
   return { page, chat };
 }
 
+test('文字回读等待绑定服务器编号，临时气泡无发送中图标也不能确认', async () => {
+  for (const acknowledge of [true, false]) {
+    const f = await fixture();
+    try {
+      const contact = (await f.chat.listContacts()).contacts[0];
+      await f.page.evaluate(acknowledge => {
+        const list = document.getElementById('message-list'); list.setAttribute('data-e2e', 'message-list'); list.style.cssText = 'display:flex;flex-direction:column-reverse';
+        list.querySelector('.messageMessageBoxmessageBox').setAttribute('data-message-id', '123456789012344');
+        const old = document.querySelector('.e2e-send-msg-btn'), button = old.cloneNode(true); old.replaceWith(button);
+        button.addEventListener('click', () => {
+          window.sent++; const row = document.createElement('div'); row.setAttribute('data-index', '0'); list.querySelector('[data-index]').setAttribute('data-index', '1');
+          const box = document.createElement('div'); box.className = 'messageMessageBoxmessageBox messageMessageBoxisFromMe';
+          const content = document.createElement('div'); content.setAttribute('data-e2e', 'msg-item-content');
+          const body = document.createElement('div'); body.className = 'MessageItemTextcontainer'; body.textContent = document.querySelector('[contenteditable]').innerText;
+          const model = { conversationId: 'test-a', serverId: '0', createdAt: new Date() };
+          Object.defineProperty(content, '__reactProps$confirmation', { value: { children: [{ props: { message: model } }] } });
+          content.append(body); box.append(content); row.append(box); list.prepend(row); document.querySelector('[contenteditable]').textContent = '';
+          window.acknowledged = false;
+          if (acknowledge) setTimeout(() => { model.serverId = '123456789012345'; window.acknowledged = true; }, 800);
+        });
+      }, acknowledge);
+      const result = await f.chat.sendMessage(contact.id, '等待服务器确认的合成回复', { allowed: true });
+      assert.equal(await f.page.evaluate(() => window.sent), 1);
+      assert.equal(result.confirmed, acknowledge);
+      assert.equal(result.deliveryUncertain, !acknowledge);
+      if (acknowledge) assert.equal(await f.page.evaluate(() => window.acknowledged), true);
+    } finally { await f.chat.close(); }
+  }
+});
+
 async function peerIdentityFixture() {
   const f = await fixture(), html = await f.page.locator('body').innerHTML();
   await f.page.route('https://www.douyin.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }));
@@ -107,6 +189,24 @@ test('实际头部固定props的peer身份与行双向核对，改名换头像�
     const result = await chat.readConversation(contact.id, { allowed: true }); assert.equal(result.contact.name, '合成新昵称'); assert.equal(result.messages.length, 1);
     assert.equal(await page.evaluate(() => window.identityGetterReads), 0); assert.equal(JSON.stringify([contact, header]).includes('synthetic-stable-peer'), false);
   } finally { await chat.close(); }
+});
+
+test('已许可个人会话有稳定peer时，弱身份兼容入口也按peer核对，不退回昵称', async () => {
+  const f = await peerIdentityFixture();
+  try {
+    const contact = (await f.chat.listContacts({ verifyFollowing: false })).contacts[0];
+    await f.page.evaluate(() => {
+      window.syntheticPeerSends = 0; document.querySelector('.e2e-send-msg-btn').addEventListener('click', () => { window.syntheticPeerSends++; });
+      document.querySelector('.StackLayoutStackChatHeadertitle').textContent = '同一好友的不同显示名';
+      document.querySelector('[data-e2e="conversation-item"]').addEventListener('click', () => { document.querySelector('.StackLayoutStackChatHeadertitle').textContent = '同一好友的不同显示名'; });
+    });
+    const value = await f.chat.readConversation(contact.id, { allowed: true, weak: true });
+    assert.equal(value.contact.id, contact.id); assert.equal(value.messages.length, 1);
+    const beforeReads = await f.page.evaluate(() => window.identityBodyReads);
+    await f.page.evaluate(() => { window.keepWrongHeaderPeer = true; const header = document.querySelector('.StackLayoutStackChatHeaderuser'); header.__reactProps$stableHeader.children[0].props.conversation._toParticipantSecUserId = 'synthetic-different-peer'; });
+    await assert.rejects(f.chat.readConversation(contact.id, { allowed: true, weak: true }), error => error.code === 'CHAT_CONVERSATION_IDENTITY_MISMATCH');
+    assert.equal(await f.page.evaluate(() => window.identityBodyReads), beforeReads); assert.equal(await f.page.evaluate(() => window.syntheticPeerSends), 0);
+  } finally { await f.chat.close(); }
 });
 
 test('同名同头像但头部peer不同不得读取正文，缺失稳定头部身份同样拒绝', async () => {
@@ -180,7 +280,7 @@ test('联系人枚举遍历虚拟列表取得屏外群聊，恢复原滚动位�
     assert.equal(list.contacts.length, 12); assert.equal(list.listDiscovery.scannedToEnd, true);
     assert.equal(list.listDiscovery.source, 'current-conversation-list'); assert.match(list.listDiscovery.note, /不代表全部关注好友或所有群聊/);
     const group = list.contacts.find(item => item.name === '合成屏外群聊'); assert.equal(group.isGroup, true); assert.equal(group.identityVerified, true); assert.match(group.identityBinding, /^binding:[a-f0-9]{64}$/);
-    assert.equal(list.contacts.find(item => item.name === '名字像群的未知会话').isGroup, null);
+    assert.equal(list.contacts.find(item => item.name === '名字像群的未知会话').isGroup, true);
     assert.equal(await page.locator('[data-e2e="conversation-list"]').evaluate(element => element.scrollTop), 0);
     assert.equal(await page.evaluate(() => window.syntheticPreviewReads), 0); assert.deepEqual(await page.evaluate(() => window.syntheticSelections), []);
     const selection = await chat.controller.withPage(page => chat.select(page, group.id));
@@ -315,6 +415,18 @@ test('稳定会话允许重名，明确群聊标记与个人类型分开返回',
   } finally { await chat.close(); }
 });
 
+test('未读计数只读已标记的许可会话，不读取私信预览', async () => {
+  const { page, chat } = await fixture();
+  try {
+    const { contacts } = await chat.listContacts();
+    const counts = await chat.unreadCounts([contacts[0].id, contacts[1].id]);
+    assert.equal(counts.available, true);
+    assert.equal(counts.counts[contacts[0].id], 1);
+    assert.equal(counts.counts[contacts[1].id], 0);
+    assert.equal(await page.evaluate(() => window.previewReads), 0);
+  } finally { await chat.close(); }
+});
+
 test('DOM通知只在许可行未读增加时唤醒，切换、输入、正文变化和同数重挂载不自激', async () => {
   const { page, chat } = await fixture();
   try {
@@ -362,13 +474,13 @@ test('群聊用明确类型和稳定会话ID核对，类型变化不能沿用旧
   } finally { await chat.close(); }
 });
 
-test('名字含群但没有类型证据的条目保持unknown，用户公开ID可绑定明确个人会话', async () => {
+test('名字含群但没有类型证据的条目归入群聊，用户公开ID可绑定明确个人会话', async () => {
   const { page, chat } = await fixture();
   try {
     chat.following = []; chat.relationshipDiscovery = { status: 'unavailable' };
     await page.locator('[data-e2e="conversation-item"]').first().evaluate(row => { row.removeAttribute('data-conversation-type'); row.querySelector('.conversationConversationItemtitle').textContent = '仅名字里有群'; });
     const unknown = (await chat.listContacts()).contacts[0];
-    assert.equal(unknown.conversationType, 'unknown'); assert.equal(unknown.isGroup, null); assert.equal(unknown.identityVerified, false);
+    assert.equal(unknown.conversationType, 'group'); assert.equal(unknown.isGroup, true); assert.equal(unknown.followed, null);
     await page.locator('[data-e2e="conversation-item"]').first().evaluate(row => { row.removeAttribute('data-conversation-id'); row.setAttribute('data-conversation-type', 'direct'); const name = row.querySelector('.conversationConversationItemtitle'); const link = document.createElement('a'); link.href = 'https://www.douyin.com/user/synthetic-person?tracking=not-kept'; name.replaceWith(link); link.append(name); });
     const personal = (await chat.listContacts()).contacts[0];
     assert.equal(personal.conversationType, 'direct'); assert.equal(personal.identityVerified, true);
@@ -376,13 +488,14 @@ test('名字含群但没有类型证据的条目保持unknown，用户公开ID�
   } finally { await chat.close(); }
 });
 
-test('普通头像和稳定会话ID不足以证明个人类型，unknown不能沿用关注关系授权', async () => {
+test('普通头像和稳定会话ID不足以证明个人类型，兜底群聊不能沿用关注关系授权', async () => {
   const { page, chat } = await fixture();
   try {
     await page.locator('[data-e2e="conversation-item"]').first().evaluate(row => { row.removeAttribute('data-conversation-type'); const image = row.querySelector('img'), avatar = document.createElement('div'); avatar.className = 'commonIMAvataravatarContainer'; image.replaceWith(avatar); avatar.append(image); });
     const contact = (await chat.listContacts()).contacts[0];
-    assert.equal(contact.conversationType, 'unknown'); assert.equal(contact.isGroup, null); assert.equal(contact.identityVerified, false); assert.equal(contact.followed, null);
-    await assert.rejects(chat.readConversation(contact.id, { allowed: true }), /类型尚未核实/);
+    assert.equal(contact.conversationType, 'group'); assert.equal(contact.isGroup, true); assert.equal(contact.followed, null);
+    const read = await chat.readConversation(contact.id, { allowed: true });
+    assert.equal(read.conversation.isGroup, true);
     assert.equal(await page.evaluate(() => window.sent), 0);
   } finally { await chat.close(); }
 });
@@ -1132,14 +1245,15 @@ test('相同原生消息 ID 的表情资源变化，进入发送前与填写后�
   } finally { await chat.close(); }
 });
 
-test('聊天页面暂停背景视频，播放捕获监听只注册一次', async () => {
+test('聊天检查暂停当次背景视频，不拦截之后主动播放', async () => {
   const { page, chat } = await fixture();
   try {
     await page.evaluate(() => { const video = document.createElement('video'); video.id = 'fixture-video'; window.pauseCount = 0; video.pause = () => { window.pauseCount += 1; }; document.body.append(video); });
     await chat.listContacts(); await chat.listContacts();
     const before = await page.evaluate(() => window.pauseCount);
+    assert.ok(before > 0);
     await page.evaluate(() => document.querySelector('#fixture-video').dispatchEvent(new Event('play')));
-    assert.equal(await page.evaluate(() => window.pauseCount), before + 1);
+    assert.equal(await page.evaluate(() => window.pauseCount), before);
     assert.equal(await page.evaluate(() => window.sent), 0);
   } finally { await chat.close(); }
 });
@@ -1238,4 +1352,280 @@ test('消息列表拓扑未知时不把相对位置当永久水位，不授予�
     assert.equal(raw.chronology, 'unknown'); assert.equal(raw.sourceDomOrder, 'unknown');
     assert.equal(await page.evaluate(() => window.sent), 0);
   } finally { await chat.close(); }
+});
+
+test('显式准备回复通道复用受管聊天页并返回可核对会话数，不关闭页面', async () => {
+  const f = await fixture();
+  try {
+    await f.page.evaluate(() => { document.hasFocus = () => false; });
+    const result = await f.chat.prepareChat();
+    assert.equal(result.prepared, true);
+    assert.ok(result.count >= 2);
+    assert.equal(f.page.isClosed(), false);
+  } finally { await f.page.close(); }
+});
+
+test('无nativeId初始填写前补载旧前缀，携带原始最新端证据时沿用共享水位规则', async () => {
+  const { page, chat } = await fixture();
+  try {
+    await page.evaluate(() => {
+      const list = document.querySelector('#message-list'); list.className = 'messageMessageListlist'; list.style.transform = 'scale(-1,-1)';
+      list.innerHTML = [0, 1, 2].map(index => `<div data-index="${index}"><div class="messageMessageBoxmessageBox" data-message-id="synthetic-initial-${index}"><div data-e2e="msg-item-content"><div class="MessageItemTextcontainer">合成原窗口 ${index}</div></div></div></div>`).join('');
+      const old = document.querySelector('.e2e-send-msg-btn'), button = old.cloneNode(true); old.replaceWith(button);
+      button.addEventListener('click', () => { window.sent += 1; const editor = document.querySelector('[contenteditable]'); for (const row of list.querySelectorAll('[data-index]')) row.setAttribute('data-index', String(Number(row.getAttribute('data-index')) + 1)); const row = document.createElement('div'); row.setAttribute('data-index', '0'); row.innerHTML = '<div class="messageMessageBoxmessageBox messageMessageBoxisFromMe" data-message-id="synthetic-initial-sent"><div data-e2e="msg-item-content"><div class="MessageItemTextcontainer"></div></div></div>'; row.querySelector('.MessageItemTextcontainer').textContent = editor.innerText; list.prepend(row); editor.textContent = ''; });
+      for (const box of list.querySelectorAll('[data-message-id]')) box.removeAttribute('data-message-id');
+    });
+    const contact = (await chat.listContacts()).contacts[0], before = await chat.readConversation(contact.id, { allowed: true });
+    const expectedMessageContent = before.messages.map(item => ({ id: item.id, fingerprint: messageFingerprint(item) }));
+    await page.locator('#message-list').evaluate(list => list.insertAdjacentHTML('beforeend', '<div data-index="3"><div class="messageMessageBoxmessageBox"><div data-e2e="msg-item-content"><div class="MessageItemTextcontainer">更早的合成历史</div></div></div></div>'));
+    const result = await chat.sendMessage(contact.id, '初始补载历史后的合成回复', { allowed: true, expectedMessageIds: before.messages.map(item => item.id), expectedMessageContent, expectedMessageEvidence: { chronology: before.dayEvidence.chronology, latestEndVerified: before.dayEvidence.latestEndVerified } });
+    assert.equal(result.confirmed, true); assert.equal(await page.evaluate(() => window.sent), 1);
+  } finally { await chat.close(); }
+});
+
+test('初始旧前缀兼容缺少原始证据或出现新尾时不填写或发送', async () => {
+  for (const mode of ['no-evidence', 'new-tail', 'unknown-order']) {
+    const { page, chat } = await fixture();
+    try {
+      await page.evaluate(() => { const list = document.querySelector('#message-list'); list.className = 'messageMessageListlist'; list.style.transform = 'scale(-1,-1)'; list.innerHTML = [0, 1].map(index => `<div data-index="${index}"><div class="messageMessageBoxmessageBox" data-message-id="synthetic-initial-reject-${index}"><div data-e2e="msg-item-content"><div class="MessageItemTextcontainer">合成原窗口 ${index}</div></div></div></div>`).join(''); });
+      const contact = (await chat.listContacts()).contacts[0], before = await chat.readConversation(contact.id, { allowed: true });
+      await page.locator('#message-list').evaluate((list, mode) => { if (mode === 'new-tail') { for (const row of list.querySelectorAll('[data-index]')) row.setAttribute('data-index', String(Number(row.getAttribute('data-index')) + 1)); list.insertAdjacentHTML('afterbegin', '<div data-index="0"><div class="messageMessageBoxmessageBox" data-message-id="synthetic-initial-new"><div data-e2e="msg-item-content"><div class="MessageItemTextcontainer">真正的新消息</div></div></div></div>'); } else list.insertAdjacentHTML('beforeend', '<div data-index="2"><div class="messageMessageBoxmessageBox" data-message-id="synthetic-initial-old"><div data-e2e="msg-item-content"><div class="MessageItemTextcontainer">更早的历史</div></div></div></div>'); }, mode);
+      const result = await chat.sendMessage(contact.id, '不应填写的合成回复', { allowed: true, expectedMessageIds: before.messages.map(item => item.id), expectedMessageContent: before.messages.map(item => ({ id: item.id, fingerprint: messageFingerprint(item) })), ...(mode === 'no-evidence' ? {} : { expectedMessageEvidence: { chronology: mode === 'unknown-order' ? 'unknown' : before.dayEvidence.chronology, latestEndVerified: before.dayEvidence.latestEndVerified } }) });
+      assert.equal(result.confirmed, false, mode); assert.equal(result.deliveryUncertain, false, mode); assert.equal((await page.locator('[contenteditable]').innerText()).trim(), '', mode); assert.equal(await page.evaluate(() => window.sent), 0, mode);
+    } finally { await chat.close(); }
+  }
+});
+
+import { groupMessageAddressesFish as nativeGroupMessageAddressesFish } from '../group-reply-trigger.mjs';
+async function nativeMentionFixture({ propsOnlyGroup = false, otherMention = false } = {}) {
+  const f = await fixture(), html = await f.page.locator('body').innerHTML();
+  await f.page.route('https://www.douyin.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: html }));
+  await f.page.goto('https://www.douyin.com/');
+  await f.page.evaluate(({ propsOnlyGroup, otherMention }) => {
+    window.sent = 0; document.querySelector('.e2e-send-msg-btn').addEventListener('click', () => window.sent++);
+    const conversationId = '8123456789012345678', selfUid = '7123456789012345678', otherUid = '6123456789012345678';
+    const header = document.querySelector('.StackLayoutStackChatHeaderuser'), root = document.querySelector('[data-e2e="chat-page"]');
+    header.setAttribute('data-conversation-id', conversationId); header.setAttribute('data-conversation-type', 'group');
+    Object.defineProperty(header, '__reactProps$nativeMentionHeader', { value: { children: [{ props: { conversation: { conversationId, conversationType: 'group' } } }] }, configurable: true });
+    if (propsOnlyGroup) { for (const node of [header, root]) { node.removeAttribute('data-conversation-id'); node.removeAttribute('data-conversation-type'); node.removeAttribute('data-is-group'); } }
+    const navigation = document.createElement('div'); navigation.className = 'tab-user_self';
+    const anchor = document.createElement('a'); anchor.href = 'https://www.douyin.com/user/self'; anchor.textContent = '本人'; navigation.append(anchor); document.body.prepend(navigation);
+    Object.defineProperty(anchor, '__reactFiber$nativeMentionSelf', { value: { memoizedProps: { userInfo: { isLogin: true, statusCode: 0, info: { uid: selfUid } } } }, configurable: true });
+    const list = document.getElementById('message-list'); list.className = 'messageMessageListlist'; list.style.transform = 'scale(-1,-1)';
+    const content = list.querySelector('[data-e2e="msg-item-content"]'), textNode = content.querySelector('.MessageItemTextcontainer');
+    textNode.replaceChildren(); const span = document.createElement('span'); span.className = 'TextMessageTextmentionText'; span.textContent = '@蓝色小鱼'; textNode.append(span, document.createTextNode(' 请回应'));
+    const modelPrototype = Object.create(null);
+    for (const [key, value] of Object.entries({ serverId: '9123456789012345678', conversationId, createdAt: new Date('2026-10-28T08:34:00.000Z') })) Object.defineProperty(modelPrototype, key, { value, writable: true, configurable: true });
+    const model = Object.create(modelPrototype);
+    Object.defineProperty(model, '_parsedContent', { value: { text: '@蓝色小鱼 请回应 ', richTextInfos: [{ location: 0, length: '@蓝色小鱼'.length, info: { uid: otherMention ? otherUid : selfUid, con_id: conversationId } }] }, writable: true, configurable: true });
+    Object.defineProperty(content, '__reactProps$nativeMentionMessage', { value: { children: [{ props: { message: model } }] }, configurable: true });
+    window.nativeMentionFixture = { model, modelPrototype, selfUid, otherUid, conversationId, anchor, navigation, content, span };
+    window.nativeMentionGetterReads = 0;
+  }, { propsOnlyGroup, otherMention });
+  return f;
+}
+
+test('原生消息本人提及：非响应昵称的真实span与本人uid一致，尾空格不丢失触发', async () => {
+  const f = await nativeMentionFixture();
+  try {
+    const read = await f.page.evaluate(readConversationDom), message = read.messages[0];
+    assert.equal(read.isGroup, true); assert.equal(read.identityUnavailable, undefined); assert.equal(message.mentionedSelf, true);
+    assert.equal(message.text, '@蓝色小鱼 请回应'); assert.equal(message.text.includes('大肥鱼'), false);
+    assert.equal(nativeGroupMessageAddressesFish(message, ['大肥鱼']), true);
+    assert.equal(message.nativeId, '9123456789012345678'); assert.equal(message.timestamp, '2026-10-28T08:34:00.000Z');
+    assert.equal(await f.page.evaluate(() => window.sent), 0);
+  } finally { await f.chat.close(); }
+});
+
+test('原生消息本人提及：其他uid和其他conversation的提及不触发', async () => {
+  for (const mode of ['other-uid', 'other-conversation']) {
+    const f = await nativeMentionFixture({ otherMention: mode === 'other-uid' });
+    try {
+      if (mode === 'other-conversation') await f.page.evaluate(() => window.nativeMentionFixture.model._parsedContent.richTextInfos[0].info.con_id = '8123456789012345679');
+      const raw = await f.page.evaluate(readConversationDom), message = raw.messages[0];
+      assert.equal(message.mentionedSelf, false, mode); assert.equal(nativeGroupMessageAddressesFish(message, ['大肥鱼']), false, mode);
+      assert.equal(await f.page.evaluate(() => window.sent), 0);
+    } finally { await f.chat.close(); }
+  }
+});
+
+test('原生消息本人提及：只有固定props判定group时仍输出群成员和提及', async () => {
+  const f = await nativeMentionFixture({ propsOnlyGroup: true });
+  try {
+    assert.equal(await f.page.locator('.StackLayoutStackChatHeaderuser').getAttribute('data-conversation-type'), null);
+    assert.equal(await f.page.locator('.StackLayoutStackChatHeaderuser').getAttribute('data-conversation-id'), null);
+    const raw = await f.page.evaluate(readConversationDom); assert.equal(raw.isGroup, true); assert.equal(raw.identityUnavailable, undefined);
+    assert.equal(Object.hasOwn(raw.messages[0], 'member'), true); assert.equal(raw.messages[0].mentionedSelf, true);
+    assert.equal(nativeGroupMessageAddressesFish(raw.messages[0], ['大肥鱼']), true);
+  } finally { await f.chat.close(); }
+});
+
+test('原生消息本人提及：原型serverId与绝对日期绑定当前会话且重复读取身份稳定', async () => {
+  const f = await nativeMentionFixture();
+  try {
+    const first = await f.page.evaluate(readConversationDom), firstMessage = f.chat.publicMessages('synthetic-native-mention-id', first.messages)[0];
+    await f.page.evaluate(() => { document.querySelector('.MessageBoxTimetimeLayout').textContent = '刚刚'; });
+    const second = await f.page.evaluate(readConversationDom), secondMessage = f.chat.publicMessages('synthetic-native-mention-id', second.messages)[0];
+    assert.equal(first.messages[0].nativeId, '9123456789012345678'); assert.equal(second.messages[0].nativeId, first.messages[0].nativeId);
+    assert.equal(first.messages[0].dateEvidence.kind, 'absolute'); assert.equal(first.messages[0].dateEvidence.source, 'message-attribute');
+    assert.equal(first.messages[0].nativeServerMessageBound, true); assert.equal(first.messages[0].nativeCreatedAt, '2026-10-28T08:34:00.000Z'); assert.equal(firstMessage.nativeCreatedAt, first.messages[0].nativeCreatedAt);
+    assert.equal(second.messages[0].timestamp, '2026-10-28T08:34:00.000Z'); assert.equal(secondMessage.id, firstMessage.id);
+    await f.page.evaluate(() => Object.defineProperty(window.nativeMentionFixture.model, 'serverId', { value: '9123456789012345679', configurable: true }));
+    const conflicted = await f.page.evaluate(readConversationDom); assert.equal(conflicted.messages[0].nativeId, null);
+    assert.equal(await f.page.evaluate(() => window.nativeMentionGetterReads), 0);
+  } finally { await f.chat.close(); }
+});
+
+test('原生消息本人提及：跨conversation的message对象不提供ID日期或提及证据', async () => {
+  const f = await nativeMentionFixture();
+  try {
+    await f.page.evaluate(() => window.nativeMentionFixture.modelPrototype.conversationId = '8123456789012345679');
+    const raw = await f.page.evaluate(readConversationDom), message = raw.messages[0];
+    assert.equal(message.nativeId, null); assert.notEqual(message.timestamp, '2026-10-28T08:34:00.000Z');
+    assert.equal(message.nativeServerMessageBound, undefined); assert.equal(message.nativeCreatedAt, undefined);
+    assert.notEqual(message.dateEvidence.source, 'message-attribute'); assert.equal(message.mentionedSelf, false);
+    assert.equal(nativeGroupMessageAddressesFish(message, ['大肥鱼']), false);
+  } finally { await f.chat.close(); }
+});
+
+test('原生消息本人提及：固定metadata中的getter不执行也不提供虚假证据', async () => {
+  for (const mode of ['conversation', 'server', 'created', 'parsed', 'self-uid', 'mention-uid']) {
+    const f = await nativeMentionFixture();
+    try {
+      await f.page.evaluate(mode => {
+        const data = window.nativeMentionFixture, getter = { configurable: true, get() { window.nativeMentionGetterReads++; throw new Error('合成getter不得执行'); } };
+        if (mode === 'conversation') Object.defineProperty(data.modelPrototype, 'conversationId', getter);
+        if (mode === 'server') Object.defineProperty(data.modelPrototype, 'serverId', getter);
+        if (mode === 'created') Object.defineProperty(data.modelPrototype, 'createdAt', getter);
+        if (mode === 'parsed') Object.defineProperty(data.model, '_parsedContent', getter);
+        if (mode === 'self-uid') Object.defineProperty(data.anchor.__reactFiber$nativeMentionSelf.memoizedProps.userInfo.info, 'uid', getter);
+        if (mode === 'mention-uid') Object.defineProperty(data.model._parsedContent.richTextInfos[0].info, 'uid', getter);
+      }, mode);
+      const raw = await f.page.evaluate(readConversationDom), message = raw.messages[0];
+      assert.equal(await f.page.evaluate(() => window.nativeMentionGetterReads), 0, mode);
+      if (mode === 'server' || mode === 'conversation') assert.equal(message.nativeId, null, mode);
+      if (mode === 'created' || mode === 'conversation') assert.notEqual(message.timestamp, '2026-10-28T08:34:00.000Z', mode);
+      if (['server', 'conversation', 'created'].includes(mode)) { assert.equal(message.nativeServerMessageBound, undefined, mode); assert.equal(message.nativeCreatedAt, undefined, mode); }
+      if (!['server', 'created'].includes(mode)) { assert.equal(message.mentionedSelf, false, mode); assert.equal(nativeGroupMessageAddressesFish(message, ['大肥鱼']), false, mode); }
+    } finally { await f.chat.close(); }
+  }
+});
+
+test('原生消息本人提及：重复React键、本人uid冲突或退出登录都不确认本人', async () => {
+  for (const mode of ['duplicate-message-props', 'duplicate-self-fiber', 'uid-conflict', 'logged-out', 'status-error']) {
+    const f = await nativeMentionFixture();
+    try {
+      await f.page.evaluate(mode => {
+        const data = window.nativeMentionFixture, fiber = data.anchor.__reactFiber$nativeMentionSelf;
+        if (mode === 'duplicate-message-props') Object.defineProperty(data.content, '__reactProps$nativeMentionDuplicate', { value: data.content.__reactProps$nativeMentionMessage, configurable: true });
+        if (mode === 'duplicate-self-fiber') Object.defineProperty(data.anchor, '__reactFiber$nativeMentionDuplicate', { value: fiber, configurable: true });
+        if (mode === 'uid-conflict') fiber.memoizedProps.userInfo.info.userId = data.otherUid;
+        if (mode === 'logged-out') fiber.memoizedProps.userInfo.isLogin = false;
+        if (mode === 'status-error') fiber.memoizedProps.userInfo.statusCode = 1;
+      }, mode);
+      const raw = await f.page.evaluate(readConversationDom); assert.equal(raw.messages[0].mentionedSelf, false, mode);
+      assert.equal(nativeGroupMessageAddressesFish(raw.messages[0], ['大肥鱼']), false, mode); assert.equal(await f.page.evaluate(() => window.nativeMentionGetterReads), 0, mode);
+      if (mode === 'duplicate-message-props') { assert.equal(raw.messages[0].nativeId, null); assert.notEqual(raw.messages[0].timestamp, '2026-10-28T08:34:00.000Z'); }
+    } finally { await f.chat.close(); }
+  }
+});
+
+test('原生消息本人提及：错误richtext范围和缺失或不一致的真实span不触发', async () => {
+  for (const mode of ['negative-start', 'wrong-start', 'too-long', 'fraction', 'wrong-span', 'missing-span', 'parsed-text-change', 'range-label-mismatch']) {
+    const f = await nativeMentionFixture();
+    try {
+      await f.page.evaluate(mode => {
+        const data = window.nativeMentionFixture, parsed = data.model._parsedContent, info = parsed.richTextInfos[0];
+        if (mode === 'negative-start') info.location = -1;
+        if (mode === 'wrong-start') info.location = 1;
+        if (mode === 'too-long') info.length = parsed.text.length + 10;
+        if (mode === 'fraction') info.length = 1.5;
+        if (mode === 'wrong-span') data.span.textContent = '@另一位';
+        if (mode === 'missing-span') data.span.className = '普通文本';
+        if (mode === 'parsed-text-change') parsed.text = '@蓝色小鱼 不同正文';
+        if (mode === 'range-label-mismatch') info.length += 2;
+      }, mode);
+      const raw = await f.page.evaluate(readConversationDom); assert.equal(raw.messages[0].mentionedSelf, false, mode);
+      assert.equal(nativeGroupMessageAddressesFish(raw.messages[0], ['大肥鱼']), false, mode); assert.equal(await f.page.evaluate(() => window.nativeMentionGetterReads), 0, mode);
+    } finally { await f.chat.close(); }
+  }
+});
+
+async function groupSendScopeFixture({ mode = 'delimiter', decoyRoot = false } = {}) {
+  const f = await fixture();
+  await f.page.evaluate(({ mode, decoyRoot }) => {
+    const id = '8123456789012345678', shortId = '7123456789012345678';
+    const names = { delimiter: ['合成甲, 合成乙', '合成甲，合成乙（3）'], reordered: ['合成甲，合成乙', '合成乙，合成甲（3）'], renamed: ['合成群旧名', '合成群新名（3）'] };
+    const [listName, headerName] = names[mode], row = document.querySelector('[data-e2e="conversation-item"]'), header = document.querySelector('.StackLayoutStackChatHeaderuser');
+    const model = () => { const prototype = Object.create(null); for (const [key, value] of Object.entries({ id, shortId })) Object.defineProperty(prototype, key, { value, writable: true, configurable: true }); return Object.create(prototype); };
+    const rowModel = model(), headerModel = model();
+    row.setAttribute('data-conversation-id', id); row.setAttribute('data-conversation-type', 'group'); row.querySelector('.conversationConversationItemtitle').textContent = listName;
+    header.setAttribute('data-conversation-id', id); header.setAttribute('data-conversation-type', 'group'); header.querySelector('.StackLayoutStackChatHeadertitle').textContent = headerName;
+    Object.defineProperty(row, '__reactProps$groupScopeRow', { value: { children: [{ props: { conversation: rowModel } }] }, configurable: true });
+    Object.defineProperty(header, '__reactProps$groupScopeHeader', { value: { children: [{ props: { conversation: headerModel } }] }, configurable: true });
+    row.addEventListener('click', () => header.querySelector('.StackLayoutStackChatHeadertitle').textContent = headerName);
+    window.groupScopeTrustedClicks = 0; window.groupScopeDecoyClicks = 0; window.groupScopeModels = { rowModel, headerModel };
+    document.querySelector('.e2e-send-msg-btn').addEventListener('click', event => { if (event.isTrusted) window.groupScopeTrustedClicks++; });
+    if (decoyRoot) { const decoy = document.createElement('div'); decoy.className = 'StackLayoutpagespageRoot'; decoy.dataset.e2e = 'chat-page'; decoy.innerHTML = '<button class="e2e-send-msg-btn">其他区域的发送图标</button>'; decoy.querySelector('button').addEventListener('click', () => window.groupScopeDecoyClicks++); document.querySelector('[data-e2e="im-dialog"]').append(decoy); }
+  }, { mode, decoyRoot });
+  f.chat.following = []; f.chat.relationshipDiscovery = { status: 'unavailable' };
+  const contact = (await f.chat.listContacts({ verifyFollowing: false })).contacts[0];
+  const before = await f.chat.readConversation(contact.id, { allowed: true });
+  assert.equal(contact.isGroup, true); assert.equal(contact.identityVerified, true); assert.equal(before.conversation.isGroup, true);
+  return { ...f, contact };
+}
+
+test('群发送范围：稳定群ID相同但逗号格式、成员顺序或群名变化仍只可信发送一次', async () => {
+  for (const mode of ['delimiter', 'reordered', 'renamed']) {
+    const f = await groupSendScopeFixture({ mode });
+    try {
+      const authorize = () => true; authorize.beginDispatch = () => () => {};
+      const result = await f.chat.sendMessage(f.contact.id, '唯一群编辑器中的合成回复', { allowed: true, authorize });
+      assert.equal(result.confirmed, true, `${mode}: ${JSON.stringify(result)}`); assert.equal(result.deliveryUncertain, false, mode); assert.match(result.messageId, /^msg:/);
+      assert.deepEqual(await f.page.evaluate(() => [window.sent, window.groupScopeTrustedClicks]), [1, 1], mode);
+      assert.equal(await f.page.locator('[data-deepseek-send-token],[data-deepseek-send-marker]').count(), 0);
+    } finally { await f.chat.close(); }
+  }
+});
+
+test('群发送范围：多个pageRoot仅一个含编辑器时只命中该root且不点旁边发送图标', async () => {
+  const f = await groupSendScopeFixture({ decoyRoot: true });
+  try {
+    assert.equal(await f.page.locator('[data-e2e="chat-page"]').count(), 2);
+    const result = await f.chat.sendMessage(f.contact.id, '多root唯一输入框的合成回复', { allowed: true });
+    assert.equal(result.confirmed, true, JSON.stringify(result)); assert.equal(result.deliveryUncertain, false);
+    assert.deepEqual(await f.page.evaluate(() => [window.sent, window.groupScopeTrustedClicks, window.groupScopeDecoyClicks]), [1, 1, 0]);
+  } finally { await f.chat.close(); }
+});
+
+test('群发送范围：同root或不同root存在多个编辑器都不猜测输入目标', async () => {
+  for (const sameRoot of [true, false]) {
+    const f = await groupSendScopeFixture();
+    try {
+      await f.page.evaluate(sameRoot => {
+        const editor = document.createElement('div'); editor.contentEditable = 'true'; editor.style.cssText = 'min-height:30px;min-width:80px';
+        const input = document.createElement('div'); input.dataset.e2e = 'msg-input'; input.append(editor);
+        if (sameRoot) document.querySelector('[data-e2e="chat-page"]').append(input);
+        else { const root = document.createElement('div'); root.className = 'StackLayoutpagespageRoot'; root.dataset.e2e = 'chat-page'; root.append(input); document.querySelector('[data-e2e="im-dialog"]').append(root); }
+      }, sameRoot);
+      await assert.rejects(f.chat.sendMessage(f.contact.id, '不得填写的合成回复', { allowed: true }), /没有唯一的私信文字输入框/);
+      assert.deepEqual(await f.page.evaluate(() => [window.sent, window.groupScopeTrustedClicks]), [0, 0]);
+      assert.deepEqual(await f.page.locator('[data-e2e="msg-input"] [contenteditable="true"]').allInnerTexts(), ['', '']);
+    } finally { await f.chat.close(); }
+  }
+});
+
+test('群发送范围：填写期间或最终许可后稳定群ID变化仍拒绝发送', async () => {
+  for (const phase of ['input', 'before-click']) {
+    const f = await groupSendScopeFixture();
+    try {
+      if (phase === 'input') await f.page.locator('[contenteditable]').evaluate(editor => editor.addEventListener('input', () => document.querySelector('.StackLayoutStackChatHeaderuser').setAttribute('data-conversation-id', '8123456789012345679'), { once: true }));
+      const authorize = async ({ phase: currentPhase }) => { if (phase === 'before-click' && currentPhase === 'before-click') await f.page.evaluate(() => { Object.getPrototypeOf(window.groupScopeModels.headerModel).id = '8123456789012345679'; }); return true; };
+      authorize.beginDispatch = () => () => {};
+      const result = await f.chat.sendMessage(f.contact.id, '群身份变化不应发送的合成回复', { allowed: true, authorize });
+      assert.equal(result.confirmed, false, phase); assert.equal(result.deliveryUncertain, false, phase);
+      assert.deepEqual(await f.page.evaluate(() => [window.sent, window.groupScopeTrustedClicks]), [0, 0]);
+      assert.equal(await f.page.locator('[data-deepseek-send-token],[data-deepseek-send-marker]').count(), 0);
+    } finally { await f.chat.close(); }
+  }
 });

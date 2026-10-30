@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ApiAgent, redact, watchDecisionMessages, parseWatchDecision } from './api-agent.mjs?v=13';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
-import { AutonomousShare } from './autonomous-share.mjs?v=9';
+import { AutonomousShare, isSharePreflightNotSent } from './autonomous-share.mjs?v=9';
 import { AutonomousComments } from './autonomous-comments.mjs?v=9';
 import { PublicCommentAgent } from './public-comment-agent.mjs?v=9';
 import { DailyReport } from './daily-report.mjs?v=9';
@@ -18,9 +18,34 @@ const read = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file,
 const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' }); fs.renameSync(temporary, file); } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } };
 const day = now => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
 const failure = (message, watchStatus = 'failed') => Object.assign(new Error(message), { watchStatus });
+export function readShareProgress(value) {
+  const keys=['total','currentIndex','completed','confirmed','notSent','skipped'];
+  if(!value||!keys.every(key=>Number.isSafeInteger(value[key])&&value[key]>=0)||value.total<1||value.currentIndex>value.total||value.completed>value.currentIndex||value.confirmed+value.notSent+value.skipped>value.completed||!['sharing','completed','paused'].includes(value.status))return null;
+  return Object.fromEntries([...keys.map(key=>[key,value[key]]),['status',value.status]]);
+}
 const isLivePreview = state => state?.pageKind === 'live-preview' && state.livePreview?.recognized === true && state.livePreview.source === 'active-feed-live-link' && state.livePreview.scope === 'recommend-feed' && /^\d{4,30}$/.test(state.livePreview.roomId || '');
 const readyVideo = state => !isLivePreview(state) && /^\d{10,30}$/.test(state?.video?.id || '') && state.video.readyState >= 2;
 
+function switchFailureDiagnostic({ name, output, error, source, runId, now, startedAt, expectedVideoId, stage }) {
+  const hash = value => typeof value === 'string' && value.length > 0 && value.length <= 128 ? createHash('sha256').update(value).digest('hex') : null;
+  const idHash = value => typeof value === 'string' && /^\d{1,64}$/.test(value) ? hash(value) : null;
+  const number = (value, min = 0, max = 1_000_000_000) => Number.isFinite(value) && value >= min && value <= max ? value : null;
+  const geometry = value => value && typeof value === 'object' ? Object.fromEntries(['x','y','width','height'].map(key => [key,number(value[key],key === 'x' || key === 'y' ? -1_000_000 : 0,1_000_000)])) : null;
+  const video = value => value && typeof value === 'object' ? { idHash:idHash(value.id),readyState:Number.isInteger(value.readyState) ? number(value.readyState,0,4) : null,paused:typeof value.paused === 'boolean' ? value.paused : null,time:number(value.time),duration:number(value.duration),viewport:geometry(value.viewport) } : null;
+  const code = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(value) ? value : null;
+  const state = output?.state || output || {},selection = state.videoSelection;
+  return { version:1,kind:'video-switch-failure',at:new Date(now).toISOString(),source:['api','dsh'].includes(source)?source:null,runIdHash:hash(runId),tool:name,stage:stage==='autonomous-verification'?stage:error?'controller-exception':'controller-result',elapsedMs:number(now-startedAt,0,600_000),expectedVideoIdHash:idHash(expectedVideoId),changed:typeof output?.changed === 'boolean'?output.changed:null,reasonCode:code(output?.reasonCode)||code(error?.code),switchConfirm:['stable','id-seen'].includes(output?.switchConfirm)?output.switchConfirm:null,staleObservation:output?.staleObservation===true,before:video(output?.before),after:video(output?.after||state.video),selection:selection&&typeof selection==='object'?{candidateCount:Number.isSafeInteger(selection.candidateCount)?number(selection.candidateCount,0,512):null,ambiguous:selection.ambiguous===true,identityConflict:selection.identityConflict===true}:null,pageKind:['video','live-preview','search','unknown'].includes(state.pageKind)?state.pageKind:null,blocked:{loginRequired:state.loginRequired===true,verificationRequired:state.verificationRequired===true,privateChatVisible:state.privateChatVisible===true,unsupportedPage:state.unsupportedPage===true} };
+}
+
+
+function readSwitchDiagnostic(value) {
+  if (!value || value.version !== 1 || value.kind !== 'video-switch-failure' || !['douyin_next','douyin_previous'].includes(value.tool)) return null;
+  const number=(v,min=0,max=1_000_000_000)=>Number.isFinite(v)&&v>=min&&v<=max?v:null,hash=v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v)?v:null;
+  const geometry=v=>v&&typeof v==='object'?Object.fromEntries(['x','y','width','height'].map(key=>[key,number(v[key],key==='x'||key==='y'?-1_000_000:0,1_000_000)])):null;
+  const video=v=>v&&typeof v==='object'?{idHash:hash(v.idHash),readyState:Number.isInteger(v.readyState)?number(v.readyState,0,4):null,paused:typeof v.paused==='boolean'?v.paused:null,time:number(v.time),duration:number(v.duration),viewport:geometry(v.viewport)}:null;
+  const at=typeof value.at==='string'&&value.at.length<=40&&Number.isFinite(Date.parse(value.at))?new Date(value.at).toISOString():null,selection=value.selection;
+  return{version:1,kind:'video-switch-failure',at,source:['api','dsh'].includes(value.source)?value.source:null,runIdHash:hash(value.runIdHash),tool:value.tool,stage:['controller-result','controller-exception','autonomous-verification'].includes(value.stage)?value.stage:null,elapsedMs:number(value.elapsedMs,0,600_000),expectedVideoIdHash:hash(value.expectedVideoIdHash),changed:typeof value.changed==='boolean'?value.changed:null,reasonCode:typeof value.reasonCode==='string'&&/^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(value.reasonCode)?value.reasonCode:null,switchConfirm:['stable','id-seen'].includes(value.switchConfirm)?value.switchConfirm:null,staleObservation:value.staleObservation===true,before:video(value.before),after:video(value.after),selection:selection&&typeof selection==='object'?{candidateCount:Number.isSafeInteger(selection.candidateCount)?number(selection.candidateCount,0,512):null,ambiguous:selection.ambiguous===true,identityConflict:selection.identityConflict===true}:null,pageKind:['video','live-preview','search','unknown'].includes(value.pageKind)?value.pageKind:null,blocked:Object.fromEntries(['loginRequired','verificationRequired','privateChatVisible','unsupportedPage'].map(key=>[key,value.blocked?.[key]===true]))};
+}
 // API 与原生入口通过同一锁、有限视频轮次和持久预算协调，不在重启时恢复循环。
 export class AutonomousWatch {
   constructor({ controller, config = {}, videoLimits, personaMemory, agent, shareService, commentService, commentAgent, reportService, decisionProvider, stateDir = resolveRuntimePaths().stateDir, source = 'api', fetchImpl = fetch, now = Date.now, delayImpl = (ms, signal) => delay(ms, undefined, { signal }), onEvent = () => {} } = {}) {
@@ -57,11 +82,15 @@ export class AutonomousWatch {
   }
   state() {
     const worker = this.worker(), saved = read(this.files.state, {}), time = this.videoLimits.state();
-    const sessionId = worker?.sessionId || time.session?.id || saved.sessionId || null;
+    const historicalSession = typeof saved.sessionId === 'string' && saved.sessionId ? saved.sessionId : null;
+    const sessionId = worker?.sessionId || historicalSession || time.session?.id || null;
+    const savedMatches = worker ? saved.runId === worker.runId && saved.sessionId === worker.sessionId && saved.source === worker.source : Boolean(historicalSession && saved.sessionId === sessionId);
+    const selectedSaved = savedMatches ? saved : {};
     const budget = this.budget(), counts = budget.sessions[sessionId] || { requests: 0 };
     const request = read(this.files.stop, null), stopping = worker?.alive && request?.runId === worker.runId;
-    const savedRunMatches=worker?.alive&&Number.isFinite(worker.heartbeatAt)&&this.now()-worker.heartbeatAt>=0&&this.now()-worker.heartbeatAt<5000&&saved.runId===worker.runId&&saved.sessionId===worker.sessionId&&saved.source===worker.source;
-    return redact({ protocol: 'autonomous-watch-v1', running: Boolean(worker?.alive), owned: Boolean(worker?.owned), worker, status: stopping ? 'stopping' : worker?.alive ? 'running' : ['running', 'stopping'].includes(saved.status) ? 'stopped' : saved.status || 'stopped', sessionId, counts: { ...counts, maxRequests:null, dailyRequests: time.daily?.requests ?? budget.days[day(this.now())] ?? 0, dailyLimit: time.policy.dailyRequests ?? null }, phase: this.running ? this.phase || 'waiting' : savedRunMatches?saved.phase||'waiting':'idle', pendingRequests:this.running ? this.pendingRequests || 0 : savedRunMatches&&saved.pendingRequests===1?1:0, options: this.optionsService.state().policy, lastDecision: saved.lastDecision || null, lastError: saved.lastError || '', remainingSeconds: time.allowed && time.session?.id === sessionId ? time.remainingSeconds : 0 }, [this.config.apiKey]);
+    const savedRunMatches = savedMatches && worker?.alive && Number.isFinite(worker.heartbeatAt) && this.now() - worker.heartbeatAt >= 0 && this.now() - worker.heartbeatAt < 5000;
+    const ownRun = this.running && worker?.owned && worker.sessionId === this.sessionId && worker.source === this.source;
+    return redact({ protocol: 'autonomous-watch-v1', running: Boolean(worker?.alive), owned: Boolean(worker?.owned), worker, status: stopping ? 'stopping' : worker?.alive ? 'running' : ['running', 'stopping'].includes(selectedSaved.status) ? 'stopped' : selectedSaved.status || 'stopped', sessionId, counts: { ...counts, maxRequests:null, dailyRequests: time.daily?.requests ?? budget.days[day(this.now())] ?? 0, dailyLimit: time.policy.dailyRequests ?? null }, phase: ownRun ? this.phase || 'waiting' : savedRunMatches ? selectedSaved.phase || 'waiting' : 'idle', pendingRequests: ownRun ? this.pendingRequests || 0 : savedRunMatches && selectedSaved.pendingRequests === 1 ? 1 : 0, shareProgress: ownRun ? this.shareProgress || null : savedRunMatches ? readShareProgress(selectedSaved.shareProgress) : null, options: this.optionsService.state().policy, lastDecision: selectedSaved.lastDecision || null, lastError: selectedSaved.lastError || '', lastSwitchDiagnostic: readSwitchDiagnostic(selectedSaved.lastSwitchDiagnostic), remainingSeconds: time.allowed && time.session?.id === sessionId ? time.remainingSeconds : 0 }, [this.config.apiKey]);
   }
   save(value) { write(this.files.state, redact({ ...read(this.files.state, {}), ...value, source: this.source, sessionId: this.sessionId, runId:this.runId, updatedAt: new Date(this.now()).toISOString() }, [this.config.apiKey])); }
   assertAllowed() {
@@ -98,7 +127,7 @@ export class AutonomousWatch {
     read(this.files.state, {});
     this.control(() => {
       const worker = this.worker(); if (worker) throw Object.assign(new Error(worker.alive ? '另一个入口已有自主观看运行。' : '上次自主观看留下运行锁，请先点击停止清理残留。'), { status: 409 });
-      const manual = read(this.files.manual, null); if (manual && alive(manual.pid)) throw Object.assign(new Error('另一个入口正在运行手动任务或转发。'), { status: 409 });
+      const manual = read(this.files.manual, null); if (manual && alive(manual.pid)) throw Object.assign(new Error('另一个入口正在运行手动任务或转发。'), { status: 409, code: 'WATCH_MANUAL_OCCUPIED' });
       let time = this.videoLimits.state();
       if(!time.allowed&&startSession&&time.reasonCode==='disabled'&&!fs.existsSync(path.join(this.stateDir,'watch-schedule-policy.json')))time=this.videoLimits.markSession(this.source,{explicit:true});
       if (time.allowed && (!time.session || time.session.status!=='active')) time=this.videoLimits.markSession(this.source,{explicit:true});
@@ -127,9 +156,21 @@ export class AutonomousWatch {
       throw error;
     }
   }
+  recordSwitchFailure(name, output, {error,startedAt=this.now(),expectedVideoId,stage}={}) {
+    if (!['douyin_next','douyin_previous'].includes(name)) return;
+    try {
+      if (!this.worker()?.owned) return;
+      this.save({lastSwitchDiagnostic:switchFailureDiagnostic({name,output,error,source:this.source,runId:this.runId,now:this.now(),startedAt,expectedVideoId,stage})});
+    } catch { try { this.onEvent({type:'watch.diagnostic_failed',message:'换片诊断未能保存。'}); } catch {} }
+  }
   async execute(name, args = {}, { expectedVideoId } = {}) {
     this.assertAllowed();
-    const output = await this.controller.execute(name, args, { signal: this.abort.signal, autonomousRunId: this.runId, ...(expectedVideoId === undefined ? {} : { expectedVideoId }) }); this.assertAllowed();
+    const startedAt = this.now();
+    let output;
+    try { output = await this.controller.execute(name, args, { signal: this.abort.signal, autonomousRunId: this.runId, ...(expectedVideoId === undefined ? {} : { expectedVideoId }) }); }
+    catch (error) { this.recordSwitchFailure(name,null,{error,startedAt,expectedVideoId}); throw error; }
+    if (output?.changed !== true) this.recordSwitchFailure(name,output,{startedAt,expectedVideoId});
+    this.assertAllowed();
     const state = output?.state || output;
     this.videoLimits.notePlayback?.(this.source,state,{ownerId:this.runId});
     if (state?.loginRequired || state?.verificationRequired || state?.blocked || state?.privateChatVisible || state?.unsupportedPage) throw failure('抖音页面需要手动处理，已停止自主观看。', 'needs_user');
@@ -157,6 +198,56 @@ export class AutonomousWatch {
     return this.shareService;
   }
   shareContext(videoId) { return this.getShareService()?.context({ videoId }) ?? { enabled: false, paused: false, dailyRemaining: 0, recipients: [] }; }
+  async recoverDecision(error) {
+    if (!['WATCH_DECISION_FORMAT','WATCH_DECISION_INCOMPLETE'].includes(error?.code)) throw error;
+    this.invalidDecisionStreak = (this.invalidDecisionStreak || 0) + 1;
+    this.onEvent({ type:'watch.decision-rejected', code:error.code, consecutive:this.invalidDecisionStreak, message:'本次模型决策无效，未执行动作。' });
+    this.save({ lastDecision:null, decisionRetry:{ consecutive:this.invalidDecisionStreak, code:error.code } });
+    if (this.invalidDecisionStreak >= 3) throw failure('连续三次未取得有效观看决策，已停止本次观看；今日用量保留。');
+    this.assertAllowed();
+    await this.delayImpl(1000,this.abort.signal);
+    this.assertAllowed();
+    return this.execute('douyin_status');
+  }
+  async shareDecision(decision, { evidenceId, videoId }) {
+    const recipients = decision.recipientIds ?? [decision.recipientId];
+    const progress = { total:recipients.length, currentIndex:0, completed:0, confirmed:0, notSent:0, skipped:0, status:'sharing' };
+    let learned = false;
+    const save = () => { this.phase='sharing'; this.shareProgress={...progress}; this.save({phase:this.phase,shareProgress:this.shareProgress,pendingRequests:0}); };
+    save();
+    for (const [index, recipientId] of recipients.entries()) {
+      this.assertAllowed();
+      const available = this.shareContext(videoId);
+      if (!available.enabled || available.paused) { progress.status='paused'; break; }
+      progress.currentIndex=index+1;save();
+      if (!available.recipients.some(item=>item.id===recipientId)) { progress.skipped++;progress.completed++;save();continue; }
+      const delivery = await this.getShareService().share({evidenceId,videoId,recipientId,reason:decision.reason},{signal:this.abort.signal,watchRunId:this.runId});
+      this.onEvent(redact({type:'watch.share',delivery},[this.config.apiKey]));
+      if (delivery?.skipped !== undefined || delivery?.status==='skipped' || delivery?.code==='SHARE_ALREADY_PROCESSED') {
+        if (delivery.status!=='skipped'||delivery.code!=='SHARE_ALREADY_PROCESSED'||delivery.skipped!==true||delivery.confirmed!==false||delivery.deliveryUncertain!==false||delivery.videoId!==videoId||delivery.recipientId!==recipientId||!['confirmed','not-sent','resolved-confirmed','resolved-not-sent'].includes(delivery.previousStatus)) throw failure('分享跳过回执与当前作品、许可会话或处理状态不一致，已停止自主观看。','needs_user');
+        progress.skipped++;
+        this.onEvent({type:'watch.share-skipped',code:delivery.code,videoId,recipientId,previousStatus:delivery.previousStatus,message:'此作品已为该许可会话处理过，跳过重复分享。'});
+      } else if (delivery?.code==='SHARE_PREFLIGHT_NOT_SENT'||delivery?.preflight!==undefined) {
+        if (delivery.status!=='not-sent'||delivery.code!=='SHARE_PREFLIGHT_NOT_SENT'||delivery.confirmed!==false||delivery.deliveryUncertain!==false||delivery.deliveryType!=='native-card'||typeof delivery.operationId!=='string'||!delivery.operationId||delivery.videoId!==videoId||delivery.recipientId!==recipientId||!isSharePreflightNotSent(delivery,{videoId,recipientId})) throw failure('分享准备失败回执不能证明尚未发送，已停止自主观看。','needs_user');
+        progress.notSent++;
+        this.onEvent({type:'watch.share-not-sent',code:delivery.code,failureCode:delivery.failure.code,stage:delivery.failure.stage,operationId:delivery.operationId,videoId,recipientId,message:'本次确定未发送，跳过该对象，继续处理其余对象和观看。'});
+      } else if (delivery?.deliveryUncertain) {
+        if(delivery.confirmed!==false||delivery.deliveryType!=='native-card'||delivery.videoId!==videoId||delivery.recipientId!==recipientId||typeof delivery.operationId!=='string'||!delivery.operationId)throw failure('分享回执身份不完整，已停止自主观看。','needs_user');
+        progress.completed++;progress.status='paused';save();
+        this.onEvent({type:'watch.share-paused',code:'SHARE_DELIVERY_UNCERTAIN',message:'保留未确认的分享记录，暂停后续分享，不重发；继续观看。'});
+        break;
+      } else if (delivery?.confirmed===true&&delivery.deliveryType==='native-card'&&delivery.videoId===videoId&&delivery.recipientId===recipientId&&typeof delivery.operationId==='string'&&delivery.operationId&&typeof delivery.messageId==='string'&&delivery.messageId) {
+        progress.confirmed++;
+        learned=this.behavior(evidenceId,'share',delivery.operationId)?.accepted===true||learned;
+      } else if(delivery?.confirmed===true) throw failure('分享收据缺少可核对的同作品与好友身份，已停止自主观看。','needs_user');
+      progress.completed++;save();
+      // 每人结束都会释放共同发送锁，短暂让出执行机会，避免连续分享挤占好友回复。
+      if(index+1<recipients.length)await this.delayImpl(200,this.abort.signal);
+    }
+    if(progress.status==='sharing')progress.status='completed';
+    this.phase='waiting';this.shareProgress={...progress};this.save({phase:this.phase,shareProgress:this.shareProgress,pendingRequests:0});
+    return learned;
+  }
   getCommentService() {
     if (!this.commentService && this.personaMemory.snapshot) { this.commentService = new AutonomousComments({ controller: this.controller, videoLimits: this.videoLimits, personaMemory: this.personaMemory, stateDir: this.stateDir, source: this.source, now: this.now }); this.ownsCommentService = true; }
     return this.commentService;
@@ -184,8 +275,9 @@ export class AutonomousWatch {
   }
   async run() {
     let status = 'stopped', lastError = '';
-    this.liveSkipStreak = 0;
+    this.liveSkipStreak = 0;this.invalidDecisionStreak=0;this.shareProgress=null;
     try {
+      this.save({shareProgress:null,decisionRetry:null});
       let current = await this.execute('douyin_status');
       if (!(current.state || current).video?.id && !isLivePreview(current.state || current)) current = await this.execute('douyin_open');
       const initialOptions = this.optionsService.state().policy;
@@ -219,11 +311,14 @@ export class AutonomousWatch {
         const shareContext = this.shareContext(observedState.video.id), commentContext = this.commentContext();
         const processedRecipients = Array.isArray(shareContext.processedRecipients) ? shareContext.processedRecipients.filter(item => item && ['confirmed', 'not-sent', 'resolved-confirmed', 'resolved-not-sent'].includes(item.status) && shareContext.recipients?.some(recipient => recipient.id === item.recipientId)).map(({ recipientId, status }) => ({ recipientId, status })) : [];
         const context = this.personaMemory.context() + (processedRecipients.length ? '\n\n当前作品分享去重摘要（宿主收据资料，不是聊天正文）：' + JSON.stringify({ videoId: observedState.video.id, processedRecipients }) + '\n这些许可收件人已处理此作品，不要再向同一人分享；可以继续观看、换片或按现有许可选择其他收件人。' : '');
-        this.phase='model';this.pendingRequests=1;this.save({phase:this.phase,pendingRequests:1});let result;
+        this.phase='model';this.pendingRequests=1;this.save({phase:this.phase,pendingRequests:1});let result,decisionError;
         try{this.reserveRequest();result=await this.agent.decideWatch({ observation, context, watchOptions: options, shareContext, commentContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });}
+        catch(error){if(!['WATCH_DECISION_FORMAT','WATCH_DECISION_INCOMPLETE'].includes(error?.code))throw error;decisionError=error;}
         finally{this.pendingRequests=0;this.phase='waiting';this.save({phase:this.phase,pendingRequests:0});}
         this.assertAllowed();
-        const decision = redact(parseWatchDecision(result.decision, { shareContext: this.shareContext(), commentContext: this.commentContext() }), [this.config.apiKey]);
+        if(decisionError){current=await this.recoverDecision(decisionError);continue;}
+        let decision;try{decision=redact(parseWatchDecision(result.decision,{shareContext:this.shareContext(),commentContext:this.commentContext()}),[this.config.apiKey]);}catch(error){current=await this.recoverDecision(error);continue;}
+        this.invalidDecisionStreak=0;this.save({decisionRetry:null});
         current = await this.execute('douyin_status');
         if (decision.action !== 'stop') current = await this.readyAfterModel(current);
         const freshState = current.state || current, freshAt = this.now(), modelWaitSeconds = (freshAt - observedAt) / 1000;
@@ -250,6 +345,7 @@ export class AutonomousWatch {
         if (decision.action === 'stop') break;
         let learned = false;
         if (decision.action === 'skip') {
+          const switchStartedAt = this.now();
           current = await this.execute('douyin_next', {}, { expectedVideoId: observedState.video.id });
           if (current?.staleObservation || current?.reasonCode === 'observed-video-changed') {
             const latest = current.state;
@@ -258,7 +354,11 @@ export class AutonomousWatch {
             continue;
           }
           current = await this.skipLivePreviews(current);
-          if (current.changed === false || !readyVideo(current.state || current) || (current.state || current).video.id === observedState.video.id) throw failure('未确认切换到另一条就绪作品，已停止自主观看。');
+          if (current.changed === false || !readyVideo(current.state || current) || (current.state || current).video.id === observedState.video.id) {
+            const reasonCode = current.reasonCode || (!readyVideo(current.state || current) ? 'autonomous-switch-not-ready' : (current.state || current).video.id === observedState.video.id ? 'autonomous-switch-same-id' : 'autonomous-switch-changed-false');
+            this.recordSwitchFailure('douyin_next',{...current,before:current.before||observedState.video,reasonCode},{startedAt:switchStartedAt,expectedVideoId:observedState.video.id,stage:'autonomous-verification'});
+            throw failure('未确认切换到另一条就绪作品，已停止自主观看。');
+          }
           if (gapTrusted && (viewing?.accepted === true || waited?.accepted === true)) learned = this.behavior(evidenceId, 'skip')?.accepted === true;
         } else if (decision.action === 'search') {
           const found = await this.execute('douyin_search', { query: decision.query });
@@ -278,14 +378,7 @@ export class AutonomousWatch {
             if (delivery?.confirmed !== true) throw failure(delivery?.reason || '没有确认公开评论发布成功。', 'needs_user');
           }
         } else if (decision.action === 'share') {
-          const delivery = await this.getShareService().share({ evidenceId, videoId: observedState.video.id, recipientId: decision.recipientId, reason: decision.reason }, { signal: this.abort.signal, watchRunId: this.runId });
-          this.onEvent(redact({ type: 'watch.share', delivery }, [this.config.apiKey]));
-          if (delivery?.skipped !== undefined || delivery?.status === 'skipped' || delivery?.code === 'SHARE_ALREADY_PROCESSED') {
-            if (delivery.status !== 'skipped' || delivery.code !== 'SHARE_ALREADY_PROCESSED' || delivery.skipped !== true || delivery.confirmed !== false || delivery.deliveryUncertain !== false || delivery.videoId !== observedState.video.id || delivery.recipientId !== decision.recipientId || !['confirmed', 'not-sent', 'resolved-confirmed', 'resolved-not-sent'].includes(delivery.previousStatus)) throw failure('分享跳过回执与当前作品、许可会话或处理状态不一致，已停止自主观看。', 'needs_user');
-            this.onEvent({ type: 'watch.share-skipped', code: delivery.code, videoId: delivery.videoId, recipientId: delivery.recipientId, previousStatus: delivery.previousStatus, message: '此作品已为该许可会话处理过，跳过重复分享并继续观看。' });
-          } else if (delivery?.deliveryUncertain) throw failure('分享结果未确认，已停止自主观看，请在抖音核对原收据。', 'needs_user');
-          else if (delivery?.confirmed === true && delivery.deliveryType === 'native-card' && delivery.videoId === observedState.video.id && delivery.recipientId === decision.recipientId && typeof delivery.operationId === 'string' && delivery.operationId && typeof delivery.messageId === 'string' && delivery.messageId) learned = this.behavior(evidenceId, 'share', delivery.operationId)?.accepted === true;
-          else if (delivery?.confirmed === true) throw failure('分享收据缺少可核对的同作品与好友身份，已停止自主观看。', 'needs_user');
+          learned=await this.shareDecision(decision,{evidenceId,videoId:observedState.video.id});
         } else if (decision.action === 'stay') {
           const stayBefore = current, beforeState = freshState;
           if (beforeState.video?.id !== observedState.video.id || beforeState.video.paused !== false) throw failure('停留前作品或播放状态已变化，已停止自主观看，没有学习本次停留。', 'needs_user');
@@ -331,7 +424,7 @@ export class AutonomousWatch {
     const worker = this.worker();
     if (worker?.owned) { this.abort?.abort(failure('用户停止自主观看。', 'stopped')); await this.completion; if (!this.running && this.worker()?.owned) this.control(() => { if (this.worker()?.owned) fs.unlinkSync(this.files.lock); }); }
     else if (worker?.alive) this.control(() => { const current = this.worker(); if (current?.runId === worker.runId) write(this.files.stop, { runId: worker.runId, requestedAt: this.now() }); });
-    else if (worker) this.control(() => { if (this.worker()?.runId === worker.runId) { fs.unlinkSync(this.files.lock); write(this.files.state, { status: 'stopped', sessionId: worker.sessionId, source: worker.source, lastError: '已清理退出进程的残留锁，预算继续保留。' }); } });
+    else if (worker) this.control(() => { if (this.worker()?.runId === worker.runId) { fs.unlinkSync(this.files.lock); write(this.files.state, { status: 'stopped', runId: worker.runId, sessionId: worker.sessionId, source: worker.source, phase: 'idle', pendingRequests: 0, lastError: '已清理退出进程的残留锁，预算继续保留。' }); } });
     return this.state();
   }
   async close() { if (this.worker()?.owned) { this.abort?.abort(failure('本入口已关闭。', 'stopped')); await this.completion; if (!this.running && this.worker()?.owned) this.control(() => { if (this.worker()?.owned) fs.unlinkSync(this.files.lock); }); } if (this.ownsShareService) await this.shareService.close(); if (this.ownsCommentService) await this.commentService.close(); }

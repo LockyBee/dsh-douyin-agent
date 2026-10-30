@@ -3,4 +3,5 @@ runtime/
 build/
 release/
 release-api/
+release-api-*/
 app/

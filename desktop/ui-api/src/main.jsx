@@ -1,5 +1,4 @@
 import brandIcon from '../../../assets/brand.png';
-import { canAuthorizeConversation, hasStableConversationIdentity, matchesAuthorizedContact } from '../../../contact-authorization.mjs';
 import { UpdateDialog } from './autonomy-panels.jsx';
 import { SETTINGS_SECTIONS } from '../../../settings-sections.mjs';
 import { HealthDashboard, TopicPanel } from './health-dashboard.jsx';
@@ -31,23 +30,41 @@ const statusLabel = status => ({ completed: '已完成', running: '进行中', s
 function Field({ title, hint, children }) { return <label className="field"><span>{title}</span>{children}{hint && <small>{hint}</small>}</label>; }
 function Panel({ title, badge, children }) { return <section className="panel"><div className="panel-title"><h2>{title}</h2>{badge}</div>{children}</section>; }
 function Note({ children, error = false }) { return <p className={error ? 'notice error' : 'notice'} role={error ? 'alert' : undefined}>{children}</p>; }
+function RecoveryActions({ busy, connected, message, onRetry, onHealth, onOpen }) {
+  return <span className="error-actions">
+    {onRetry && <button type="button" disabled={!connected} onClick={onRetry}>重试</button>}
+    <button type="button" disabled={!connected || busy.has('browserOpen')} onClick={onOpen}>重新连接专用浏览器</button>
+    <button type="button" onClick={onHealth}>运行自检</button>
+    <button type="button" onClick={() => { void navigator.clipboard?.writeText(message).catch(() => {}); }}>复制错误</button>
+  </span>;
+}
 function Data({ label = '查看返回数据', value }) { return <JsonBlock label={label} payload={value} truncatedLabel={truncated} />; }
 
-function contactPermissionLabel(contact, state, draft, status) {
-  const saved = state?.policy?.allowlist?.find(item => item.id === contact.id), selected = draft.recipientIds.includes(contact.id);
-  const matches = hasStableConversationIdentity(saved) && hasStableConversationIdentity(contact) && matchesAuthorizedContact(saved, contact);
-  if (selected && matches) return '已许可';
-  if (selected) return status.kind === 'saving' ? '正在保存许可' : status.kind === 'error' ? '许可未保存' : status.kind === 'saved' ? '许可已提交，等待回读' : '许可待保存';
-  if (saved) return status.kind === 'saving' ? '正在取消许可' : '许可待取消';
-  return contact.followed === true && contact.isGroup === false ? '尚未许可' : '需本人核对授权';
+function FriendPresence({ presence, connected }) {
+  const current = connected ? presence : null;
+  const reply = current?.reply || current, watch = current?.watch;
+  const label = reply?.label || '状态待核实', reason = reply?.reason || '正在读取好友回复服务状态。';
+  const status = reply?.status || current?.status;
+  return <div className="friend-presence" role="status" aria-live="polite" title={[reason, watch?.active ? watch.reason : ''].filter(Boolean).join(' ')} style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+    <span aria-label="好友互动状态" title={reason} style={{ border: '1px solid currentColor', borderRadius: 20, padding: '6px 12px', whiteSpace: 'nowrap' }}>{reply?.online === true ? '●' : '○'} {label}</span>
+    {watch?.active && <small role="status" aria-label="自主观看状态" title={watch.reason} style={{ whiteSpace: 'nowrap' }}>◉ {watch.label}</small>}
+    {(status === 'attention' || status === 'preparing' || watch?.active && reply?.online !== true) && <small role={status === 'attention' ? 'alert' : 'status'} style={{ maxWidth: 220, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{reason}</small>}
+  </div>;
 }
 
-function FriendPresence({ presence, connected, onOpen }) {
-  const current = connected ? presence : null, label = current?.label || '状态待核实', reason = current?.reason || '正在读取好友回复服务状态。';
-  return <div className="friend-presence" role="status" aria-live="polite" title={reason} style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
-    <Button size="sm" variant="outline" aria-label="查看好友互动状态" title={reason} onClick={onOpen}>{current?.online === true ? '●' : '○'} {label}</Button>
-    {['attention', 'preparing'].includes(current?.status) && <small role={current.status === 'attention' ? 'alert' : 'status'} style={{ maxWidth: 220, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{reason}</small>}
-  </div>;
+function ReviewDialog({ share, api, run, busy, connected, onClose }) {
+  const shareItems = share?.needsReview || [];
+  const nameOf = id => share?.recipients?.find(item => item.id === id)?.name || '许可会话';
+  const statusOf = status => ({ reserved: '已预留，待核对', clicking: '处理中，待核对', uncertain: '送达未确认', confirmed: '已确认送达', 'not-sent': '未发出', 'resolved-confirmed': '人工已确认送达', 'resolved-not-sent': '人工已确认未送达' }[status] || status || '需要人工核对');
+  async function resolveShare(item, outcome) { await run(`shareResolve-${item.operationId}`, () => api('/api/share/resolve', { operationId: item.operationId, outcome })); }
+  async function resolveAllNotSent() { for (const item of shareItems) await resolveShare(item, 'not-sent'); }
+  return <div className="settings-scrim" role="dialog" aria-modal="true" aria-label="处理分享收据"><div className="api-dialog review-dialog">
+    <div className="dialog-head"><h2>处理分享收据</h2><button aria-label="关闭分享收据" onClick={onClose}>×</button></div>
+    <Note>这些操作都在软件内完成，不需要去抖音逐条找。分享只能按回执事实选择；“统一未送达”不会重发这一条。</Note>
+    {shareItems.length > 0 && <><h3>分享收据（{shareItems.length}）</h3>{shareItems.map(item => <div className="paused-contact" key={item.operationId}><strong>{nameOf(item.recipientId)} · 作品 {item.videoId}</strong><p>{statusOf(item.status)}</p>{item.failure?.message && <p className="notice">原因：{item.failure.message}</p>}<div className="actions"><Button size="sm" disabled={!connected || busy?.has(`shareResolve-${item.operationId}`)} onClick={() => { void resolveShare(item, 'confirmed'); }}>已确认送达</Button><Button size="sm" variant="outline" disabled={!connected || busy?.has(`shareResolve-${item.operationId}`)} onClick={() => { void resolveShare(item, 'not-sent'); }}>确认未送达</Button></div></div>)}<div className="actions"><Button size="sm" variant="outline" disabled={!connected || share?.busy} onClick={() => { void resolveAllNotSent(); }}>全部按未送达处理</Button></div></>}
+    {share?.recoveryRequired && shareItems.length === 0 && <Note error>上次分享进程中断，没有可逐条核对的收据；先在“好友互动”重新开启分享会要求先处理这条恢复记录。</Note>}
+    {!shareItems.length && !share?.recoveryRequired && <Note>目前没有待核对项。</Note>}
+  </div></div>;
 }
 
 function ApiSettings({ settings, bridge, onSaved, onClose, run, busy, operationActive, onOpenDouyin, openingDouyin, connected, operationError }) {
@@ -117,6 +134,7 @@ function VideoPanel({ state, schedule, watch, api, run, busy, connected = true, 
       <div className="switch-row"><span>不限每日模型请求次数</span><Switch label="不限每日模型请求次数" checked={draft.unlimitedRequests} onChange={value => edit({ unlimitedRequests: value }, { immediate: true })} /></div>
       <Field title="每日模型请求上限"><Input aria-label="每日观看模型请求上限" type="number" min={1} step={1} value={draft.unlimitedRequests ? '' : draft.dailyRequests} placeholder={draft.unlimitedRequests ? '不限；输入次数可设置上限' : '正整数次数'} onChange={event => edit({ dailyRequests: event.target.value, ...(event.target.value !== '' ? { unlimitedRequests: false } : {}) })} /></Field>
     </details>
+    <Note>请求上限按模型请求计，不是视频条数；同一视频多次采样、评论生成也计入，私信回复不占。</Note>
     <AutoSaveStatus status={form.status} />
     <Note>今日已观看 {Math.floor(state?.daily?.usedSeconds || 0)} 秒 · 已请求 {state?.daily?.requests || 0} 次模型。{state?.daily?.remainingSeconds === null ? '今日时长不限。' : Number.isFinite(state?.daily?.remainingSeconds) ? `今日剩余 ${Math.floor(state.daily.remainingSeconds)} 秒。` : ''}</Note>
     {state?.reason && <Note>{state.reason}</Note>}{schedule?.lastError && <Note error>{schedule.lastError}</Note>}{watch?.lastError && <p role="status">上次自主观看停止原因：{watch.lastError}</p>}
@@ -167,20 +185,23 @@ function FriendInteractionPanel({ state, interactions, share, api, run, busy, co
     <p className="muted">只与下方许可的好友和群聊互动，不设人数和次数上限。配置模型并选好名单后会自动准备回复；观看中可自主分享已观察的作品。群聊只在被 @ 或叫到响应昵称时回复。</p>
     {switchStatus && <p role="status">{switchStatus}</p>}{switchError && <Note error>{switchError}</Note>}
     {!configured && <Note>请先配置模型。名单和总开关会保留，模型就绪后自动准备互动。</Note>}
+    {Boolean(share?.needsReview?.length) && <div className="actions"><Note error>有 {share.needsReview.length} 条分享收据待核对；不会自动重发。</Note><Button size="sm" variant="outline" onClick={() => document.getElementById('share-receipts')?.scrollIntoView({ block: 'center' })}>去核对分享收据</Button></div>}
     {interactions?.friend?.lastError && <Note error>{interactions.friend.lastError}</Note>}
+    {interactions?.friend?.waitReason && <Note>{interactions.friend.preparing ? '正在准备：' : '等待准备：'}{interactions.friend.waitReason}{interactions.friend.lastErrorCode ? `（${interactions.friend.lastErrorCode}）` : ''}{interactions.friend.nextRetryAt ? ` · 下次自动检查 ${new Date(interactions.friend.nextRetryAt).toLocaleString('zh-CN', { hour12: false })}` : ''}</Note>}
+    {interactions?.friend?.waitReason && <div className="actions"><Button size="sm" variant="outline" disabled={!connected || busy.has('chatPrepare') || interactions?.friend?.canPrepare === false} onClick={() => { void run('chatPrepare', () => api('/api/chat/prepare', {})); }}>{busy.has('chatPrepare') || interactions.friend.preparing ? '正在准备…' : '准备回复通道/重新连接并重试'}</Button></div>}
     {interactions?.friend?.message && <Note>{interactions.friend.message}</Note>}
-    {interactions?.presence?.reason && <Note>{interactions.presence.reason}</Note>}
     <Button size="sm" variant="outline" disabled={!connected || busy.has('chatList') || form.status.kind === 'saving'} onClick={() => { void run('chatList', load); }}>读取联系人与群聊</Button>
+    <Button size="sm" variant="outline" disabled={!connected || busy.has('chatList') || form.status.kind === 'saving'} onClick={() => { void run('chatList', async () => { await api('/api/browser/open', {}); await new Promise(resolve => setTimeout(resolve, 1200)); await load(); }); }}>重新连接专用浏览器并重试</Button>
     <Note>读取范围是抖音网页版当前会话，不代表全部关注好友或所有群。要授权群聊，请先让群会话出现在抖音消息列表，再刷新。</Note>
-    {contacts && <p className="muted">本次读取：个人 {contacts.filter(item => item.isGroup === false).length} 个 · 群聊 {contacts.filter(item => item.isGroup === true).length} 个 · 类型待核对 {contacts.filter(item => typeof item.isGroup !== 'boolean').length} 个。{discovery?.scannedToEnd === false ? ` 当前列表尚未完整读取。${discovery.reason || ''}` : ''}</p>}
-    {contacts?.some(contact => contact.relationshipStatus === 'unavailable' || contact.isGroup === true) && <><Note>请在抖音核对所选会话的昵称、头像和类型，再勾选授权。身份不明的会话不可选；勾选授权后，选择会话才会保存名单。</Note><label><input type="checkbox" aria-label="授权已核对的现有会话" checked={draft.allowConversationOnly} onChange={event => { const value = event.target.checked; existingAuthorization.current = value; edit({ allowConversationOnly: value, ...(!value ? { recipientIds: draft.recipientIds.filter(id => shownContacts.some(contact => contact.id === id && contact.followed === true && contact.isGroup === false)) } : {}) }, value ? { blurOnly: true } : { immediate: true }); }} />我已核对所选会话，授权此名单用于互动</label></>}
-    <div className="contact-list">{[false, true, null].map(kind => { const items = shownContacts.filter(contact => contact.isGroup === kind || kind === null && typeof contact.isGroup !== 'boolean'); return items.length ? <React.Fragment key={String(kind)}><p className="muted">{kind === false ? '个人会话' : kind === true ? '群聊（仅被 @ 或叫到响应昵称时回复）' : '类型待核对（暂不可选）'}</p>{items.map(contact => <label key={contact.id}><input type="checkbox" aria-label={`许可联系人 ${contactName(contact)}`} checked={draft.recipientIds.includes(contact.id)} disabled={!connected || !draft.recipientIds.includes(contact.id) && (contact.notListed || !hasStableConversationIdentity(contact) || typeof contact.isGroup !== 'boolean' || !(contact.followed === true && contact.isGroup === false || draft.allowConversationOnly && canAuthorizeConversation(contact)))} onChange={event => edit({ recipientIds: event.target.checked ? [...draft.recipientIds, contact.id] : draft.recipientIds.filter(id => id !== contact.id) }, { immediate: true })} />{contactName(contact)}<small>{contactPermissionLabel(contact, state, draft, form.status)} · {hasStableConversationIdentity(contact) ? '稳定身份已核对' : '身份信息不足'} · {contact.notListed ? '本次列表未返回' : contact.followed === true && contact.isGroup === false ? '已关注' : contact.isGroup ? '群聊会话' : '关注关系未核实'}</small></label>)}</React.Fragment> : null; })}{!contacts && !state?.policy?.allowlist?.length && <p className="muted">尚未选择许可会话。</p>}</div>
+    {contacts && <p className="muted">本次读取：个人 {contacts.filter(item => item.isGroup === false).length} 个 · 群聊 {contacts.filter(item => item.isGroup === true).length} 个。{discovery?.scannedToEnd === false ? ` 当前列表尚未完整读取。${discovery.reason || ''}` : ''}</p>}
+    {contacts?.some(contact => contact.relationshipStatus === 'unavailable' || contact.isGroup === true || typeof contact.isGroup !== 'boolean') && <><Note>请在抖音核对所选会话的昵称和类型，再勾选授权。未取得稳定身份的会话可人工勾选，按群聊处理；发送前仍核对显示名和类型。</Note><label><input type="checkbox" aria-label="授权已核对的现有会话" checked={draft.allowConversationOnly} onChange={event => { const value = event.target.checked; existingAuthorization.current = value; edit({ allowConversationOnly: value, ...(!value ? { recipientIds: draft.recipientIds.filter(id => shownContacts.some(contact => contact.id === id && contact.followed === true && contact.isGroup === false)) } : {}) }, value ? { blurOnly: true } : { immediate: true }); }} />我已核对所选会话，授权此名单用于互动</label></>}
+    <div className="contact-list">{[false, true, null].map(kind => { const items = shownContacts.filter(contact => contact.isGroup === kind || kind === null && typeof contact.isGroup !== 'boolean'); return items.length ? <React.Fragment key={String(kind)}><p className="muted">{kind === false ? '个人会话' : kind === true ? '群聊（仅被 @ 或叫到响应昵称时回复）' : '旧记录类型待核对（暂不可选）'}</p>{items.map(contact => <label key={contact.id}><input type="checkbox" aria-label={`许可联系人 ${contactName(contact)}`} checked={draft.recipientIds.includes(contact.id)} disabled={!connected || !draft.recipientIds.includes(contact.id) && (contact.notListed || !(contact.followed === true && contact.isGroup === false || draft.allowConversationOnly === true && typeof contact.isGroup === 'boolean'))} onChange={event => edit({ recipientIds: event.target.checked ? [...draft.recipientIds, contact.id] : draft.recipientIds.filter(id => id !== contact.id) }, { immediate: true })} />{contactName(contact)}</label>)}</React.Fragment> : null; })}{!contacts && !state?.policy?.allowlist?.length && <p className="muted">尚未选择许可会话。</p>}</div>
     <Field title="群聊响应昵称（逗号或换行分隔）"><textarea aria-label="群聊响应昵称" value={draft.groupMentionNamesText} onChange={event => edit({ groupMentionNamesText: event.target.value }, { blurOnly: true })} onBlur={() => { void form.flush(); }} rows={2} /></Field>
     <AutoSaveStatus status={form.status} />
     <Note>今日回复模型请求 {state?.daily?.requests || 0} 次 · 今日分享 {share?.daily?.attempts || 0} 次。未确认发送会暂停，不自动重发。</Note>
-    {(state?.contacts || []).filter(item => item.status !== 'ready').map(item => <div className="paused-contact" key={item.id}><strong>{contactName(state?.policy?.allowlist?.find(contact => contact.id === item.id))}</strong><p>{item.reason || item.status}</p><Button size="sm" disabled={!connected || form.status.kind === 'saving' || busy.has('chatList') || busy.has(`resolve-${item.id}`)} onClick={() => { void run(`resolve-${item.id}`, () => api('/api/chat/resolve', { recipientId: item.id })); }}>{busy.has(`resolve-${item.id}`) ? '正在核对…' : '已人工核对，解除暂停'}</Button></div>)}
-    <ShareReceipts state={share} api={api} run={run} busy={busy} connected={connected} />
-    <details><summary>回复处理记录</summary><Data value={{ contacts: (state?.contacts || []).map(item => ({ name: contactName(state?.policy?.allowlist?.find(contact => contact.id === item.id)), status: item.status, pending: Boolean(item.pending), unanswered: item.unanswered?.length || 0 })), events: state?.events || [] }} /></details>
+    {(state?.contacts || []).filter(item => item.identityReviewRequired === true || item.recovery?.requiresUserAction === true || /登录|验证码|未授权|许可.*(?:不足|失效|撤销)|身份.*(?:变化|不一致|未通过|不明|不足)/.test(item.reason || '') || ['paused', 'delivery-uncertain'].includes(item.status) && !(item.recovery?.autoPendingCount > 0 || item.recovery?.autoRetryCount > 0)).map(item => <div className="paused-contact" key={item.id}><strong>{contactName(state?.policy?.allowlist?.find(contact => contact.id === item.id))}</strong><p>{item.reason || '该会话暂缓处理，状态会继续更新。'}</p>{item.identityReviewRequired === true && <p>请重新读取联系人并确认许可名单；身份未通过前不会发送。</p>}</div>)}
+    <div id="share-receipts"><ShareReceipts state={share} api={api} run={run} busy={busy} connected={connected} /></div>
+    <details><summary>回复处理记录</summary><Data value={{ recovery: state?.recovery, contacts: (state?.contacts || []).map(item => ({ recovery: item.recovery, reason: item.reason, name: contactName(state?.policy?.allowlist?.find(contact => contact.id === item.id)), status: item.status, pending: Boolean(item.pending), unanswered: item.unanswered?.length || 0 })), events: state?.events || [] }} /></details>
   </Panel>;
 }
 
@@ -244,7 +265,7 @@ export function App() {
   const [taskLimits, setTaskLimits] = useState(null), [share, setShare] = useState(null);
   const [mode, setMode] = useState(null), [comments, setComments] = useState(null), [connectionError, setConnectionError] = useState('');
   const [tasks, setTasks] = useState([]), [selectedTask, setSelectedTask] = useState(null), [events, setEvents] = useState([]), [running, setRunning] = useState(false), [instruction, setInstruction] = useState('');
-  const [schedule,setSchedule]=useState(null),[interactions,setInteractions]=useState(null),[updatesOpen,setUpdatesOpen]=useState(false);
+  const [schedule,setSchedule]=useState(null),[interactions,setInteractions]=useState(null),[updatesOpen,setUpdatesOpen]=useState(false),[reviewOpen,setReviewOpen]=useState(false);
   const [view, setView] = useState('settings'), [settingsCategory, setSettingsCategory] = useState('基础设置'), [rightOpen, setRightOpen] = useState(false), [error, setError] = useState(''), [busy, setBusy] = useState(new Set()), [suggestedUrl, setSuggestedUrl] = useState('');
   const [operationErrors, setOperationErrors] = useState({}), [pollError, setPollError] = useState('');
   const lock = useRef(new Set()), revision = useRef(0), bootRef = useRef(null), currentTask = useRef(null), pollRef = useRef(null), submitLock = useRef(false), restoredSelection = useRef(false);
@@ -258,7 +279,7 @@ export function App() {
     lock.current.add(name); setBusy(new Set(lock.current));
     setOperationErrors(old => { const next = { ...old }; delete next[name]; return next; });
     try { const result = await action(); await pollRef.current?.(); return result; }
-    catch (failure) { const detail = requestFailure(failure, operationLabel(name)); setOperationErrors(old => ({ ...old, [name]: { message: detail.message, requestError: detail.requestError === true, unconfirmed: detail.unconfirmed === true } })); }
+    catch (failure) { const detail = requestFailure(failure, operationLabel(name)); setOperationErrors(old => ({ ...old, [name]: { message: detail.message, requestError: detail.requestError === true, unconfirmed: detail.unconfirmed === true, retry: action } })); }
     finally { lock.current.delete(name); setBusy(new Set(lock.current)); }
   }, []);
   useEffect(() => {
@@ -321,9 +342,10 @@ export function App() {
       <div className="sidebar-label">本次运行的任务</div><div className="task-list">{tasks.map(item => <button className={item.id === selectedTask && view === 'chat' ? 'task-item selected' : 'task-item'} key={item.id} onClick={() => { setSelectedTask(item.id); setView('chat'); }}><span>{item.instruction || '视频任务'}</span><small>{statusLabel(item.status)}</small></button>)}{!tasks.length && <p className="sidebar-empty">任务记录会出现在这里。</p>}</div>
       <div className="sidebar-bottom"><small className="software-version">独立 API 版 · {__APP_VERSION__}</small><Button size="sm" disabled={busy.has('refresh')} onClick={() => { void run('refresh', async () => { bootRef.current = null; await pollRef.current?.(); }); }}>刷新连接</Button><button className="nav-link" onClick={() => setUpdatesOpen(true)}>检查更新</button><div className="connection"><StateDot state={connected ? running ? 'ongoing' : 'done' : 'warning'} /><span>{connected ? running ? '正在执行任务' : '本机服务已连接' : '正在连接本机服务'}</span></div></div>
     </aside>
-    <main className={`${frame.centerCol} main-column`}><header className="topbar"><div><strong>{view === 'settings' ? '刷抖音设置' : view === 'health' ? '自检与用量' : view === 'reports' ? '观看日报' : view === 'memory' ? '共享记忆与人格' : view === 'watch' ? '自主观看' : task?.instruction || '对话与视频'}</strong><small>{settings.model || boot?.config?.model}</small></div><div className="actions"><FriendPresence presence={interactions?.presence} connected={connected} onOpen={() => { setSettingsCategory('好友互动'); setView('settings'); }} />{settings.configured && !settingsOpen && <Button size="sm" variant="outline" disabled={!connected || busy.has('browserOpen')} onClick={openDouyin}>{busy.has('browserOpen') ? '正在打开抖音…' : '打开抖音'}</Button>}{view !== 'settings' && <Button size="sm" onClick={() => setRightOpen(old => !old)}>{rightOpen ? '收起快捷控制' : '展开快捷控制'}</Button>}</div></header>
-      {(error || connectionError || pollError) && <div className="global-error" role="alert"><span>{[error, connectionError, pollError].filter(Boolean).join(' ')}</span><button aria-label="关闭提示" onClick={() => { setError(''); setConnectionError(''); setPollError(''); }}>×</button></div>}
-      {Object.entries(operationErrors).map(([name, failure]) => <div className="global-error" role="alert" key={name}><span>{failure.requestError ? '上次操作：' : ''}{failure.message}{failure.requestError && connected ? failure.unconfirmed ? ' 本机服务当前已连接；请核对上述操作是否生效。' : ' 本机服务当前已连接。' : ''}</span><button aria-label={`清除${operationLabel(name)}提示`} onClick={() => setOperationErrors(old => { const next = { ...old }; delete next[name]; return next; })}>×</button></div>)}
+    <main className={`${frame.centerCol} main-column`}><header className="topbar"><div><strong>{view === 'settings' ? '刷抖音设置' : view === 'health' ? '自检与用量' : view === 'reports' ? '观看日报' : view === 'memory' ? '共享记忆与人格' : view === 'watch' ? '自主观看' : task?.instruction || '对话与视频'}</strong><small>{settings.model || boot?.config?.model}</small></div><div className="actions"><FriendPresence presence={interactions?.presence} connected={connected} />{settings.configured && !settingsOpen && <Button size="sm" variant="outline" disabled={!connected || busy.has('browserOpen')} onClick={openDouyin}>{busy.has('browserOpen') ? '正在打开抖音…' : '打开抖音'}</Button>}{view !== 'settings' && <Button size="sm" onClick={() => setRightOpen(old => !old)}>{rightOpen ? '收起快捷控制' : '展开快捷控制'}</Button>}</div></header>
+    {((share?.needsReview || []).length > 0 || share?.recoveryRequired) && <div className="global-error" role="alert"><span>分享送达尚未确认，保留原收据，不会自动重发。</span><Button size="sm" variant="outline" onClick={() => setReviewOpen(true)}>查看分享收据</Button></div>}
+      {(error || connectionError || pollError) && <div className="global-error" role="alert"><span>{[error, connectionError, pollError].filter(Boolean).join(' ')}</span><RecoveryActions busy={busy} connected={connected} message={[error, connectionError, pollError].filter(Boolean).join(' ')} onRetry={() => { void run('refresh', async () => { bootRef.current = null; await pollRef.current?.(); }); }} onHealth={() => { setSettingsCategory('自检与用量'); setView('settings'); }} onOpen={openDouyin} /><button aria-label="关闭提示" onClick={() => { setError(''); setConnectionError(''); setPollError(''); }}>×</button></div>}
+      {Object.entries(operationErrors).map(([name, failure]) => <div className="global-error" role="alert" key={name}><span>{failure.requestError ? '上次操作：' : ''}{failure.message}{failure.requestError && connected ? failure.unconfirmed ? ' 本机服务当前已连接；请核对上述操作是否生效。' : ' 本机服务当前已连接。' : ''}</span><RecoveryActions busy={busy} connected={connected} message={failure.message} onRetry={failure.retry ? () => { void run(name, failure.retry); } : undefined} onHealth={() => { setSettingsCategory('自检与用量'); setView('settings'); }} onOpen={openDouyin} /><button aria-label={`清除${operationLabel(name)}提示`} onClick={() => setOperationErrors(old => { const next = { ...old }; delete next[name]; return next; })}>×</button></div>)}
       {boot?.watch?.available && !watchReady && <div className="watch-running-strip" role="status">自主观看状态尚未核实，请等待本机服务回读后再开始操作。</div>}
       {watchActive && <div className="watch-running-strip" role="status">自主观看进行中 · 今日已观看 {Math.floor(video?.daily?.usedSeconds || 0)} 秒 · 模型请求 {video?.daily?.requests || 0} 次</div>}
       {view === 'settings' ? settingsPage : view === 'health' ? <HealthDashboard api={api} run={run} busy={busy} connected={connected} /> : view === 'reports' ? <ReportsView connected={connected} api={api} run={run} busy={busy} /> : view === 'memory' ? <MemoryView api={api} run={run} settings={settings} bridge={bridge} busy={busy} persona={persona} onPersona={setPersona} personaAvailable={boot?.persona?.available} watchState={watch} watchReady={watchReady} /> : view === 'watch' ? <WatchView state={watch} video={video} browser={browser} snapshot={persona} onSettings={() => setRightOpen(true)} /> : <>
@@ -333,6 +355,7 @@ export function App() {
     </main>
     {rightOpen && view !== 'settings' && <aside className="business-sidebar" aria-label="业务设置"><div className="business-heading"><strong>业务设置</strong><small>由你明确控制</small></div>{boot?.videoTime?.enabled ? <VideoPanel state={video} schedule={schedule} watch={watch} api={api} run={run} busy={busy} connected={connected} configured={configured}><TopicPanel state={watch?.options} active={watchActive} api={api} run={run} busy={busy} connected={connected && watchReady} />{boot?.mode?.available && <SilentPanel state={mode} connected={connected} api={api} run={run} busy={busy} />}</VideoPanel> : null}<TaskBudgetPanel state={taskLimits} api={api} run={run} busy={busy} operationActive={operationActive} /><BrowserPanel browser={browser} onPick={pick} manualForward={boot?.share?.available !== true} />{boot?.media?.available && <AudioPanel state={audio} api={api} run={run} busy={busy} bridge={bridge} operationActive={operationActive} />}{boot?.comments?.available && <CommentsPanel state={comments} connected={connected} api={api} run={run} busy={busy} />}<FriendInteractionPanel state={chat} interactions={interactions} share={share} api={api} run={run} busy={busy} configured={configured} connected={connected} /></aside>}
     {updatesOpen && <UpdateDialog bridge={bridge} operationActive={operationActive} onClose={()=>setUpdatesOpen(false)}/>}
+    {reviewOpen && <ReviewDialog share={share} api={api} run={run} busy={busy} connected={connected} onClose={()=>setReviewOpen(false)}/>}
     {(!settings.configured || settingsOpen) && <ApiSettings settings={settings} bridge={bridge} onSaved={saved} onClose={() => setSettingsOpen(false)} run={run} busy={busy.has('settings') || busy.has('clearKey')} operationActive={operationActive || !watchReady} watchActive={watchActive} onStopWatch={stopWatch} onOpenDouyin={openDouyin} openingDouyin={busy.has('browserOpen')} connected={connected} operationError={[error, connectionError, ...Object.values(operationErrors).map(item => item.message)].filter(Boolean).join(' ')} />}
   </div>;
 }

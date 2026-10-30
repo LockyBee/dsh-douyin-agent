@@ -17,15 +17,18 @@ const NODE_LICENSE_SHA256 = '8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b
 const NODE_ARCHIVE_SHA256 = 'f2aa33b35b75aca5f3f7b85675a6f6423201053e9381911e64961f3bda2528ab';
 const DEPENDENCIES = { 'playwright-core': '1.64.0-alpha-1790635538000', yaml: '2.9.0' };
 export const DOMAIN_FILES = Object.freeze([
-  'contact-authorization.mjs', 'friend-interactions.mjs', 'friend-interactions-guard.mjs',
+  'chat-output.mjs',
+  'group-video-inbox.mjs',
+  'browser-pages.mjs', 'video-storyboard.mjs', 'contact-authorization.mjs', 'friend-interactions.mjs', 'friend-interactions-guard.mjs',
   'group-reply-trigger.mjs',
   'scheduled-watch.mjs', 'interaction-status.mjs', 'settings-sections.mjs', 'usage-ledger.mjs', 'watch-options.mjs', 'diagnostics.mjs', 'api-agent.mjs', 'app.mjs', 'browser-host.mjs', 'chat-agent.mjs', 'chat-browser.mjs',
   'chat-message.mjs', 'chat-service.mjs', 'core.mjs', 'message-tracker.mjs', 'memory.mjs',
   'qq-sync.mjs', 'runtime-paths.mjs', 'tool-definitions.mjs', 'video-forward.mjs',
-  'video-limits.mjs', 'playwright-runtime.mjs',
-  'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-agent.mjs', 'spark-service.mjs', 'daily-report.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'watch-mode.mjs',
+  'video-limits.mjs', 'playwright-runtime.mjs', 'receipt-baseline.mjs',
+  'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'browser-pause.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-agent.mjs', 'spark-service.mjs', 'daily-report.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'watch-mode.mjs',
 ]);
 const MEDIA_FILES = ['index.mjs', 'key-store.mjs', 'local_whisper.py', 'mimo_bridge.py', 'requirements.txt', 'setup_local.py', 'README.md', 'PROVENANCE.json'];
+const STORYBOARD_FILES=['PROVENANCE.json','vendor/sheet.mjs','vendor/plan.mjs','vendor/LICENSE','vendor/NOTICE','vendor/jpeg-js/package.json','vendor/jpeg-js/index.js','vendor/jpeg-js/lib/encoder.js','vendor/jpeg-js/lib/decoder.js','vendor/jpeg-js/LICENSE','vendor/jpeg-js/LICENSE-APACHE-2.0.txt'];
 const VENDOR_FILES = [
   'vendor/mimo/driver/mimo_driver.py', 'vendor/mimo/LICENSE', 'vendor/voice/lib/providers.js',
   'vendor/voice/lib/provider-http.js', 'vendor/voice/LICENSE', 'vendor/minimax/lib/index.js', 'vendor/minimax/LICENSE',
@@ -221,6 +224,7 @@ export async function stageApiRuntime({ install = true, uiDir = path.join(DESKTO
     inputs.push({ path: relative(PROJECT, target), sha256: await sha256(target) });
   };
   for (const file of DOMAIN_FILES) await add(path.join(DOMAIN, file), path.join(PROJECT, file));
+  for (const file of STORYBOARD_FILES) await add(path.join(DOMAIN,'storyboard',file),path.join(PROJECT,'storyboard',file));
   await add(workerFile, path.join(PROJECT, 'api-worker.mjs'));
   for (const file of [...MEDIA_FILES, ...VENDOR_FILES]) await add(path.join(DOMAIN, 'media', file), path.join(PROJECT, 'media', file));
   for (const file of TEMPLATE_FILES) await add(path.join(TEMPLATE, file), path.join(PROJECT, file));

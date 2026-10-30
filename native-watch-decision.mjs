@@ -12,6 +12,7 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
   return async function decide({ system, messages, signal }) {
     signal?.throwIfAborted();
     const info = await llm.resolveModelInfo(provider, model, signal);
+    const shortReplyControls = Array.isArray(info?.reasoning?.efforts) && info.reasoning.efforts.some(effort => effort.id === 'off') ? { reasoningEffort: 'off' } : {};
     const hasImages = messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'));
     if (hasImages && (!info?.inputModalities?.includes('image') || typeof attachments?.saveImages !== 'function')) throw new Error('当前 DSH 模型或附件服务不能接收实际视频画面，已停止自主观看。');
     const converted = [];
@@ -35,7 +36,7 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
       converted.push({id:randomUUID(),role:message.role,content:blocks,source:{kind:'plugin',plugin:'douyin-browser',form:'snapshot',sections:[]}});
     }
     let text = '', finish, usage = {}; const deltaIndexes=new Set();
-    for await (const chunk of llm.stream({provider,model,messages:converted,system,maxTokens,signal,sessionId:agent.session.id})) {
+    for await (const chunk of llm.stream({provider,model,messages:converted,system,maxTokens,...shortReplyControls,signal,sessionId:agent.session.id})) {
       signal?.throwIfAborted();
       if (chunk.type === 'text-delta') {
         deltaIndexes.add(chunk.index);
@@ -47,7 +48,7 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
       if (chunk.type === 'usage') usage = { ...chunk.usage, prompt_tokens: chunk.usage.inputTokens ?? null, completion_tokens: chunk.usage.outputTokens ?? null, total_tokens: chunk.usage.totalTokens ?? (Number.isSafeInteger(chunk.usage.inputTokens) && Number.isSafeInteger(chunk.usage.outputTokens) ? chunk.usage.inputTokens + chunk.usage.outputTokens : null) };
       if (chunk.type === 'finish') finish = chunk.reason;
     }
-    if (finish?.kind !== 'stop' || !text.trim()) throw Object.assign(new Error(`DSH 自主观看决策未完整返回（${finish?.kind || '缺少完成标记'}），未执行动作。`), { usage });
+    if (finish?.kind !== 'stop' || !text.trim()) throw Object.assign(new Error(`DSH 自主观看决策未完整返回（${finish?.kind || '缺少完成标记'}），未执行动作。`), { usage, code:'WATCH_DECISION_INCOMPLETE' });
     return {text,usage};
   };
 }

@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { FriendInteractions } from '../friend-interactions.mjs';
 import { acquireFriendInteractionDispatch } from '../friend-interactions-guard.mjs';
+import { interactionPresence } from '../interaction-status.mjs';
 
 function fixture(t, options = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-friend-interactions-'));
@@ -12,16 +13,46 @@ function fixture(t, options = {}) {
   const chat = { state: () => structuredClone(current), start: async controls => { calls.push('chat.start'); controls.signal.throwIfAborted(); current.running = true; }, stop: () => { calls.push('chat.stop'); current.running = false; } };
   const share = { state: () => ({ ...shared }), configure: (input, controls) => { assert.equal(controls.explicit, true); calls.push(`share.${input.enabled}`); shared.enabled = input.enabled; } };
   const coordinator = new FriendInteractions({ stateDir, getChat: () => chat, getShare: () => share, modelReady: () => options.ready !== false, ...options });
+  if (!options.missingPolicy) fs.writeFileSync(coordinator.policyFile, JSON.stringify({ version: 1, enabled: true }));
   t.after(async () => { await coordinator.close(); assert.equal(path.dirname(path.resolve(stateDir)), path.resolve(os.tmpdir())); assert.match(path.basename(stateDir), /^douyin-friend-interactions-/); fs.rmSync(stateDir, { recursive: true, force: true }); });
   return { stateDir, calls, current, shared, chat, share, coordinator };
 }
 
-test('默认开启，重用原名单正常启动一次，重复检查不重建基线或反复保存', async t => {
-  const f = fixture(t); assert.equal(f.coordinator.state().policy.enabled, true);
+test('另一入口恢复真实worker后清除旧等待原因，原入口不重复启动或重建基线', async t => {
+  const f = fixture(t); let starts = 0;
+  f.chat.start = async () => { starts++; throw Object.assign(new Error('消息页未打开'), { code: 'CHAT_PAGE_NOT_OPEN' }); };
+  await f.coordinator.reconcile(); assert.equal(f.coordinator.state().lastErrorCode, 'CHAT_PAGE_NOT_OPEN');
+  const now = Date.now(); f.current.running = true; f.current.worker = { alive: true, status: 'running', heartbeatAt: now };
+  f.current.contacts = [{ id: 'synthetic-original', status: 'ready', lastCheckedAt: now }];
+  const other = new FriendInteractions({ stateDir: f.stateDir, getChat: () => f.chat, getShare: () => f.share });
+  try {
+    await other.reconcile(); await f.coordinator.reconcile();
+    const state = f.coordinator.state();
+    assert.equal(state.status, 'running'); assert.equal(state.waitReason, ''); assert.equal(state.lastErrorCode, ''); assert.equal(state.nextRetryAt, null);
+    assert.equal(interactionPresence({ friend: state, chat: f.current, modelReady: true, now }).online, true);
+    assert.equal(starts, 1); assert.equal(f.calls.includes('chat.stop'), false);
+    await f.coordinator.configure({ enabled: false }, { explicit: true });
+    assert.equal(f.coordinator.state().enabled, false); assert.equal(f.current.running, false);
+  } finally { await other.close(); }
+});
+
+test('缺少总开关记录时沿用默认开启，仍只重用原许可名单启动一次', async t => {
+  const f = fixture(t, { missingPolicy: true }); assert.equal(f.coordinator.state().policy.enabled, true);
   assert.equal(fs.existsSync(f.coordinator.policyFile), false);
   await f.coordinator.reconcile(); await f.coordinator.reconcile();
   assert.deepEqual(f.calls, ['share.true', 'chat.start']); assert.equal(f.coordinator.state().status, 'running');
-  assert.equal(fs.existsSync(f.coordinator.policyFile), false); assert.deepEqual(f.current.policy.allowlist, [{ id: 'synthetic-original' }]);
+  assert.deepEqual(f.current.policy.allowlist, [{ id: 'synthetic-original' }]);
+});
+
+test('前台退避期间重复检查不再次启动，显式关闭仍立即生效', async t => {
+  const f = fixture(t); let starts = 0;
+  f.chat.start = async () => { starts++; throw Object.assign(new Error('合成前台状态'), { code: 'CHAT_FOREGROUND' }); };
+  await f.coordinator.reconcile();
+  for (let i = 0; i < 50; i++) await f.coordinator.reconcile();
+  assert.equal(starts, 1); assert.equal(f.coordinator.state().status, 'waiting');
+  await f.coordinator.configure({ enabled: true }, { explicit: true }); assert.equal(starts, 2);
+  await f.coordinator.configure({ enabled: false }, { explicit: true });
+  assert.equal(f.coordinator.state().enabled, false); assert.equal(starts, 2);
 });
 test('没有名单或模型时等待，不创建名单、不启动回复', async t => {
   const f = fixture(t, { ready: false }); f.current.policy.allowlist = [];
@@ -136,6 +167,64 @@ test('默认运行中解除所选会话暂停，会协调停止并保留维护�
   assert.deepEqual(stopOptions,{preservePending:true,reason:'settings-update'});assert.equal(f.current.running,true);assert.equal(f.coordinator.state().enabled,true);
   assert.deepEqual(f.calls,['share.true','chat.start','chat.stop','contact.resumed','chat.start']);
 });
+test('回复启动失败保留结构化等待原因并退避，重复检查不重复启动；显式准备动作只准备一次并重试', async t => {
+  const f = fixture(t); let starts = 0, prepared = 0;
+  f.chat.start = async () => { starts++; throw Object.assign(new Error('专用标签页已离开抖音，请重新打开或准备回复通道。'), { code: 'CHAT_PAGE_LEFT_DOUYIN' }); };
+  await f.coordinator.reconcile();
+  let state = f.coordinator.state();
+  assert.equal(starts, 1); assert.equal(state.status, 'waiting'); assert.equal(state.lastErrorCode, 'CHAT_PAGE_LEFT_DOUYIN');
+  assert.match(state.waitReason, /专用标签页已离开抖音/); assert.ok(Number.isFinite(Date.parse(state.nextRetryAt))); assert.equal(state.canPrepare, true);
+  for (let index = 0; index < 50; index++) await f.coordinator.reconcile();
+  assert.equal(starts, 1);
+  f.chat.prepareChat = async () => { prepared++; return { prepared: true, count: 1 }; };
+  f.chat.start = async () => { starts++; f.current.running = true; };
+  state = await f.coordinator.prepareChat();
+  assert.equal(prepared, 1); assert.equal(starts, 2); assert.equal(state.waitReason, ''); assert.equal(state.status, 'running');
+  await f.coordinator.prepareChat(); assert.equal(prepared, 1, '运行中再次准备不会重复建页');
+});
+
+test('准备动作并发单飞，关闭中断并等待同一准备 Promise', async t => {
+  const f = fixture(t), calls = [], releases = [];
+  f.chat.prepareChat = ({ signal }) => { calls.push(signal); return new Promise((resolve, reject) => { signal.addEventListener('abort', () => reject(signal.reason), { once: true }); releases.push(() => resolve({ prepared: true, count: 1 })); }); };
+  const first = f.coordinator.prepareChat();
+  const firstSettled = first.catch(error => error);
+  await new Promise(resolve => setImmediate(resolve));
+  const second = f.coordinator.prepareChat();
+  const secondSettled = second.catch(error => error);
+  assert.equal(calls.length, 1); assert.equal(f.coordinator.state().status, 'preparing');
+  const closing = f.coordinator.close();
+  assert.equal(calls[0].aborted, true);
+  await Promise.all([firstSettled, secondSettled, closing]);
+  assert.equal(f.coordinator.state().status, 'closed');
+  assert.equal(f.coordinator.state().online, undefined);
+});
+
+test('准备等待中进入设置维护会中断准备，但不改总开关', async t => {
+  const f = fixture(t); let signal;
+  f.chat.configure = async () => { f.calls.push('contacts.saved'); };
+  f.chat.prepareChat = ({ signal: current }) => { signal = current; return new Promise((resolve, reject) => { current.addEventListener('abort', () => reject(current.reason), { once: true }); }); };
+  const pending = f.coordinator.prepareChat();
+  const observed = pending.catch(error => error);
+  await new Promise(resolve => setImmediate(resolve));
+  await f.coordinator.configureContacts({ recipientIds: ['synthetic-original'] });
+  assert.equal(signal.aborted, true);
+  assert.equal(f.coordinator.state().enabled, true);
+  assert.match((await observed).message, /设置维护/);
+});
+
+test('准备等待中撤销总开关会中断准备且不会重新打开', async t => {
+  const f = fixture(t); let signal;
+  f.chat.prepareChat = ({ signal: current }) => { signal = current; return new Promise((resolve, reject) => { current.addEventListener('abort', () => reject(current.reason), { once: true }); }); };
+  const pending = f.coordinator.prepareChat();
+  const observed = pending.catch(error => error);
+  await new Promise(resolve => setImmediate(resolve));
+  await f.coordinator.configure({ enabled: false }, { explicit: true });
+  assert.equal(signal.aborted, true);
+  assert.equal(f.coordinator.state().enabled, false);
+  await observed;
+  assert.equal(f.shared.enabled, false);
+});
+
 test('解除暂停不接受名单外会话，用户同时关闭总开关后也不会被恢复动作打开',async t=>{
   const f=fixture(t);await f.coordinator.reconcile();f.chat.configure=()=>{};
   await assert.rejects(f.coordinator.resumeContact('not-selected'),error=>error.status===403);assert.equal(f.calls.includes('chat.stop'),false);

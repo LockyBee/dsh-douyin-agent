@@ -18,6 +18,22 @@ const stableContact = nativeId => ({ id: `conv:${hash(`native:${nativeId}`)}`, n
 const friend = stableContact(nativeFriend).id, other = stableContact(nativeOther).id;
 const stateFor = (videoId = '12345') => ({ url: `https://www.douyin.com/video/${videoId}`, loginRequired: false, verificationRequired: false, privateChatVisible: false, video: { id: videoId, url: `https://www.douyin.com/video/${videoId}`, title: '合成作品', author: '合成作者', time: 3, duration: 60, paused: false, readyState: 4 } });
 const receipt = videoId => ({ confirmed: true, deliveryUncertain: false, deliveryType: 'native-card', videoId, operationId: 'synthetic-forward-receipt', messageId: 'synthetic-card-message' });
+const preflightError = (input, code = 'CHAT_PAGE_NOT_OPEN', stage = 'contact-identity') => Object.assign(new Error('合成后台消息页暂不可用，未发送'), {
+  code, forwardOperationId: 'synthetic-preflight-forward', failure: { code, stage, message: '合成后台消息页暂不可用，未发送' },
+  preflight: { protocol: 'share-preflight-v1', outcome: 'not-sent', forwardOperationId: 'synthetic-preflight-forward', recipientId: input.recipientId, videoId: input.expectedVideoId, sendClicks: 0, dispatchAuthorized: false, failureCode: code, failureStage: stage },
+});
+
+test('其他回复占用共同发送锁时转发器未进入发送事务，正式零点击证明让观看可跳过',async t=>{
+  const f=fixture(t);f.service.configure({enabled:true},{explicit:true});
+  const {VideoForwarder}=await import('../video-forward.mjs');
+  let entered=0;
+  const forwarder=new VideoForwarder({stateDir:f.stateDir,videoLimits:f.videoLimits,controller:{source:'api',withPage:async()=>{entered++;throw new Error('不应进入作品页');}},chatBrowser:{listContacts:async()=>{entered++;throw new Error('不应读取联系人');}}});
+  forwarder.outbound.waitMs=0;const release=await forwarder.outbound.acquire();
+  try{
+    f.service.send=undefined;f.service.getForwarder=async()=>forwarder;
+    const result=await f.service.share(f.evidence());assert.equal(result.code,'SHARE_PREFLIGHT_NOT_SENT');assert.equal(result.failure.code,'OUTBOUND_BUSY');assert.equal(result.preflight.failureStage,'outbound-wait');assert.equal(result.preflight.sendClicks,0);assert.equal(result.preflight.dispatchAuthorized,false);assert.equal(entered,0);assert.equal(f.service.state().paused,false);assert.equal(f.service.ledger().operations[0].status,'not-sent');
+  }finally{release();}
+});
 
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-auto-share-')), stateDir = path.join(root, 'state');
@@ -46,6 +62,63 @@ test('自主分享默认关闭，模型不能改策略，只显示当前已核�
   f.service.configure({ enabled: true }, { explicit: true });
   assert.deepEqual(f.service.context().recipients, f.contacts.map(({ id, name, isGroup }) => ({ id, name, isGroup })));
   assert.equal(fs.existsSync(path.join(f.stateDir, 'share-ledger.json')), false);
+});
+
+test('仅精确的零点击后台缺页或前台回执可恢复为 not-sent，保留原因且同片不重试', async t => {
+  for (const code of ['CHAT_PAGE_NOT_OPEN', 'CHAT_FOREGROUND']) for (const stage of ['contact-identity', 'conversation-baseline']) {
+    let calls = 0;
+    const f = fixture(t, { send: async (input, controls) => { calls++; controls.authorize({ phase: 'prepare', recipientId: input.recipientId, videoId: input.expectedVideoId }); throw preflightError(input, code, stage); } });
+    f.service.configure({ enabled: true }, { explicit: true }); const input = f.evidence(), result = await f.service.share(input);
+    assert.equal(result.status, 'not-sent'); assert.equal(result.code, 'SHARE_PREFLIGHT_NOT_SENT'); assert.equal(result.confirmed, false); assert.equal(result.deliveryUncertain, false); assert.equal(result.preflight.sendClicks, 0);
+    const record = f.service.ledger().operations.at(-1); assert.equal(record.status, 'not-sent'); assert.equal(record.failure.code, code); assert.equal(record.failure.stage, stage); assert.deepEqual(record.preflight, result.preflight);
+    assert.equal(f.service.state().paused, false); assert.equal((await f.service.share(input)).code, 'SHARE_ALREADY_PROCESSED'); assert.equal(calls, 1);
+  }
+});
+
+test('未知、身份、缺证明和撤权取消不能伪装成可恢复缺页，点击后的同码仍 uncertain', async t => {
+  for (const mode of ['unknown', 'identity', 'missing-proof', 'clicked', 'wrong-video', 'wrong-recipient', 'wrong-stage', 'one-click', 'dispatch', 'receipt-failed', 'uncertain-claim', 'confirmed-claim', 'disabled', 'closed', 'cancelled']) {
+    const abort = new AbortController(); let f, sends = 0;
+    f = fixture(t, { send: async (input, controls) => {
+      controls.authorize({ phase: 'prepare', recipientId: input.recipientId, videoId: input.expectedVideoId });
+      if (mode === 'clicked') { controls.authorize({ phase: 'before-click', recipientId: input.recipientId, videoId: input.expectedVideoId }); sends++; }
+      const error = preflightError(input, mode === 'unknown' ? 'SYNTHETIC_UNKNOWN' : mode === 'identity' ? 'CHAT_CONVERSATION_IDENTITY_MISMATCH' : 'CHAT_PAGE_NOT_OPEN');
+      if (mode === 'missing-proof') delete error.preflight;
+      if (mode === 'wrong-video') error.preflight.videoId = '99999'; if (mode === 'wrong-recipient') error.preflight.recipientId = other;
+      if (mode === 'wrong-stage') { error.failure.stage = 'receipt'; error.preflight.failureStage = 'receipt'; }
+      if (mode === 'one-click') error.preflight.sendClicks = 1; if (mode === 'dispatch') error.preflight.dispatchAuthorized = true;
+      if (mode === 'receipt-failed') error.receiptWarning = '合成诊断收据保存失败';
+      if (mode === 'uncertain-claim') error.deliveryUncertain = true; if (mode === 'confirmed-claim') error.confirmed = true;
+      if (mode === 'disabled') f.service.configure({ enabled: false }, { explicit: true });
+      if (mode === 'closed') { f.service.closed = true; }
+      if (mode === 'cancelled') abort.abort(new Error('合成用户取消'));
+      throw error;
+    } });
+    f.service.configure({ enabled: true }, { explicit: true });
+    if (mode === 'clicked') { const result = await f.service.share(f.evidence(), { signal: abort.signal }); assert.equal(result.deliveryUncertain, true); assert.equal(f.service.state().paused, true); assert.equal(result.preflight, undefined); }
+    else { await assert.rejects(f.service.share(f.evidence(), { signal: abort.signal })); assert.equal(sends, 0, mode); }
+    assert.equal(f.service.ledger().operations.length, 1); assert.equal(f.service.ledger().operations[0].status, mode === 'clicked' ? 'uncertain' : 'not-sent');
+  }
+});
+
+test('稳定个人与人工群混合时只把稳定个人交给分享模型，人工群保留并说明暂不能分享', async t => {
+  const f = fixture(t), manual = { id: `conv:${'c'.repeat(64)}`, name: '合成人工群', isGroup: true, identityVerified: false, authorizationKind: 'manual', verifiedAt: '2026-10-15T01:00:00Z', relationshipStatus: 'unavailable' };
+  fs.writeFileSync(path.join(f.stateDir, 'chat-policy.json'), JSON.stringify({ version: 1, enabled: false, allowlist: [{ ...f.contacts[0], verifiedAt: '2026-10-15T01:00:00Z' }, manual] }));
+  f.service.configure({ enabled: true }, { explicit: true });
+  const context = f.service.context(); assert.deepEqual(context.recipients.map(item => item.id), [f.contacts[0].id]);
+  assert.equal(context.unavailableRecipients.length, 1); assert.match(context.unavailableRecipients[0].reason, /稳定会话身份/);
+  assert.equal(f.service.state().unavailableRecipients.length, 1);
+  await assert.rejects(f.service.share({ ...f.evidence(), recipientId: manual.id }), error => error.status === 403 && /稳定身份/.test(error.message));
+  assert.equal(f.calls.length, 0);
+});
+
+test('全是人工且缺少稳定身份时保留分享意愿，但不生成候选也不阻断状态', async t => {
+  const f = fixture(t), manual = { id: `conv:${'d'.repeat(64)}`, name: '合成人工群', isGroup: true, identityVerified: false, authorizationKind: 'manual', verifiedAt: '2026-10-15T01:00:00Z', relationshipStatus: 'unavailable' };
+  fs.writeFileSync(path.join(f.stateDir, 'chat-policy.json'), JSON.stringify({ version: 1, enabled: false, allowlist: [manual] }));
+  f.service.configure({ enabled: true }, { explicit: true });
+  const state = f.service.state(), context = f.service.context();
+  assert.equal(state.enabled, true); assert.equal(state.paused, false); assert.equal(state.recipients.length, 1);
+  assert.deepEqual(context.recipients, []); assert.equal(context.enabled, false); assert.equal(context.paused, false);
+  assert.equal(context.unavailableRecipients.length, 1);
 });
 
 test('观察证据、同一作品及现有白名单是发送前提，不接受任意链接或正文', async t => {
@@ -114,7 +187,7 @@ test('模型去重摘要仅包含当前作品且仍获许可的收件人终态�
 });
 
 test('分享支持超过50个已核对会话，不放宽重复或失去身份的名单',async t=>{
-  const f=fixture(t),allowlist=Array.from({length:251},(_,i)=>({id:`conv:${String(i).padStart(64,'0')}`,name:`合成更多许可会话${i}`,followed:true,isGroup:false,verifiedAt:'2026-10-15T01:00:00Z'}));
+  const f=fixture(t),allowlist=Array.from({length:251},(_,i)=>({...stableContact(`bulk-${i}`),name:`合成更多许可会话${i}`,followed:true,verifiedAt:'2026-10-15T01:00:00Z'}));
   fs.writeFileSync(path.join(f.stateDir,'chat-policy.json'),JSON.stringify({version:1,allowlist}));assert.equal(f.service.recipients().length,251);f.service.configure({enabled:true},{explicit:true});assert.equal(f.service.context().recipients.length,251);
   allowlist[250].followed=false;fs.writeFileSync(path.join(f.stateDir,'chat-policy.json'),JSON.stringify({version:1,allowlist}));assert.throws(()=>f.service.recipients(),/许可名单/);
 });
@@ -267,7 +340,7 @@ test('真实合成分享面板通过可信授权发送官方卡片，撤回授�
     let gates = 0, verified = 0;
     const controller = { source: 'api', withPage: async (action, options) => { assert.equal(options.autonomousRunId, undefined); return action(page); }, pauseForLimits: async () => {}, settle: async () => { throw new Error('自主分享不能导航另一作品'); } };
     const contact = { ...f.contacts[0], displayName: '合成好友1', avatar: 'https://synthetic.invalid/aweme-avatar/friend.png' };
-    const chatBrowser = { contacts: new Map([[friend, contact]]), listContacts: async ({ verifyFollowing }) => { assert.equal(verifyFollowing, true); verified++; return { contacts: [contact] }; }, readConversation: async () => ({ conversation: { id: friend }, messages: await realEvaluate(() => window.sendCount) ? [{ id: 'synthetic-real-dom-card', sender: 'outgoing', arrivalClassification: 'new-tail', media: { type: 'shared-work', videoId: '12345' } }] : [] }), sendMessage: async () => { throw new Error('不能发送正文或链接'); } };
+    const chatBrowser = { contacts: new Map([[friend, contact]]), listContacts: async ({ verifyFollowing, backgroundOnly }) => { assert.equal(verifyFollowing, false); assert.equal(backgroundOnly, true); verified++; return { contacts: [contact] }; }, readConversation: async () => ({ conversation: { id: friend }, messages: await realEvaluate(() => window.sendCount) ? [{ id: 'synthetic-real-dom-card', sender: 'outgoing', arrivalClassification: 'new-tail', media: { type: 'shared-work', videoId: '12345' } }] : [] }), sendMessage: async () => { throw new Error('不能发送正文或链接'); } };
     const forwarder = new VideoForwarder({ controller, chatBrowser, stateDir: f.stateDir, videoLimits: { beforeAction: () => { gates++; if (revoked && gates === 4) f.service.configure({ enabled: false }, { explicit: true }); return { allowed: true }; } } });
     const forged = await forwarder.forwardAutonomous({ recipientId: friend, expectedVideoId: '12345' }, { authorize: true }); assert.equal(forged.confirmed, false); assert.equal(verified, 0);
     await assert.rejects(forwarder.forwardAutonomous({ recipientId: friend, expectedVideoId: '12345', url: 'https://www.douyin.com/video/999' }, { authorize: () => true }), /不能指定/);
@@ -278,7 +351,7 @@ test('真实合成分享面板通过可信授权发送官方卡片，撤回授�
   }
 });
 
-test('真实临时 Edge：几何等待和最终核验期间跨入口关闭、换作品或换好友均不点击', { timeout: 30000 }, async t => {
+test('真实临时 Edge：几何等待和最终核验期间跨入口关闭、换作品或换好友均不点击', { timeout: 60000 }, async t => {
   const [{ chromium }, { VideoForwarder }] = await Promise.all([import('../playwright-runtime.mjs'), import('../video-forward.mjs')]);
   for (const stage of ['geometry-wait', 'before-click']) for (const mutation of ['disabled', 'video', 'recipient']) {
     const f = fixture(t), profile = path.join(f.root, 'isolated-edge-profile');

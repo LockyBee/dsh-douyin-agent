@@ -39,6 +39,11 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
         return send(res,200,{token,schedule:watchSchedule?.state(),interactions:interactionStatus({friend:friends?.state(),chat:chatState,share:shareState,comments:commentsState,watch:watchState,modelReady:modelSettings.state().configured}),sections:SETTINGS_SECTIONS,usage,watchOptions:optionsService.state(),video,spark:spark?.state()||{enabled:false},comments:commentsState,reports:await reports.state(),persona:controller.getPersonaMemory().snapshot(),mode:(await getMode()).state(),model:typeof modelSettings.catalog==='function'?await modelSettings.catalog():modelSettings.state(),watch:watchState,...(share?{share:shareState}:{}),...(chat?{chat:chatState}:{}),...(getMedia?{media:await(await getMedia()).status()}:{}),setup:{browser:'Microsoft Edge',audioOptional:true,independentAppRequired:false,model:'使用 DSH 已配置提供商；可选音频 Key 单独保存。'}});
       }
       if (req.method === 'GET' && url.pathname === `${PREFIX}/reports/read`) return send(res, 200, await (await getReport()).read({ date: url.searchParams.get('date') }));
+      if (req.method === 'GET' && url.pathname === `${PREFIX}/chat/unanswered`) {
+        const supplied = req.headers['x-douyin-settings-token'];
+        if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) return send(res, 403, { error: '请刷新原生设置页后重试。' });
+        return send(res, 200, await (await getChat()).unanswered());
+      }
       if (req.method !== 'POST') return send(res, 404, { error: '设置地址不存在。' });
       const supplied = req.headers['x-douyin-settings-token'];
       if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) return send(res, 403, { error: '请刷新原生设置页后重试。' });
@@ -88,11 +93,13 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
         case '/share/configure': if(getFriends){if(Object.keys(input).some(key=>!['enabled','dailyLimit'].includes(key)))throw Object.assign(new Error('好友互动只接受总开关。'),{status:400});await(await getFriends()).configure({enabled:input.enabled},{explicit:true});value=(await getShare()).state();}else value=await(await getShare()).configure(input,{explicit:true});break;
         case '/share/resolve': value = await (await getShare()).resolve(input, { explicit: true }); break;
         case '/chat/contacts': empty(input); value = await (await getChat()).listContacts({ signal: AbortSignal.timeout(45_000) }); break;
+        case '/chat/unanswered/resolve': { if(!getFriends)throw Object.assign(new Error('好友互动模块尚未加载。'),{status:503});if(Object.keys(input).some(key=>!['recordIds','snapshot'].includes(key)))throw Object.assign(new Error('待处理消息只接收记录标识和当前快照。'),{status:400});const chat=await getChat();value={...await(await getFriends()).resolveUnanswered(input),unanswered:await chat.unanswered()};break; }
         case '/chat/configure': {
           if (Object.keys(input).some(key => !['recipientIds', 'dailyReplyLimit', 'allowConversationOnly', 'groupMentionNames'].includes(key))) throw Object.assign(new Error('私信设置只接收许可名单、每日上限、本人会话授权和群聊响应昵称。'), { status: 400 });
           value = getFriends?await(await getFriends()).configureContacts(input):await(await getChat()).configure(input);break;
         }
         case '/chat/start': empty(input);if(getFriends){await(await getFriends()).configure({enabled:true},{explicit:true});value=(await getChat()).state();}else value=await startChat();break;
+        case '/chat/prepare': empty(input); if(!getFriends)throw Object.assign(new Error('好友互动模块尚未加载。'),{status:503}); value=await(await getFriends()).prepareChat(); break;
         case '/chat/stop': empty(input);if(getFriends){await(await getFriends()).configure({enabled:false},{explicit:true});value=(await getChat()).state();}else value=await(await getChat()).stop();break;
         case '/chat/resolve': if (Object.keys(input).length !== 1 || typeof input.recipientId !== 'string') throw Object.assign(new Error('只接受已核对的许可联系人。'), { status: 400 }); value = getFriends ? await (await getFriends()).resumeContact(input.recipientId) : await (await getChat()).resumeContact(input.recipientId); break;
         case '/media/configure': {

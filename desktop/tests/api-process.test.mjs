@@ -19,6 +19,7 @@ async function fixture(t) {
   for (const relative of [...DOMAIN_FILES, 'media/index.mjs', 'media/key-store.mjs', 'media/vendor/voice/lib/providers.js', 'media/vendor/voice/lib/provider-http.js']) {
     const target = path.join(runtime, relative); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.copyFile(path.join(DOMAIN_ROOT, relative), target);
   }
+  await fs.cp(path.join(DOMAIN_ROOT, 'storyboard'), path.join(runtime, 'storyboard'), { recursive: true });
   await fs.copyFile(fileURLToPath(new URL('../src/api-worker.mjs', import.meta.url)), path.join(runtime, 'api-worker.mjs'));
   await fs.symlink(path.join(DOMAIN_ROOT, 'node_modules'), path.join(runtime, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
   const locationFile = path.join(temporary, 'location.json');

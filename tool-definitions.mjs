@@ -29,6 +29,7 @@ export const TOOL_DEFINITIONS = [
     parameters: { type: 'object', properties: { seconds: { type: 'number', minimum: 1, maximum: 10, description: '观察秒数，默认 3 秒，范围 1 到 10 秒。' } }, additionalProperties: false },
   },
   { name: 'douyin_screenshot', description: '获取当前抖音可见画面，供支持图像输入的模型查看。', parameters: empty() },
+  {name:'douyin_video_zoom',description:'按格查看本入口最近一分钟分镜的原始采样画面，用于看清小字或细节；必须仍是同一作品，不会增加观看进度或音轨证据。',parameters:{type:'object',properties:{sampleId:{type:'string',pattern:'^[a-f0-9-]{36}$'},cell:{type:'integer',minimum:1,maximum:16},videoId:{type:'string',pattern:'^\\d{1,64}$'}},required:['sampleId','cell','videoId'],additionalProperties:false}},
   { name: 'douyin_pause', description: '暂停当前抖音视频。', parameters: empty() },
   { name: 'douyin_play', description: '播放当前抖音视频，并返回实际播放状态。', parameters: empty() },
   {
@@ -56,12 +57,12 @@ export const TOOL_DEFINITIONS = [
       additionalProperties: false,
     },
   },
-  { name:'douyin_chat_contacts',description:'读取本机抖音私信联系人元数据并核对关注关系，不读取其他会话正文。',parameters:empty() },
+  { name:'douyin_chat_contacts',description:'读取抖音网页当前个人会话和群聊的身份元数据，不读取其他会话正文；未核实的关注关系保持未知。',parameters:empty() },
   { name:'douyin_chat_status',description:'读取私信自动回复的许可名单、运行状态、预算和暂停原因。',parameters:empty() },
   { name:'douyin_chat_start',description:'按已核对的本机许可名单启动私信自动回复，只处理启动后新消息。需要用户明确要求启动，不修改许可名单。',parameters:empty() },
   { name:'douyin_chat_stop',description:'停止正在运行的私信自动回复，取消待生成回复并保留发送核对记录。',parameters:empty() },
   {
-    name:'douyin_chat_read',description:'读取许可名单内一个指定联系人的私信。名单外、身份歧义或群聊会拒绝。',
+    name:'douyin_chat_read',description:'读取许可名单内一个指定个人会话或群聊。名单外、稳定身份缺失或身份歧义时拒绝；群聊仅在被@或叫到设定昵称时自动回复。',
     parameters:{type:'object',properties:{recipientId:{type:'string',minLength:1,maxLength:500,description:'由douyin_chat_contacts返回的精确本机联系人ID。'}},required:['recipientId'],additionalProperties:false},
   },
   {
@@ -107,6 +108,7 @@ export function validateToolArguments(definition, args) {
   if (args.limit !== undefined && (args.limit < 1 || args.limit > 20)) throw new RangeError('返回条数须在 1 到 20 之间。');
   if (args.maxRequests !== undefined && args.maxRequests < 1) throw new RangeError('请求上限须为正安全整数。');
   if (definition.name === 'douyin_diagnostics_repair' && (!/^[a-f0-9-]{36}$/.test(args.reportId) || args.action !== 'reapply_silent')) throw new TypeError('须使用自检返回的报告编号及允许动作。');
+  if(definition.name==='douyin_video_zoom'&&(!/^[a-f0-9-]{36}$/.test(args.sampleId)||!/^\d{1,64}$/.test(args.videoId)||args.cell<1||args.cell>16))throw new TypeError('须使用本入口返回的采样编号、作品ID和1至16格编号。');
   if (definition.name === 'douyin_interest_record' && (!args.evidenceId.trim() || !args.topic.trim() || !args.reflection.trim() || !['like','dislike','neutral'].includes(args.signal))) throw new TypeError('兴趣更新需要真实证据、主题、有效倾向与简短理由。');
   if(definition.name==='douyin_chat_observe' && !/^msg:[a-f0-9]{64}$/.test(args.messageId)) throw new TypeError('需要已读取的精确消息ID。');
   if(definition.name==='douyin_forward_video' && args.url!==undefined && !/^https:\/\/(?:www\.)?douyin\.com\/video\/\d+\/?(?:\?[^#]*)?(?:#.*)?$/.test(args.url)) throw new TypeError('转发链接必须是抖音公开video链接。');

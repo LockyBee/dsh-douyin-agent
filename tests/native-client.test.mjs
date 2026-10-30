@@ -39,6 +39,11 @@ test('原生设置仅同源请求，会话token只进写请求头，403不隐式
   await assert.rejects(denied.request('/state'), error => error.status === 403); assert.equal(calls.length, 2);
   let carried = false; const carrier = plugin.createSettingsTransport({ location: { protocol: 'file:', hostname: '' }, __DSH_TRANSPORT__: { fetch: async () => { carried = true; return { ok: true, json: async () => ({ token: 'synthetic-carrier' }) }; } } });
   await carrier.request('/state'); assert.equal(carried, true);
+  const pendingCalls = []; const pendingTransport = plugin.createSettingsTransport({ location: { protocol: 'http:', hostname: '127.0.0.1' }, fetch: async (url, init) => { pendingCalls.push({ url, init }); return { ok: true, json: async () => url.endsWith('/state') ? { token: 'synthetic-pending-token' } : { protocol: 'chat-unanswered-v1', count: 2, snapshot: 'a'.repeat(64), items: [] } }; } });
+  await pendingTransport.request('/state'); await pendingTransport.request('/chat/unanswered'); await pendingTransport.request('/chat/unanswered/resolve', { recordIds: ['a'.repeat(64)] }); await pendingTransport.request('/chat/prepare', {});
+  assert.equal(pendingCalls[1].url, '/api/douyin-browser/chat/unanswered'); assert.equal(pendingCalls[1].init.method, 'GET'); assert.equal(pendingCalls[1].init.headers['x-douyin-settings-token'], 'synthetic-pending-token');
+  assert.equal(pendingCalls[2].url, '/api/douyin-browser/chat/unanswered/resolve'); assert.equal(pendingCalls[2].init.headers['x-douyin-settings-token'], 'synthetic-pending-token');
+  assert.equal(pendingCalls[3].url, '/api/douyin-browser/chat/prepare'); assert.equal(pendingCalls[3].init.method, 'POST');
 });
 
 test('官方桌面 dsh-app 同源设置可请求，其他自定义域名仍拒绝，非JSON响应提示后端兼容性', async () => {
@@ -89,13 +94,17 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   await build({ stdin: { sourcefile: 'native-client-harness.jsx', resolveDir: root, loader: 'jsx', contents: `import React from 'react';import{createRoot}from'react-dom/client';import * as primitives from '@native/primitives';import '@native/theme/base.css';import '@native/theme/design-platform.css';window.__ModuleLoader__={load({factory}){const plugin=factory(name=>name==='react'?React:name==='@deepseek-ai/dsh-client-ui-primitives'?primitives:(()=>{throw Error('意外依赖')})());window.__nativePlugin=plugin;plugin.apply({slots:{inject(name,action){action()},register(options,Component){createRoot(document.getElementById('root')).render(<Component/>);return()=>{}}}})}};const original=setInterval;window.setInterval=(fn,ms)=>original(fn,Math.min(ms,100));const script=document.createElement('script');script.src='/client.js';document.body.appendChild(script);` }, bundle: true, outfile: path.join(assets, 'harness.js'), format: 'esm', platform: 'browser', target: 'chrome120', jsx: 'automatic', alias: { '@native/primitives': path.join(upstream, 'ui-primitives/src/index.ts'), '@native/theme': path.join(upstream, 'ui-theme/src/styles'), ...Object.fromEntries(['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client'].map(name => [name, local.resolve(name)])) }, nodePaths: [path.join(root, 'desktop/ui-api/node_modules')], tsconfigRaw: { compilerOptions: { jsx: 'react-jsx' } }, loader: { '.woff': 'file', '.woff2': 'file', '.ttf': 'file' }, assetNames: 'assets/[name]-[hash]', minify: true });
   const stable = (hex, name, extra = {}) => ({ id: 'conv:' + hex.repeat(64), name, followed: true, isGroup: false, identityVerified: true, identityBinding: 'binding:' + hex.repeat(64), identityVersion: 2, identityKind: 'rendered-user', identityHash: hex.repeat(64), verifiedAt: '2026-10-24T00:00:00.000Z', authorizationKind: 'following', ...extra });
   const allowed = [stable('a', '合成许可好友甲'), stable('b', '合成群聊乙', { followed: null, isGroup: true, identityKind: 'rendered-group', relationshipStatus: 'unavailable', authorizationKind: 'existing-group' }), { id: 'conv:' + 'c'.repeat(64), name: '合成未知类型', followed: null, isGroup: null, identityVerified: false, relationshipStatus: 'unavailable' }, { id: 'conv:' + 'e'.repeat(64), name: '合成缺少稳定身份', followed: true, isGroup: false, identityVerified: true, identityBinding: 'binding:' + 'e'.repeat(64) }];
-  const state = { token: 'synthetic-native-settings', persona: { manualText: '合成人格初始正文。', revision: 'synthetic-v1', personaFolder: 'C:/合成记忆/persona' }, model: { configured: true, providers: [{ id: 'synthetic', name: '合成已配置提供商' }], models: [{provider:'synthetic',id:'synthetic-vision',name:'合成视觉模型'},{provider:'synthetic',id:'synthetic-other',name:'合成另一模型'}], provider: 'synthetic', model: 'synthetic-vision' }, video: { allowed: false, reason: '请先开始新一轮。', policy: { windows: ['00:00-24:00'], sessionMinutes: 10 }, session: null }, watch: { running: false, counts: { maxRequests: 30 } }, mode: { silent: false }, spark: { enabled: false, running: false, policy: { windows: ['09:00-22:00'], dailyLimit: 2 }, recipients: [allowed[0]], needsReview: [] }, comments: { enabled: false, policy: { dailyLimit: 3, perSessionLimit: 1 }, daily: { attempts: 0 }, session: { attempts: 0 }, needsReview: [] }, share: { enabled: false, dailyLimit: 3, needsReview: [] }, chat: { running: false, policy: { allowlist: [{ ...allowed[0] }], dailyReplyLimit: 40 }, contacts: [] }, media: { enabled: false, backend: 'local-whisper', backends: { mimo: { credential: { configured:false } }, minimax: { credential: { configured:false } } } }, reports: { date: '2026-10-15', folder: 'C:/合成记忆/reports/videos', reports: [] } };
+  const state = { token: 'synthetic-native-settings', persona: { manualText: '合成人格初始正文。', revision: 'synthetic-v1', personaFolder: 'C:/合成记忆/persona' }, model: { configured: true, providers: [{ id: 'synthetic', name: '合成已配置提供商' }], models: [{provider:'synthetic',id:'synthetic-vision',name:'合成视觉模型'},{provider:'synthetic',id:'synthetic-other',name:'合成另一模型'}], provider: 'synthetic', model: 'synthetic-vision' }, video: { allowed: false, reason: '请先开始新一轮。', policy: { windows: ['00:00-24:00'], sessionMinutes: 10 }, session: null }, watch: { running: false, counts: { maxRequests: 30 } }, mode: { silent: false }, spark: { enabled: false, running: false, policy: { windows: ['09:00-22:00'], dailyLimit: 2 }, recipients: [allowed[0]], needsReview: [] }, comments: { enabled: false, policy: { dailyLimit: 3, perSessionLimit: 1 }, daily: { attempts: 0 }, session: { attempts: 0 }, needsReview: [] }, share: { enabled: false, dailyLimit: 3, needsReview: [], unavailableRecipients: [{ id: 'conv:' + 'c'.repeat(64), name: '合成人工群', reason: '缺少稳定会话身份，不能发送原生作品卡片；仍保留在许可名单，不影响观看或回复。' }] }, chat: { running: false, policy: { allowlist: [{ ...allowed[0] }], dailyReplyLimit: 40 }, contacts: [] }, media: { enabled: false, backend: 'local-whisper', backends: { mimo: { credential: { configured:false } }, minimax: { credential: { configured:false } } } }, reports: { date: '2026-10-15', folder: 'C:/合成记忆/reports/videos', reports: [] } };
   state.video.policy = { windows: ['00:00-24:00'], dailyMinutes: 10, dailyRequests: 30 }; state.video.daily = { usedSeconds: 12, requests: 2 };
-  state.schedule = { policy: { enabled: false } }; state.interactions = { policy: { enabled: true }, friend: { replyRunning: false, shareEnabled: true, message: '合成好友互动等待就绪。' }, rows: [] };
+  state.schedule = { policy: { enabled: false } }; state.interactions = { policy: { enabled: true }, friend: { replyRunning: false, shareEnabled: true, message: '合成好友互动等待就绪。', waitReason: '合成聊天标签页已离开抖音；请准备回复通道。', lastErrorCode: 'CHAT_PAGE_LEFT_DOUYIN', nextRetryAt: '2026-10-27T23:10:00.000Z', canPrepare: true }, rows: [] };
   state.interactions.presence = { status: 'online', online: true, label: '在线 · 等待消息', reason: '合成后端确认许可会话全部就绪', checkedAt: new Date().toISOString() };
   state.watchOptions = { policy: { mode:'recommend', topics:[], exclude:[] } };
   state.usage = { today: { requests:2,totalTokens:4321,promptTokens:4000,completionTokens:321,cachedTokens:3000,cacheReportedRequests:1,unknownRequests:0 }, groups:[], days:[], note:'合成用量说明' };
   const calls = [], errors = []; let failState = false, failComments = false, failInteractions = false, videoSaveGate = null, chatSaveGate = null, resolveGate = null, listOverride = null, stateVideoOverride = null, stateReadGate = null, startOnConfigure = false;
+  let unansweredRecords = [
+    { recordId: '1'.repeat(64), contactId: 'conv:' + 'a'.repeat(64), contactName: '合成许可好友甲', at: '2026-10-26T12:28:21.601Z', reason: '新消息尚未取得可靠的新到达资格，未自动回复。', phase: 'unqualified', messageCount: 1, types: ['文字'], preview: '合成插件预览一', previewNote: '本地保留的文字预览，仅用于核对；不会自动补发。', canResolve: true },
+    { recordId: '2'.repeat(64), contactId: 'conv:' + 'a'.repeat(64), contactName: '合成许可好友甲', at: '2026-10-26T12:50:58.112Z', reason: '新消息尚未取得可靠的新到达资格，未自动回复。', phase: 'unqualified', messageCount: 1, types: ['文字'], preview: '合成插件预览二', previewNote: '本地保留的文字预览，仅用于核对；不会自动补发。', canResolve: true },
+  ];
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost'), reply = (value, status = 200) => { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(value)); };
     if (url.pathname.startsWith('/api/douyin-browser/')) {
@@ -123,6 +132,8 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
       if (route === '/chat/resolve') { if (resolveGate) { const gate = resolveGate; resolveGate = null; gate.received(); await gate.wait; } state.chat.contacts = state.chat.contacts.map(item => item.id === input.recipientId ? { ...item, status: 'ready', reason: '' } : item); return reply(state.chat); }
       if (route === '/mode/configure') state.mode.silent = input.silent;
       if (route === '/chat/contacts') return reply({ contacts: listOverride || allowed, listDiscovery: { source: 'current-conversation-list', scannedToEnd: false, count: (listOverride || allowed).length, reason: '合成读取预算已到，只返回当前网页会话。' } });
+      if (route === '/chat/unanswered') return reply({ protocol: 'chat-unanswered-v1', count: unansweredRecords.length, snapshot: 'c'.repeat(64), items: unansweredRecords });
+      if (route === '/chat/unanswered/resolve') { if (input.recordIds.length > 1 && !input.snapshot) return reply({ error: '批量处理必须核对当前列表快照。' }, 400); const wanted = new Set(input.recordIds); if (input.recordIds.some(id => !unansweredRecords.some(item => item.recordId === id))) return reply({ error: '待处理消息不存在或已更新，请刷新列表。' }, 404); unansweredRecords = unansweredRecords.filter(item => !wanted.has(item.recordId)); return reply({ resolved: wanted.size, alreadyHandled: false, unanswered: { protocol: 'chat-unanswered-v1', count: unansweredRecords.length, snapshot: 'd'.repeat(64), items: unansweredRecords } }); }
       if (route === '/reports/read' || route === '/reports/generate') return reply({ date: '2026-10-15', markdown: '# 合成观看日报\n只整理已有证据。' });
       return reply({ ok: true });
     }
@@ -134,11 +145,19 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'douyin-native-client-edge-')), browser = await chromium.launchPersistentContext(profile, { headless: true, channel: 'msedge', viewport: { width: 1100, height: 900 } });
   t.after(async () => { await browser.close(); assert.equal(path.dirname(path.resolve(profile)), path.resolve(os.tmpdir())); await fs.rm(profile, { recursive: true, force: true }); });
-  const page = browser.pages()[0]; page.setDefaultTimeout(8000); page.on('pageerror', error => { errors.push(error.message); t.diagnostic(error.stack || error.message); }); await page.goto(`http://127.0.0.1:${server.address().port}`);
+  const page = browser.pages()[0]; page.setDefaultTimeout(8000); page.on('pageerror', error => { errors.push(error.message); t.diagnostic(error.stack || error.message); });
+  state.interactions.presence = { status: 'watching', online: false, label: '正在挑选视频 · 回复已关闭', reason: '好友互动已关闭。', watch: { active: true, phase: 'model', label: '正在挑选视频', reason: '自主观看正在挑选下一条视频。' }, reply: { status: 'offline', online: false, label: '回复已关闭', reason: '好友互动已关闭。' }, review: { active: true, manualCount: 2, label: '有 2 条未答消息', reason: '有 2 条已保留消息需要人工核对；处理后不会补发。' } };
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
   const persona = page.getByRole('textbox', { name: '大肥鱼人格正文', exact: true }); await persona.waitFor();
   assert.equal(await persona.inputValue(), '合成人格初始正文。'); assert.equal(calls.some(item => item.method === 'POST'), false);
-  assert.match(await page.getByRole('button', { name: '查看好友互动状态', exact: true }).innerText(), /在线 · 等待消息/);
-  assert.equal(await page.getByRole('button', { name: '查看好友互动状态', exact: true }).getAttribute('title'), '合成后端确认许可会话全部就绪');
+  assert.match(await page.getByLabel('好友互动状态', { exact: true }).innerText(), /○ 回复已关闭/);
+  assert.match(await page.getByLabel('自主观看状态').innerText(), /◉ 正在挑选视频/);
+  assert.equal(await page.getByLabel('待核对事项').count(), 0);
+  assert.equal(await page.getByRole('button', { name: '查看遗留待处理消息', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: '查看好友互动状态', exact: true }).count(), 0);
+  assert.equal(await page.getByLabel('好友互动状态', { exact: true }).getAttribute('title'), '好友互动已关闭。');
+  assert.equal(await page.getByRole('dialog', { name: '遗留待处理消息' }).count(), 0);
+  assert.equal(calls.some(item => item.route === '/chat/unanswered/resolve'), false);
   assert.equal(await page.getByRole('tab').count(), 7); assert.equal(await page.getByRole('button', { name: /^保存/ }).count(), 0);
   await persona.fill('合成人格未保存草稿。'); await page.waitForTimeout(250); assert.equal(calls.some(item => item.route === '/persona/configure'), false);
   let releaseState; stateReadGate = { wait: new Promise(resolve => { releaseState = resolve; }) };
@@ -199,25 +218,29 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   await group.check();
   const names = page.getByRole('textbox', { name: '群聊响应昵称（逗号或换行分隔）', exact: true }); await names.fill('大肥鱼,小肥鱼'); await names.press('Tab'); await page.waitForTimeout(300);
   assert.ok(state.chat.policy.allowlist.some(item => item.id === 'conv:' + 'b'.repeat(64))); assert.deepEqual(state.chat.policy.groupMentionNames, ['大肥鱼', '小肥鱼']);
-  await group.locator('..').getByText('已许可 · 稳定身份已核对 · 群聊会话', { exact: true }).waitFor();
+  assert.equal(await group.locator('..').locator('small').count(), 0, '名单只显示勾选项和昵称');
   assert.equal(await page.getByRole('checkbox', { name: '许可联系人 合成未知类型', exact: true }).isDisabled(), true);
-  const weak = page.getByRole('checkbox', { name: '许可联系人 合成缺少稳定身份', exact: true }); assert.equal(await weak.isDisabled(), true); await weak.locator('..').getByText(/身份信息不足/).waitFor();
+  const weak = page.getByRole('checkbox', { name: '许可联系人 合成缺少稳定身份', exact: true }); assert.equal(await weak.isDisabled(), false); assert.equal(await weak.isChecked(), false); assert.equal(await weak.locator('..').locator('small').count(), 0, '名单只显示勾选项和昵称');
   allowed[0].name = '合成许可好友甲新昵称'; const other = stable('d', allowed[0].name); allowed.push(other); const savesBeforeRename = calls.filter(item => item.route === '/chat/configure').length;
-  await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).click(); const sameName = page.getByRole('checkbox', { name: `许可联系人 ${allowed[0].name}`, exact: true }); await sameName.nth(1).waitFor(); assert.equal(await sameName.nth(0).isChecked(), true); assert.equal(await sameName.nth(1).isChecked(), false); await sameName.nth(0).locator('..').getByText(/^已许可 · 稳定身份已核对/).waitFor(); assert.equal(calls.filter(item => item.route === '/chat/configure').length, savesBeforeRename, '改昵称和读取同名账号不自动改许可名单'); allowed[0].name = '合成许可好友甲';
+  await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).click(); const sameName = page.getByRole('checkbox', { name: `许可联系人 ${allowed[0].name}`, exact: true }); await sameName.nth(1).waitFor(); assert.equal(await sameName.nth(0).isChecked(), true); assert.equal(await sameName.nth(1).isChecked(), false); assert.equal(await sameName.nth(0).locator('..').locator('small').count(), 0, '名单只显示勾选项和昵称'); assert.equal(calls.filter(item => item.route === '/chat/configure').length, savesBeforeRename, '改昵称和读取同名账号不自动改许可名单'); allowed[0].name = '合成许可好友甲';
   listOverride = allowed.filter(item => item.isGroup === true); const beforePartialRead = calls.filter(item => item.route === '/chat/configure').length;
   await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).click();
   const missingSaved = page.getByRole('checkbox', { name: '许可联系人 合成许可好友甲', exact: true }); await missingSaved.waitFor();
-  assert.equal(await missingSaved.isChecked(), true); await missingSaved.locator('..').getByText('已许可 · 稳定身份已核对 · 本次列表未返回', { exact: true }).waitFor();
+  assert.equal(await missingSaved.isChecked(), true); assert.equal(await missingSaved.locator('..').locator('small').count(), 0, '名单只显示勾选项和昵称');
   assert.equal(calls.filter(item => item.route === '/chat/configure').length, beforePartialRead, '部分会话列表不能导致原许可消失或触发保存');
   listOverride = null;
-  state.chat.contacts = [{ id: allowed[0].id, status: 'paused', reason: '合成需要核对' }]; await page.getByRole('button', { name: '刷新插件状态', exact: true }).click();
-  const resolve = page.getByRole('button', { name: '已人工核对该会话', exact: true }); await resolve.waitFor();
+  state.chat.contacts = [{ id: allowed[0].id, status: 'paused', reason: '合成后台补答等待', recovery: { autoPendingCount: 1, autoRetryCount: 1 } }]; await page.getByRole('button', { name: '刷新插件状态', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: '已人工核对该会话', exact: true }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: '查看遗留待处理消息', exact: true }).count(), 0);
   let releaseChatSave; const savingChat = new Promise(received => { chatSaveGate = { received, wait: new Promise(resolve => { releaseChatSave = resolve; }) }; });
-  await names.fill('大肥鱼,小肥鱼,合成昵称'); await names.press('Tab'); await savingChat; assert.equal(await resolve.isDisabled(), true, '名单保存期间不能并发解除暂停'); releaseChatSave();
-  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent === '已人工核对该会话' && !button.disabled));
-  let releaseResolve; const resolving = new Promise(received => { resolveGate = { received, wait: new Promise(resolve => { releaseResolve = resolve; }) }; });
-  await resolve.click(); await resolving; assert.equal(await page.getByRole('button', { name: '处理中…', exact: true }).isDisabled(), true); releaseResolve(); await resolve.waitFor({ state: 'hidden' });
-  assert.equal(calls.filter(item => item.route === '/chat/resolve').length, 1);
+  await names.fill('大肥鱼,小肥鱼,合成昵称'); await names.press('Tab'); await savingChat;
+  assert.equal(await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).isDisabled(), true, '许可保存期间不能并发读取并改绑名单');
+  assert.equal(calls.filter(item => item.route === '/chat/resolve').length, 0, '后台补答不由界面冒充人工解除暂停'); releaseChatSave();
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent === '读取联系人与群聊' && !button.disabled));
+  assert.deepEqual(state.chat.policy.groupMentionNames, ['大肥鱼', '小肥鱼', '合成昵称']);
+  state.chat.contacts = [{ id: allowed[0].id, status: 'ready', recovery: { autoPendingCount: 0, autoRetryCount: 0 } }];
+  await page.getByRole('button', { name: '刷新插件状态', exact: true }).click();
+  assert.equal(calls.filter(item => item.route === '/chat/resolve').length, 0);
   state.chat.running = true;
   await page.getByRole('tab', { name: '基础设置', exact: true }).click();
   assert.equal(await page.getByRole('textbox', { name: '大肥鱼人格正文', exact: true }).isEnabled(), true);
@@ -247,8 +270,16 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   await page.getByRole('button', { name: '刷新插件状态', exact: true }).click(); await page.getByText('正在核实插件状态。', { exact: true }).waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: '一键自检', exact: true }).click(); await page.getByText('合成修复建议', { exact: true }).waitFor(); await page.getByRole('button', { name: '修复：重新应用静默设置', exact: true }).click(); await page.getByText('合成修复已回读', { exact: true }).waitFor();
   state.watch.running = true; state.interactions.presence = { status: 'attention', online: false, label: '回复未就绪', reason: '合成许可联系人需要核对' };
-  await page.getByRole('button', { name: '查看好友互动状态', exact: true }).filter({ hasText: '回复未就绪' }).waitFor(); await page.getByRole('alert').filter({ hasText: '合成许可联系人需要核对' }).waitFor();
-  await page.getByRole('button', { name: '查看好友互动状态', exact: true }).click(); assert.equal(await page.getByRole('tab', { name: '好友互动', exact: true }).getAttribute('aria-selected'), 'true');
+  await page.getByLabel('好友互动状态', { exact: true }).filter({ hasText: '回复未就绪' }).waitFor(); await page.getByRole('alert').filter({ hasText: '合成许可联系人需要核对' }).waitFor();
+  const oldReads = calls.filter(item => item.route === '/chat/unanswered').length;
+  await page.getByLabel('好友互动状态', { exact: true }).click();
+  assert.equal(await page.getByRole('dialog', { name: '遗留待处理消息' }).count(), 0);
+  assert.equal(calls.filter(item => item.route === '/chat/unanswered').length, oldReads, '状态标签只展示状态，不再打开人工核对流程');
+  await page.getByRole('tab', { name: '好友互动', exact: true }).click();
+  await page.getByText(/等待准备：合成聊天标签页已离开抖音/).waitFor();
+  await page.getByText(/暂不能自主分享/).waitFor();
+  const prepare = page.getByRole('button', { name: '准备回复通道/重新连接并重试', exact: true }); await prepare.waitFor(); await prepare.click();
+  await page.waitForTimeout(100); assert.equal(calls.some(item => item.route === '/chat/prepare'), true);
   state.watch.running = false;
   assert.equal(calls.filter(item => item.method === 'POST').every(item => item.token === state.token), true); assert.deepEqual(errors, []);
 });

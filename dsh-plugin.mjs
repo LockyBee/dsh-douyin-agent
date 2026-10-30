@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { createNativeWatchDecision } from './native-watch-decision.mjs';
+import { prepareVideoFrames } from './video-storyboard.mjs';
 import { createNativeSparkGreeting } from './native-spark-greeting.mjs?v=10';
 import { bindNativePersonaContext } from './native-persona-context.mjs';
 import { createNativeSettingsRoute } from './native-settings.mjs?v=18';
@@ -92,11 +93,11 @@ function renderNativeValue(_args, value) {
 }
 
 function nativeParameters(schema) {
-  // 当前 DSH 的 schema 子集不接收长度或数值边界；执行时仍由统一验证器检查。
+  // 当前 DSH 的 schema 子集不接收长度、正则或数值边界；执行时仍由统一验证器检查。
   return {
     ...schema,
     properties: Object.fromEntries(Object.entries(schema.properties).map(([key, field]) => {
-      const { minLength, maxLength, minimum, maximum, ...supported } = field;
+      const { minLength, maxLength, minimum, maximum, pattern, ...supported } = field;
       return [key, supported];
     })),
   };
@@ -133,12 +134,13 @@ export function createNativeToolDefinitions({ ctx, getController, getWatch, getS
       const { frames = [], ...state } = result;
       if (!Array.isArray(frames)) throw new Error('浏览器控制器返回的 frames 不是数组。');
       const admitted = frameAdmission(result, frames);
+      const packed=prepareVideoFrames(admitted.frames,{signal:exec.signal});
       const projected = admitted.imageStatus
         ? { images: [], imageStatus: admitted.imageStatus }
-        : await projectFrames(ctx, exec, admitted.frames);
+        : await projectFrames(ctx, exec, packed.frames);
       // 持久日志与对话只保留画面概要和 attachment ref，避免把 base64 写进文本。
       const publicResult = JSON.parse(JSON.stringify({ ...state, ...(admitted.frames.length ? { frames: admitted.frames.map((frame) => ({ mimeType: frame?.mimeType ?? 'unknown', time:frame.time,videoId:frame.videoId, bytes: typeof frame?.data === 'string' ? Buffer.byteLength(frame.data, 'base64') : 0 })) } : {}) }));
-      return { tool: definition.name, result: publicResult, ...projected };
+      return { tool: definition.name, result: {...publicResult,...(packed.manifest.status==='storyboard'?{storyboard:packed.manifest,storyboardNote:packed.summary}:{})}, ...projected };
     },
   }));
 }

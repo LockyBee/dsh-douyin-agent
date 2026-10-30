@@ -24,11 +24,48 @@ function fixture(t, options = {}) {
 const prepare = async (f, limit = 40) => { await f.service.configure({ recipientIds: [contact.id], dailyReplyLimit: limit }); await f.service.start({ schedule: false }); };
 const pixel='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPEkAAAAASUVORK5CYII=';
 
-test('浏览器确认尚未点击时显示未发送暂停，不误标为送达不明或自动重试', async t => {
+test('列表重绘未取得快照时保留水位并等待，下次可靠新消息只回复一次', async t => {
+  const f = fixture(t); await prepare(f);
+  const read = f.browser.readConversation, before = JSON.parse(fs.readFileSync(f.service.watermarkFile, 'utf8'));
+  f.browser.readConversation = async () => { throw Object.assign(new Error('合成列表重绘'), { code: 'CHAT_SNAPSHOT_CHANGED' }); };
+  f.messages.push(message('after-layout-update', '合成新消息')); await f.service.poll();
+  assert.equal(f.service.state().contacts[0].status, 'ready'); assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 0);
+  assert.deepEqual(f.service.watermarks.contacts[contact.id].seen, before.contacts[contact.id].seen);
+  f.browser.readConversation = read; await f.service.poll(); await f.service.poll();
+  assert.equal(f.sent.length, 1); assert.equal(f.inputs.length, 1);
+});
+
+test('单个许可群身份不符只暂停该群，保留全部许可和历史，已核实好友继续接收', async t => {
+  const f = fixture(t), group = { id: 'conv:' + 'a'.repeat(64), name: '合成许可群', isGroup: true, followed: null, authorizationKind: 'manual', verifiedAt: new Date().toISOString() };
+  let groupReads = 0;
+  f.browser.listContacts = async () => ({ contacts: [contact, group] });
+  const read = f.browser.readConversation;
+  f.browser.readConversation = async (id, options) => { if (id === group.id) { groupReads++; throw Object.assign(new Error('合成群聊身份不一致'), { code: 'CHAT_CONVERSATION_IDENTITY_MISMATCH' }); } return read(id, options); };
+  fs.writeFileSync(f.service.policyFile, JSON.stringify({ version: 1, enabled: false, allowlist: [{ ...contact, verifiedAt: new Date().toISOString() }, group] }));
+  await f.service.start({ schedule: false });
+  assert.equal(f.service.state().running, true); assert.equal(f.service.state().policy.allowlist.length, 2);
+  assert.equal(f.service.state().contacts.find(row => row.id === group.id).identityReviewRequired, true);
+  f.messages.push(message('new-while-group-paused', '合成新消息')); await f.service.poll();
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].id, contact.id); assert.equal(groupReads, 1);
+  f.service.stop({ preservePending: true, reason: 'maintenance' }); await f.service.start({ schedule: false });
+  assert.equal(groupReads, 1, '重启和轮询不能自动解除身份暂停');
+  assert.equal(f.service.state().policy.allowlist.length, 2); assert.equal(f.service.state().contacts.find(row => row.id === group.id).status, 'paused');
+  f.service.stop({ preservePending: true, reason: 'maintenance' }); f.service.resumeContact(group.id);
+  assert.equal(f.service.state().contacts.find(row => row.id === group.id).identityReviewRequired, undefined);
+});
+
+test('未知启动故障不冒充单个身份暂停或运行成功', async t => {
+  const f = fixture(t, { browser: { readConversation: async () => { throw new Error('合成未知连接故障'); } } });
+  await f.service.configure({ recipientIds: [contact.id] });
+  await assert.rejects(f.service.start({ schedule: false }), /合成未知连接故障/);
+  assert.equal(f.service.state().running, false);
+});
+
+test('浏览器确认尚未点击时保留零点击审计，证据不足只自动等待', async t => {
   const f = fixture(t, { browser: { sendMessage: async () => { f.sent.push({ attempted: true }); return { confirmed: false, deliveryUncertain: false, failureStage: 'trial', failureCode: 'CHAT_SEND_INPUT_UNAVAILABLE' }; } } });
   await prepare(f); f.messages.push(message('new-before-click', '合成未点击检查')); await f.service.poll();
   const row = f.service.state().contacts[0]; assert.equal(row.status, 'paused'); assert.equal(row.pending.phase, 'not-sent'); assert.match(row.reason, /未点击发送/); assert.equal(f.sent.length, 1); assert.equal(f.inputs.length, 1);
-  await f.service.poll();assert.equal(f.service.state().contacts[0].status,'ready');assert.equal(f.service.state().recovery.pendingManualCount,1);assert.equal(f.sent.length,1);
+  await f.service.poll();assert.equal(f.service.state().contacts[0].status,'ready');assert.equal(f.service.state().recovery.autoPendingCount,1);assert.equal(f.sent.length,1);
 });
 
 test('新表情只截取指定消息再交模型，重复轮询不重复发送',async t=>{
@@ -74,6 +111,9 @@ test('等共同发送锁期间本人已经回复，原生成回复不会补发',
   f.messages.push(message('new', '待回复问题')); await f.service.poll(); fs.unlinkSync(guard);
   f.messages.push(message('human', '本人已回复', 'outgoing')); await f.service.poll(); await f.service.poll();
   assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().contacts[0].pending.phase, 'handled-by-user');
+  assert.equal(f.service.state().recovery.pendingManualCount, 0); assert.equal(f.service.state().contacts[0].unanswered.length, 0);
+  f.service.stop({ preservePending: true, reason: 'settings-update' }); await f.service.start({ schedule: false }); await f.service.poll();
+  assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().recovery.pendingManualCount, 0);
 });
 test('白名单须先核对，未核对会话和名单外只读请求均拒绝', async (t) => {
   const f = fixture(t, { browser: { listContacts: async () => ({ contacts: [{ ...contact, followed: null }] }) } });
@@ -91,12 +131,12 @@ test('生成回复期间有人手动发送消息时取消本次自动发送', as
   let f; f = fixture(t, { agent: { reply: async () => { f.messages.push(message('human-late', '本人已处理', 'outgoing')); return { text: '[自动回复] 不应发送' }; } } });
   await prepare(f); f.messages.push(message('new', '新问题')); await f.service.poll(); await f.service.poll(); assert.equal(f.sent.length, 0);
 });
-test('发送未确认后挂起联系人，重启和重复轮询均不盲目重发', async (t) => {
+test('发送未确认后自动读回，重启和重复轮询均不盲目重发', async (t) => {
   const f = fixture(t, { browser: { sendMessage: async () => ({ confirmed: false, deliveryUncertain: true }) } });
   await prepare(f); f.messages.push(message('new', '新问题')); await f.service.poll(); await f.service.poll();
-  assert.equal(f.inputs.length, 1); assert.equal(f.service.state().contacts[0].status, 'delivery-uncertain');
-  f.service.stop(); await assert.rejects(f.service.start({ schedule: false }), /人工核对/);
-  f.service.resumeContact(contact.id); await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.inputs.length, 1);
+  assert.equal(f.inputs.length, 1); assert.equal(f.service.state().contacts[0].status, 'ready'); assert.ok(f.service.watermarks.contacts[contact.id].unanswered.some(item=>item.phase==='sending'||item.phase==='delivery-uncertain'));
+  f.service.stop(); await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.inputs.length,1); assert.equal(f.service.state().recovery.pendingManualCount,0); assert.ok(f.service.state().recovery.autoPendingCount>0); assert.equal(f.service.outbound.history(contact.id).length,0);
+  f.service.stop(); f.service.resumeContact(contact.id); await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.inputs.length, 1);
 });
 test('旧每日上限不再限制请求，超过200次后仍计数并正常回复', async (t) => {
   const f = fixture(t); await prepare(f, 1);const date=f.service.state().daily.date;
@@ -246,4 +286,31 @@ test('poll 与发送前检查所有权，锁被替换后不发消息也不覆盖
   const g = fixture(t); await prepare(g); g.messages.push(message('new-before-send', '合成新消息')); const originalRead = g.browser.readConversation; let reads = 0;
   g.browser.readConversation = async (...args) => { const result = await originalRead(...args); if (++reads === 2) fs.writeFileSync(path.join(g.directory, 'chat-loop.lock'), JSON.stringify(replacement)); return result; };
   await assert.rejects(g.service.poll(), /失去/); assert.equal(g.inputs.length, 1); assert.equal(g.sent.length, 0); assert.equal(JSON.parse(fs.readFileSync(path.join(g.directory, 'chat-loop.lock'), 'utf8')).runId, replacement.runId);
+});
+
+test('分享卡片没有可核对画面时跳过观察，不暂停联系人', async t => {
+  const f = fixture(t); await prepare(f);
+  f.messages.push({ ...message('shared-without-frame', '', 'incoming'), media: { type: 'shared-work', author: '陌生人', imageCount: 0, resources: [], requiresVisual: true } });
+  await f.service.poll();
+  assert.equal(f.service.state().contacts[0].status, 'ready');
+  assert.equal(f.inputs.length, 1); assert.equal(f.sent.length, 1);
+});
+
+test('人工勾选后未取得稳定身份的群聊可保存为manual', async t => {
+  const manual = { id: `conv:${'5'.repeat(64)}`, name: '合成人工群', isGroup: true, followed: null, identityVerified: false, identityBinding: null, conversationType: 'group' };
+  const f = fixture(t, { browser: { listContacts: async () => ({ contacts: [manual] }) } });
+  await f.service.configure({ recipientIds: [manual.id], allowConversationOnly: true });
+  const saved = f.service.state().policy.allowlist[0];
+  assert.equal(saved.authorizationKind, 'manual'); assert.equal(saved.isGroup, true);
+});
+
+test('生成期间到达新消息时，被替代的旧消息与新消息一起重答', async t => {
+  const calls = []; let f, first = true;
+  f = fixture(t, { agent: { reply: async value => { calls.push(value.messages.map(item => ({ ...item }))); if (first) { first = false; f.messages.push(message('late-new', '生成期间的新问题')); } return { text: '[自动回复] 合成重答' }; } } });
+  await prepare(f); f.messages.push(message('first-question', '第一个问题'));
+  await f.service.poll();
+  assert.equal(f.sent.length, 0);
+  await f.service.poll();
+  assert.equal(calls.length, 2); assert.equal(f.sent.length, 1);
+  assert.deepEqual(calls.at(-1).map(item => item.text), ['第一个问题', '生成期间的新问题']);
 });

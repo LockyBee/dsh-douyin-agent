@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_SHARED_MEMORY_PATH, sharedMemoryPath, openCentralDatabase, loadQQMemoryConfig, syncQQToCentral, recallCentralMemory, centralEntry, sourceAwareEntry, resolveMemorySources, MAX_SOURCE_MEMORY_REFS, scrubMemoryText, scrubMetadataStrings } from './qq-sync.mjs';
@@ -8,6 +8,35 @@ const QQ_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..',
 export const DEFAULT_QQ_MEMORY_PATH = path.join(QQ_ROOT, 'state', 'bridge.db');
 const MAX_CONTENT = 8_000;
 const MAX_METADATA = 8_000;
+
+// 打包后的模块目录不再邻接 QQ 项目；只检查明确配置或共享目录旁的已知项目位置。
+export function resolveQQMemoryPath(dbPath, { env = process.env, sourceRoot = QQ_ROOT } = {}) {
+  if (env.DOUYIN_QQ_MEMORY_DB?.trim()) {
+    const explicit = env.DOUYIN_QQ_MEMORY_DB;
+    if (!path.isAbsolute(explicit) || /[\0\r\n]/.test(explicit)) throw new Error('QQ 记忆库必须是绝对路径。');
+    return path.normalize(explicit);
+  }
+  const roots = [sourceRoot];
+  if (typeof dbPath === 'string' && path.isAbsolute(dbPath)) roots.push(path.resolve(path.dirname(dbPath), '..', '..', '聊天机器人'));
+  for (const root of new Set(roots)) {
+    const candidate = path.join(root, 'state', 'bridge.db');
+    try {
+      const file = lstatSync(candidate), config = lstatSync(path.join(root, 'config.yaml'));
+      if (!file.isFile() || file.isSymbolicLink() || !config.isFile() || config.isSymbolicLink()) continue;
+      const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+      if (pkg.name === 'gpt-qq-bridge') return candidate;
+    } catch {}
+  }
+  return path.join(sourceRoot, 'state', 'bridge.db');
+}
+
+export function isChatShareableMemory(item) {
+  if (!item || !['video', 'qq', 'qq-history'].includes(item.origin) || typeof item.content !== 'string' || !item.content.trim()) return false;
+  const metadata = item.metadata || {};
+  if (metadata.sourceType === 'private' || metadata.privacy === 'internal-reference' || String(metadata.visibility || '').startsWith('private')) return false;
+  if (item.origin !== 'video' && metadata.sourceType !== 'group') return false;
+  return item.origin === 'video' || item.origin === 'qq' && item.status === 'confirmed' || item.origin === 'qq-history' && item.status === 'observed-history';
+}
 
 function text(value, name, max, optional = false) {
   if (value == null && optional) return null;
@@ -45,7 +74,7 @@ function videoUrl(value, id = null) {
 export class MemoryStore {
   constructor(dbPath = sharedMemoryPath(), options = {}) {
     this.dbPath = dbPath;
-    this.qqMemoryPath = options.qqMemoryPath === undefined ? DEFAULT_QQ_MEMORY_PATH : options.qqMemoryPath;
+    this.qqMemoryPath = options.qqMemoryPath === undefined ? resolveQQMemoryPath(dbPath) : options.qqMemoryPath;
     this.qqConfigPath = options.qqConfigPath ?? (this.qqMemoryPath ? path.join(path.dirname(path.dirname(this.qqMemoryPath)), 'config.yaml') : null);
     this.qqConfig = options.qqConfig;
     this.trackRecallSources = options.trackRecallSources !== false;
@@ -155,6 +184,28 @@ export class MemoryStore {
       }
     }
     return { entries, connections: { qq: this.qqConnection, video: { available: true } } };
+  }
+
+  recallForChat({ query = '', limit = 8 } = {}) {
+    const normalized = text(query, 'query', 200, true) || '';
+    limitValue(limit);
+    const qq = this.syncQQ(), allowQQSources = qq.available && qq.shared;
+    // 先按来源与派生链检查，再把命中的公共资料交给回复；不以群聊许可代替跨平台私聊授权。
+    const rows = normalized ? recallCentralMemory({ centralDb: this.db, query: normalized, limit: 100,
+      origins: allowQQSources ? ['video', 'qq', 'qq-history'] : ['video'], allowQQSources, chatShareableOnly: true }) : [];
+    let sharedPersonaText = '';
+    if (allowQQSources && this.qqMemoryPath) {
+      const file = path.join(path.dirname(path.dirname(this.qqMemoryPath)), 'roles', 'deepseek娘.md');
+      try {
+        const stat = lstatSync(file);
+        if (stat.isFile() && !stat.isSymbolicLink() && stat.size <= 80_000) {
+          const bytes = readFileSync(file);
+          if (!bytes.includes(0)) sharedPersonaText = new TextDecoder('utf-8', { fatal: true }).decode(bytes).slice(0, 20_000);
+        }
+      } catch {}
+    }
+    return { entries: rows.filter(isChatShareableMemory).slice(0, limit), sharedPersonaText,
+      connections: { qq: this.qqConnection, video: { available: true } } };
   }
 
   recordVideo(observation, source = 'api') {

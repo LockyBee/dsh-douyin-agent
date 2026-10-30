@@ -21,7 +21,7 @@ function fixture(t, options = {}) {
   const nowFn = () => now;
   const personaMemory = new PersonaMemory({ memoryDir: path.join(root, 'memory'), legacyRoleCardFile: path.join(root, 'no-legacy.md'), clock: nowFn });
   const videoLimits = new VideoLimits({ stateDir, now: nowFn }); videoLimits.savePolicy({ windows: ['00:00-24:00'], sessionMinutes: 10 }, { explicit: true });
-  fs.writeFileSync(path.join(stateDir, 'chat-policy.json'), JSON.stringify({ allowlist: [{ id: recipientId, name: '合成好友甲', followed: true, isGroup: false, verifiedAt: '2026-10-15T01:00:00Z' }] }));
+  fs.writeFileSync(path.join(stateDir, 'chat-policy.json'), JSON.stringify({ allowlist: [{ id: recipientId, name: '合成好友甲', followed: true, isGroup: false, verifiedAt: '2026-10-15T01:00:00Z', identityVersion: 2, identityKind: 'rendered-user', identityHash: 'a'.repeat(64), identityVerified: true, identityBinding: 'binding:' + 'b'.repeat(64) }] }));
   const current = () => { const value = state(id, time, options.duration || 10); value.video.paused = playbackPaused; return value; }, actions = [], requests = [], sends = [], delays = [], events = [], queue = options.decisions || [decision('stop')];
   let pauses = 0, watch;
   const advancePlayback=ms=>{for(let remaining=ms;remaining>0;){const step=Math.min(1000,remaining);now+=step;time+=step/1000;videoLimits.notePlayback(source,current(),{ownerId:watch?.runId||source});remaining-=step;}};
@@ -40,6 +40,10 @@ function fixture(t, options = {}) {
   const send = async (input, controls) => {
     sends.push({ input, controls }); assert.equal(controls.autonomousRunId, watch.runId); assert.ok(controls.signal instanceof AbortSignal); assert.deepEqual(Object.keys(input).sort(), ['expectedVideoId', 'recipientId']);
     controls.authorize({ phase: 'prepare', videoId: input.expectedVideoId, recipientId: input.recipientId });
+    if (options.preflightFailure) {
+      const code = options.preflightFailure, stage = 'conversation-baseline', forwardOperationId = 'synthetic-watch-preflight';
+      throw Object.assign(new Error('合成后台消息页暂不可用'), { code, forwardOperationId, failure: { code, stage, message: '合成后台消息页暂不可用' }, preflight: { protocol: 'share-preflight-v1', outcome: 'not-sent', forwardOperationId, videoId: input.expectedVideoId, recipientId: input.recipientId, sendClicks: 0, dispatchAuthorized: false, failureCode: code, failureStage: stage } });
+    }
     if (options.sendFailure) throw new Error('合成发送前故障');
     controls.authorize({ phase: 'before-click', videoId: input.expectedVideoId, recipientId: input.recipientId });
     if (options.stopAfterConfirmed) watch.cancel();
@@ -97,6 +101,30 @@ test('分享关闭、名单外、模型等待期间撤回许可时不进入发�
   }
 });
 
+test('后台缺页或前台只跳过明确未发送的分享，继续观察，不把失败学习成喜欢', async t => {
+  for (const source of ['api', 'dsh']) for (const code of ['CHAT_PAGE_NOT_OPEN', 'CHAT_FOREGROUND']) {
+    const f = fixture(t, { source, sharing: true, preflightFailure: code, decisions: [decision('share', { recipientId }), decision('stop')] });
+    const result = await f.run(); assert.equal(result.status, 'stopped'); assert.equal(result.lastError, ''); assert.equal(f.requests.length, 2);
+    assert.equal(f.actions.filter(item => item.name === 'douyin_observe').length, 2); assert.equal(f.sends.length, 1);
+    assert.equal(f.shareService.ledger().operations[0].status, 'not-sent'); assert.equal(f.shareService.state().paused, false);
+    assert.equal(f.personaMemory.snapshot().interests.length, 0); assert.equal(f.personaMemory.snapshot().recentObservations[0].actions.share, 0);
+    const event = f.events.find(item => item.type === 'watch.share-not-sent'); assert.equal(event.failureCode, code); assert.equal(event.stage, 'conversation-baseline');
+  }
+});
+
+test('缺失或冲突的未发送证明不能放行，不确定标记不能伪装成零点击', async t => {
+  const forwardOperationId = 'synthetic-watch-proof', code = 'CHAT_PAGE_NOT_OPEN', stage = 'contact-identity';
+  const good = { status: 'not-sent', code: 'SHARE_PREFLIGHT_NOT_SENT', confirmed: false, deliveryUncertain: false, deliveryType: 'native-card', operationId: 'synthetic-share-proof', forwardOperationId, videoId: ID, recipientId, failure: { code, stage }, preflight: { protocol: 'share-preflight-v1', outcome: 'not-sent', forwardOperationId, videoId: ID, recipientId, sendClicks: 0, dispatchAuthorized: false, failureCode: code, failureStage: stage } };
+  for (const mutation of ['missing', 'uncertain', 'confirmed', 'operation', 'wrong-video', 'wrong-recipient', 'dispatch', 'one-click', 'stage', 'code']) {
+    const f = fixture(t, { sharing: true, decisions: [decision('share', { recipientId }), decision('stop')] }), delivery = structuredClone(good);
+    if (mutation === 'missing') delete delivery.preflight; if (mutation === 'uncertain') delivery.deliveryUncertain = true; if (mutation === 'confirmed') delivery.confirmed = true;
+    if (mutation === 'operation') delivery.forwardOperationId = 'other-operation'; if (mutation === 'wrong-video') delivery.videoId = '99999'; if (mutation === 'wrong-recipient') delivery.recipientId = `conv:${'c'.repeat(64)}`;
+    if (mutation === 'dispatch') delivery.preflight.dispatchAuthorized = true; if (mutation === 'one-click') delivery.preflight.sendClicks = 1; if (mutation === 'stage') delivery.preflight.failureStage = 'receipt'; if (mutation === 'code') delivery.preflight.failureCode = 'SYNTHETIC_UNKNOWN';
+    f.shareService.share = async () => delivery;
+    const result = await f.run(); assert.equal(result.status, 'needs_user', mutation); assert.equal(f.requests.length, 1); assert.equal(f.events.some(event => event.type === 'watch.share-not-sent'), false); assert.equal(f.personaMemory.snapshot().recentObservations[0].actions.share, 0);
+  }
+});
+
 test('同片同人重复分享只跳过该动作，继续换片，不重复发送、扣次或学习分享', async t => {
   for (const source of ['api', 'dsh']) {
     const f = fixture(t, { source, sharing: true, decisions: [decision('share', { recipientId, reason: 'PRIVATE_LOCAL_SHARE_REASON' }), decision('share', { recipientId }), decision('skip'), decision('stop')] });
@@ -117,11 +145,12 @@ test('watch只接受精确匹配的typed去重结果，伪装skip、未知错误
   const f = fixture(t, { sharing: true, decisions: [decision('share', { recipientId })] }); f.shareService.share = async () => { throw new Error('合成未知分享错误'); }; const result = await f.run(); assert.equal(result.status, 'failed'); assert.match(result.lastError, /合成未知分享错误/); assert.equal(f.events.some(event => event.type === 'watch.share-skipped'), false);
 });
 
-test('分享回执不确定会停止循环并保留暂停；发送故障不伪装成成功互动', async t => {
+test('分享回执不确定只暂停分享并继续观看；未知发送故障不伪装成成功互动', async t => {
   for (const options of [{ uncertain: true }, { sendFailure: true }]) {
     const f = fixture(t, { ...options, sharing: true, decisions: [decision('share', { recipientId }), decision('skip')] }); const final = await f.run();
-    assert.equal(final.status, options.uncertain ? 'needs_user' : 'failed'); assert.equal(f.requests.length, 1); assert.equal(f.sends.length, 1); assert.equal(f.actions.some(row => row.name === 'douyin_next'), false);
-    assert.equal(f.personaMemory.snapshot().interests.length, 0); assert.equal(f.personaMemory.snapshot().recentObservations[0].actions.share, 0); assert.equal(f.shareService.state().paused, !!options.uncertain);
+    assert.equal(final.status, options.uncertain ? 'stopped' : 'failed'); assert.equal(f.requests.length, options.uncertain ? 3 : 1); assert.equal(f.sends.length, 1); assert.equal(f.actions.some(row => row.name === 'douyin_next'), !!options.uncertain);
+    if(options.sendFailure)assert.equal(f.personaMemory.snapshot().interests.length, 0);
+    assert.equal(f.personaMemory.snapshot().recentObservations.find(row=>row.videoId===ID).actions.share, 0); assert.equal(f.shareService.state().paused, !!options.uncertain);
     if (options.sendFailure) assert.match(final.lastError, /合成发送前故障/);
   }
 });

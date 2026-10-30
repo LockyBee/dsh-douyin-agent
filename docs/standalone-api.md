@@ -1,6 +1,6 @@
-# 独立软件与本机 API 1.4.5
+# 独立软件与本机 API 1.4.6
 
-独立 Windows 软件使用自己的 API Key，保留任务对话；不需要安装或启动 DSH、QQ 服务及 Node.js。软件和插件共用分类设置、人格、兴趣、每日观看用量及许可名单，日常界面见 [软件说明](../desktop/README.md)；插件入口见 [plugin.md](plugin.md)。固定包见 [1.4.5 下载页](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.5)，是否可下载以页面为准。
+独立 Windows 软件使用自己的 API Key，保留任务对话；不需要安装或启动 DSH、QQ 服务及 Node.js。软件和插件共用分类设置、人格、兴趣、每日观看用量及许可名单，日常界面见 [软件说明](../desktop/README.md)；插件入口见 [plugin.md](plugin.md)。固定包见 [1.4.6 下载页](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.6)，是否可下载以页面为准。
 
 ## 软件配置
 

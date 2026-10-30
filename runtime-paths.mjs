@@ -83,7 +83,10 @@ export function resolveNodeExecutable({ env = process.env, executable = process.
   const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
   const searchPath = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1] || '';
   const candidates = [
-    ...(resourcesPath && path.isAbsolute(resourcesPath) ? [path.join(resourcesPath, 'runtime', 'node', nodeName)] : []),
+    ...(resourcesPath && path.isAbsolute(resourcesPath) ? [
+      path.join(resourcesPath, 'runtime', 'node', nodeName),
+      path.join(resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin', nodeName),
+    ] : []),
     path.join(sourceRoot, 'desktop', '.cache', 'generated', 'node', nodeName),
     ...searchPath.split(path.delimiter).map(directory => directory.trim().replace(/^"(.*)"$/, '$1')).filter(directory => path.isAbsolute(directory)).map(directory => path.join(directory, nodeName)),
   ];

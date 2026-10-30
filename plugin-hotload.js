@@ -4,7 +4,7 @@ return {
   name: 'douyin-browser-local-mount',
   inject: ['loader', 'tools'],
   async apply(ctx) {
-    const expected = ['douyin_open', 'douyin_search', 'douyin_open_video', 'douyin_next', 'douyin_previous', 'douyin_status', 'douyin_observe', 'douyin_screenshot', 'douyin_pause', 'douyin_play', 'douyin_remember', 'douyin_recall','douyin_chat_contacts','douyin_chat_status','douyin_chat_start','douyin_chat_stop','douyin_chat_read','douyin_chat_observe','douyin_video_limits_status','douyin_media_status','douyin_listen','douyin_forward_video','douyin_persona_status','douyin_interest_record','douyin_watch_status','douyin_watch_start','douyin_watch_stop','douyin_spark_status','douyin_spark_start','douyin_spark_stop','douyin_report_status','douyin_report_generate','douyin_diagnostics','douyin_diagnostics_repair'];
+    const expected = ['douyin_open', 'douyin_search', 'douyin_open_video', 'douyin_next', 'douyin_previous', 'douyin_status', 'douyin_observe', 'douyin_screenshot', 'douyin_video_zoom', 'douyin_pause', 'douyin_play', 'douyin_remember', 'douyin_recall','douyin_chat_contacts','douyin_chat_status','douyin_chat_start','douyin_chat_stop','douyin_chat_read','douyin_chat_observe','douyin_video_limits_status','douyin_media_status','douyin_listen','douyin_forward_video','douyin_persona_status','douyin_interest_record','douyin_watch_status','douyin_watch_start','douyin_watch_stop','douyin_spark_status','douyin_spark_start','douyin_spark_stop','douyin_report_status','douyin_report_generate','douyin_diagnostics','douyin_diagnostics_repair'];
     const base = 'file:///D:/codex%E5%88%86%E5%B1%80/dsh%E9%85%8D%E7%BD%AE/douyin-browser/dsh-plugin.mjs';
     const target = base + '?v=18';
     const ownEntries = () => {

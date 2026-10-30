@@ -72,6 +72,25 @@ test('Electron 优先使用软件随包 Node，也可回落到 PATH 的现有 No
   assert.equal(resolveNodeExecutable({ ...options, resourcesPath: path.join(f.root, 'resources') }), packaged);
   assert.equal(resolveNodeExecutable({ ...options, resourcesPath: undefined }), process.execPath);
 });
+test('新版 DSH 的 primary-runtime/bin Node 优先于源码缓存与 PATH，仍执行独立 Node 探针', t => {
+  const f = fixture(t), resources = path.join(f.root, 'resources');
+  const hosted = linkNodeDirectory(path.join(resources, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin'));
+  linkNodeDirectory(path.join(f.sourceRoot, 'desktop', '.cache', 'generated', 'node'));
+  const result = resolveNodeExecutable({
+    env: { Path: path.dirname(process.execPath), NODE_OPTIONS: '--invalid-inherited-options', NODE_PATH: path.join(f.root, 'not-loaded'), ELECTRON_RUN_AS_NODE: '1' },
+    executable: path.join(f.root, 'DSH Desktop.exe'), versions: { electron: 'synthetic' }, sourceRoot: f.sourceRoot, resourcesPath: resources,
+  });
+  assert.equal(result, hosted);
+});
+test('新增宿主 Node 路径不覆盖旧随包优先级，也不能接受当前 Electron 可执行文件', t => {
+  const f = fixture(t), resources = path.join(f.root, 'resources');
+  const legacy = linkNodeDirectory(path.join(resources, 'runtime', 'node'));
+  const hosted = linkNodeDirectory(path.join(resources, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin'));
+  const options = { env: {}, executable: path.join(f.root, 'DSH Desktop.exe'), versions: { electron: 'synthetic' }, sourceRoot: f.sourceRoot, resourcesPath: resources };
+  assert.equal(resolveNodeExecutable(options), legacy);
+  fs.unlinkSync(path.dirname(legacy));
+  assert.throws(() => resolveNodeExecutable({ ...options, executable: hosted }), /未找到独立 Node/);
+});
 test('PATH 中相对目录不会成为桌面浏览器的 Node 程序来源', t => {
   const f = fixture(t);
   assert.throws(() => resolveNodeExecutable({ env: { PATH: '.' }, executable: path.join(f.root, 'DSH Desktop.exe'), versions: { electron: 'synthetic' }, sourceRoot: f.sourceRoot, resourcesPath: f.root }), /未找到独立 Node/);

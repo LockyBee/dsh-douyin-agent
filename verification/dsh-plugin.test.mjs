@@ -41,7 +41,7 @@ function execution(name, args = {}, signal = new AbortController().signal) {
   return { name, arguments: args, signal, token: {}, callId: `验证-${name}` };
 }
 
-const inputs = { douyin_diagnostics_repair: { reportId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', action: 'reapply_silent' }, douyin_search: { query: '科普' }, douyin_open_video: { index: 0 }, douyin_observe: { seconds: 1 }, douyin_remember: { content: '喜欢清楚的解释。' }, douyin_recall: { query: '解释', limit: 2 },douyin_chat_read:{recipientId:'conv:synthetic'},douyin_chat_observe:{recipientId:'conv:synthetic',messageId:'msg:'+'a'.repeat(64)},douyin_forward_video:{recipientId:'conv:synthetic'}, douyin_interest_record:{evidenceId:'video:'+'b'.repeat(64),topic:'合成科普题材',signal:'like',reflection:'根据合成采样证据记录兴趣，不代表用户偏好。'} };
+const inputs = { douyin_video_zoom:{sampleId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',cell:1,videoId:'1234567890123456789'}, douyin_diagnostics_repair: { reportId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', action: 'reapply_silent' }, douyin_search: { query: '科普' }, douyin_open_video: { index: 0 }, douyin_observe: { seconds: 1 }, douyin_remember: { content: '喜欢清楚的解释。' }, douyin_recall: { query: '解释', limit: 2 },douyin_chat_read:{recipientId:'conv:synthetic'},douyin_chat_observe:{recipientId:'conv:synthetic',messageId:'msg:'+'a'.repeat(64)},douyin_forward_video:{recipientId:'conv:synthetic'}, douyin_interest_record:{evidenceId:'video:'+'b'.repeat(64),topic:'合成科普题材',signal:'like',reflection:'根据合成采样证据记录兴趣，不代表用户偏好。'} };
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPEkAAAAASUVORK5CYII=';
 
 async function managedIncludeFixture({ version = '4', mode = 'complete' } = {}) {

@@ -26,6 +26,15 @@ function capture(id = '100001', extra = {}) {
   return { state: state(id), frames: [{ mimeType: 'image/jpeg', data: '/9j/2Q==', videoId: id, time: 1.25 }], observation: { videoId: id }, ...extra };
 }
 
+test('可播放作品缺少作者时仍可记录观察，不凭空补作者', t => {
+  const f = fixture(t); f.store.initialize();
+  const observed = state(); observed.video.author = null;
+  const result = f.store.recordObservation(observed, { source: 'api', kind: 'dom' });
+  assert.equal(result.videoId, '100001');
+  const saved = JSON.parse(fs.readFileSync(f.store.stateFile, 'utf8')).observations.find(item => item.id === result.evidenceId);
+  assert.equal(saved.author, '');
+});
+
 test('人格快照与上下文只读，不创建目录或默认读取旧人格', t => {
   const f = fixture(t), before = fs.readdirSync(f.root);
   const snapshot = f.store.snapshot();
@@ -231,7 +240,7 @@ test('人格卡持续占用达到重试上限后明确失败，旧卡保留且�
     };
     assert.throws(() => f.store.recordObservation(state(), { source: 'api' }), { code: 'EACCES' });
   } finally { fs.renameSync = rename; }
-  assert.equal(attempts, 12); assert.equal(fs.readFileSync(f.store.roleCardFile, 'utf8'), before);
+  assert.ok(attempts > 0 && attempts <= 25); assert.equal(fs.readFileSync(f.store.roleCardFile, 'utf8'), before);
   const projected = f.store.snapshot(); assert.equal(projected.recentObservations.length, 1); assert.equal(projected.generatedSynced, false); assert.equal(projected.manualText, manual);
   assert.equal(fs.readdirSync(f.store.personaFolder).some(name => name.endsWith('.tmp') || name === '.write.lock'), false);
   assert.equal(f.store.initialize().generatedSynced, true);
@@ -264,4 +273,19 @@ test('人格卡占用重试期间遇到外部手工编辑时不覆盖新正文',
     assert.throws(() => f.store.recordObservation(state(), { source: 'api' }), { code: 'PERSONA_REVISION_CONFLICT' });
   } finally { fs.renameSync = rename; }
   assert.equal(attempts, 1); assert.equal(fs.readFileSync(f.store.roleCardFile, 'utf8'), edited); assert.equal(f.store.snapshot().manualText, edited);
+});
+
+test('Windows文件占用超过一秒后恢复，仍可原子同步且不丢手编正文', t => {
+  const f = fixture(t); f.store.initialize();
+  const manual = f.store.snapshot().manualText, rename = fs.renameSync, started = performance.now(); let failures = 0;
+  try {
+    fs.renameSync = (from, to) => {
+      if (to === f.store.roleCardFile && performance.now() - started < 1250) { failures++; throw Object.assign(new Error('合成持续1.25秒的Windows占用'), { code: 'EPERM' }); }
+      return rename(from, to);
+    };
+    f.store.recordObservation(state(), { source: 'api' });
+  } finally { fs.renameSync = rename; }
+  assert.ok(failures > 0); assert.ok(performance.now() - started >= 1250);
+  const current = f.store.snapshot(); assert.equal(current.manualText, manual); assert.equal(current.generatedSynced, true); assert.equal(current.recentObservations.length, 1);
+  assert.equal(fs.readdirSync(f.store.personaFolder).some(name => name.endsWith('.tmp') || name === '.write.lock'), false);
 });

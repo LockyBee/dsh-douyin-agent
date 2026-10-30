@@ -19,6 +19,7 @@ test('运行中的好友服务可通过HTTP解除暂停并自动恢复，状态�
   };
   const share={state:()=>({enabled:shareEnabled}),configure:({enabled})=>{shareEnabled=enabled;},close:async()=>{}};
   const limits=new VideoLimits({stateDir:root});
+  fs.writeFileSync(path.join(root,'friend-interactions-policy.json'),JSON.stringify({version:1,enabled:true}));
   const server=createApiServer({controller:{close:async()=>{}},config:{apiKey:'synthetic-recovery-key',model:'synthetic'},agent:{runTask:async()=>assert.fail('HTTP验收不调用模型')},chatService:chat,shareService:share,videoLimits:limits,pauseVideoSources:async()=>{},port:0});
   server.listen(0,'127.0.0.1');await once(server,'listening');
   t.after(async()=>{await server.stop();assert.equal(path.dirname(root),path.resolve(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});});

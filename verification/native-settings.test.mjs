@@ -45,13 +45,14 @@ async function fixture(t) {
   const spark = { state: () => ({ running: false, enabled: false, ...flags.spark }), configure: (input, options) => event('spark/configure', input, options), stop: options => event('spark/stop', {}, options), resolve: (input, options) => event('spark/resolve', input, options) };
   const comments = { state: () => ({ enabled: false }), configure: (input, options) => event('comments/configure', input, options), resolve: (input, options) => event('comments/resolve', input, options) };
   const share = { state: () => ({ enabled: false }), configure: (input, options) => event('share/configure', input, options), resolve: (input, options) => event('share/resolve', input, options) };
-  const chat = { state: () => ({ running: false, ...flags.chat }), configure: input => event('chat/configure', input), stop: () => event('chat/stop', {}), resumeContact: recipientId => event('chat/resolve', { recipientId }), listContacts: () => event('chat/contacts', {}) };
+  const chat = { state: () => ({ running: false, ...flags.chat }), configure: input => event('chat/configure', input), stop: () => event('chat/stop', {}), resumeContact: recipientId => event('chat/resolve', { recipientId }), listContacts: () => event('chat/contacts', {}), prepareChat: () => event('chat/prepare', {}), unanswered: () => ({ protocol: 'chat-unanswered-v1', count: 2, snapshot: 'd'.repeat(64), items: [] }), markUnansweredHandled: input => event('chat/unanswered/resolve', input) };
+  const friends = { state: () => ({ policy: { enabled: false } }), configure: (input, options) => event('interactions/configure', input, options), configureContacts: input => event('chat/configure', input), prepareChat: () => event('interactions/prepare', {}), resolveUnanswered: input => event('chat/unanswered/resolve', input), reconcile: async () => ({ accepted: true }) };
   const media = { status: async () => ({ enabled: false, backend: 'local-whisper' }), saveSettings: (input, options) => event('media/configure', input, options) };
   let controllers = 0;
   const route = createNativeSettingsRoute({
     getController: async () => { controllers++; return { limits: () => limits, getPersonaMemory: () => memory, pauseForLimits: () => event('pause', {}), openBrowser: () => event('browser/open', {}) }; },
     getComments: async () => comments, getReport: async () => report, getSpark: async () => spark, getWatch: async () => watch, getMode: async () => mode,
-    getShare: async () => share, getChat: async () => chat, getMedia: async () => media, modelSettings,
+    getShare: async () => share, getChat: async () => chat, getFriends: async () => friends, getMedia: async () => media, modelSettings,
     configureMode: input => mode.configure(input, { explicit: true }),
     startWatch: input => event('watch/start', input), startSpark: () => event('spark/start', {}), startChat: () => event('chat/start', {}),
   });
@@ -117,6 +118,20 @@ test('原生设置拒绝跨来源、伪造 Host 和缺少令牌的修改，校�
   assert.equal((await f.request('/mode/configure', { silent: true }, { 'x-douyin-settings-token': '' })).status, 403);
   assert.equal(f.mode.state().silent, false); assert.deepEqual(f.events, []);
   assert.equal((await f.request('/mode/configure', { silent: true }, { 'content-type': 'text/plain' })).status, 400);
+});
+
+test('原生设置只允许带令牌的待处理标记，GET 列表和 POST 处理均复用原生 WebServer', async t => {
+  const f = await fixture(t), boot = await f.bootstrap();
+  assert.equal((await f.request('/chat/unanswered')).status, 403);
+  const list = await f.request('/chat/unanswered', undefined, { 'x-douyin-settings-token': boot.token }); assert.equal(list.status, 200); assert.equal(list.body.count, 2);
+  const denied = await f.request('/chat/unanswered/resolve', { recordIds: ['a'.repeat(64)] }, { 'x-douyin-settings-token': '' });
+  assert.equal(denied.status, 403); assert.equal(f.events.length, 0);
+  const invalid = await f.request('/chat/unanswered/resolve', { recordIds: ['a'.repeat(64)], extra: true });
+  assert.equal(invalid.status, 400); assert.equal(f.events.length, 0);
+  const saved = await f.request('/chat/unanswered/resolve', { recordIds: ['a'.repeat(64)] });
+  assert.equal(saved.status, 200); assert.equal(saved.body.unanswered.count, 2); assert.equal(f.events.length, 1); assert.equal(f.events[0].kind, 'chat/unanswered/resolve'); assert.deepEqual(f.events[0].input, { recordIds: ['a'.repeat(64)] });
+  const prepared = await f.request('/chat/prepare', {});
+  assert.equal(prepared.status, 200); assert.equal(f.events.at(-1).kind, 'interactions/prepare');
 });
 
 test('原生人格保存写入真实共享人格卡并核对版本，拒绝未知字段和运行中修改', async t => {

@@ -1,3 +1,4 @@
+import { browserPageLabel } from './browser-pages.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -79,7 +80,7 @@ export class WatchMode {
   async identity(page, anyManaged = false) {
     if (!page || page.isClosed()) return { managed: false, blocked: true, reason: '专用页已关闭。' };
     const identity = await page.evaluate(pageIdentity);
-    const managed = identity.origin === 'https://www.douyin.com' && (anyManaged ? names.has(identity.name) : identity.name === `deepseek-douyin-${this.source}`);
+    const managed = identity.origin === 'https://www.douyin.com' && (anyManaged ? names.has(identity.name) : identity.name === browserPageLabel(this.source));
     return { ...identity, managed, blocked: !managed || identity.loginRequired || identity.verificationRequired };
   }
   async apply(page, { anyVideoSource = false } = {}) {
@@ -88,7 +89,7 @@ export class WatchMode {
     if (identity.blocked && (!identity.managed || this.policy().silent)) return { silent: this.policy().silent, applied: false, blocked: true, loginRequired: Boolean(identity.loginRequired), verificationRequired: Boolean(identity.verificationRequired), focusRequested: false, reason: identity.managed ? '登录或验证需要手动处理，未新增静默监听或隐藏窗口。' : '未操作非指定的抖音视频页。' };
     const release = this.acquireControl();
     try {
-      const silent = this.policy().silent, label = anyVideoSource ? identity.name : `deepseek-douyin-${this.source}`, key = `dafeiyu-watch-mode:${label.replace('deepseek-douyin-', '')}`;
+      const silent = this.policy().silent, label = anyVideoSource ? identity.name : browserPageLabel(this.source), key = `dafeiyu-watch-mode:${label.replace('deepseek-douyin-', '')}`;
       if (!this.installed.has(page)) { await page.addInitScript(installSilentMode, { key, label }); this.installed.add(page); }
       await page.evaluate(({ key, silent }) => { sessionStorage.setItem(key, String(silent)); }, { key, silent });
       const result = await page.evaluate(installSilentMode, { key, label });

@@ -5,10 +5,11 @@ import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { BrowserController } from './core.mjs?v=9';
-import { messageFingerprint } from './chat-message.mjs';
+import { messageFingerprint, messageContent, messageWatermark, compareMessageWatermark } from './chat-message.mjs';
 import { MessageIdentityTracker } from './message-tracker.mjs';
-import { matchesAuthorizedContact } from './contact-authorization.mjs';
+import { matchesAuthorizedContact, hasStableConversationIdentity } from './contact-authorization.mjs';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
+import { imageFileType, UPLOAD_STAGING_CONTRACT, readUploadStagingContractDom, readImageUploadPreviewDom, installImageDispatchGuardDom } from './chat-output.mjs';
 export { MessageIdentityTracker } from './message-tracker.mjs';
 
 const HOME = 'https://www.douyin.com/?recommend=1&from_nav=1';
@@ -54,6 +55,14 @@ const sameConversationIdentity = (current, contact) => Boolean(current && contac
   && current.isGroup === contact.isGroup && current.conversationType === contact.conversationType
   && (!current.identityKey || !contact.identityKey || current.identityKey === contact.identityKey)
   && contactIdentityKey(current) && contactIdentityKey(current) === contactIdentityKey(contact));
+const normalizeDisplayName = value => String(value || '').normalize('NFKC').replace(/[，、,]\s*/g, '，').replace(/\s+/g, ' ').trim();
+const sameWeakConversation = (current, contact) => hasStableConversationIdentity(contact) ? sameConversationIdentity(current, contact) : Boolean(current && contact && current.identityConflict !== true && !contact.identityConflict
+  && current.isGroup === contact.isGroup && current.conversationType === contact.conversationType
+  && typeof current.displayName === 'string' && current.displayName
+  && (() => {
+    const actual = normalizeDisplayName(current.displayName), expected = normalizeDisplayName(contact.displayName || contact.name);
+    return Boolean(expected) && (actual === expected || current.isGroup === true && actual.startsWith(expected) && /^\s*\(\d{1,6}\)$/.test(actual.slice(expected.length)));
+  })());
 const contactOpaqueId = row => `conv:${hash(contactIdentityKey(row) ?? `${row.displayName}\0${row.avatar}`)}`;
 const contactIdentityBinding = row => !row.identityConflict && contactIdentityKey(row) && ['direct', 'group'].includes(row.conversationType)
   ? `binding:${hash(`${row.conversationType}\0${contactIdentityKey(row)}`)}` : null;
@@ -95,7 +104,49 @@ export async function readContactDom() {
   const clean = value => (value ?? '').replace(/\s+/g, ' ').trim();
   const resource = value => { try { return new URL(value, location.href).pathname.replace(/~[^/]*/g, '').replace(/\/[0-9]+x[0-9]+\//g, '/'); } catch { return ''; } };
   const own = (value, key) => value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+  const groupPrototypeIdentity = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { id: null, shortId: null, conflict: false, signature: 'absent' };
+    const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
+    const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
+    const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
+    for (const key of ['id', 'shortId']) {
+      const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+      signatures.push(shape(descriptor));
+      if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
+      if (!descriptor) continue;
+      if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
+      if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+      result[key] = descriptor.value;
+    }
+    result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
+    return result;
+  };
   const digest = async value => globalThis.crypto?.subtle ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(n => n.toString(16).padStart(2, '0')).join('') : null;
+  const groupRowConversations = row => {
+    const values = [], seen = new Set();
+    const visit = (props, depth) => {
+      if (!props || typeof props !== 'object' || seen.has(props)) return;
+      seen.add(props);
+      for (const key of ['conversation', 'conversationInfo', 'conversationData']) { const value = own(props, key); if (value && typeof value === 'object' && !Array.isArray(value)) values.push(value); }
+      if (depth >= 3) return;
+      const children = own(props, 'children');
+      if (Array.isArray(children)) { for (let index = 0; index < Math.min(100, own(children, 'length') || 0); index++) visit(own(own(children, String(index)), 'props'), depth + 1); }
+      else visit(own(children, 'props'), depth + 1);
+    };
+    const propsKeys = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactProps$'));
+    if (propsKeys.length === 1) visit(own(row, propsKeys[0]), 0);
+    const fiberKeys = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactFiber$'));
+    if (fiberKeys.length === 1) {
+      let fiber = own(row, fiberKeys[0]);
+      const fibers = new Set();
+      for (let depth = 0; fiber && typeof fiber === 'object' && depth < 4 && !fibers.has(fiber); depth++, fiber = own(fiber, 'return')) {
+        fibers.add(fiber);
+        const props = own(fiber, 'memoizedProps');
+        for (const key of ['conversation', 'conversationInfo', 'conversationData']) { const value = own(props, key); if (value && typeof value === 'object' && !Array.isArray(value)) values.push(value); }
+      }
+    }
+    return [...new Set(values)];
+  };
   const renderedIdentity = async row => {
     const keys = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactProps$'));
     if (keys.length !== 1) return { identityKey: null, identitySource: null, identityConflict: keys.length > 1 };
@@ -116,10 +167,23 @@ export async function readContactDom() {
     };
     // 只读取已渲染行的三层 children props 和明确会话对象的标量身份，不执行 getter。
     visit(own(row, keys[0]), 0);
-    if ([...identities.values()].some(values => values.size !== 1) || types.size > 1) return { identityKey: null, identitySource: null, identityConflict: true };
+    const groupEligible = () => row.getAttribute('data-conversation-type') === 'group' || row.getAttribute('data-is-group') === 'true' || Boolean(row.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]')) || types.has('group') || !row.querySelector('a[href*="/user/"]') && /[,，、]/.test(row.querySelector('.conversationConversationItemtitle,[data-e2e="conversation-name"]')?.textContent || '');
+    const groupRoots = () => { const roots = [own(row, keys[0])], fiberKeys = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactFiber$')); if (fiberKeys.length !== 1) return roots; let fiber = own(row, fiberKeys[0]); for (let depth = 0; fiber && typeof fiber === 'object' && depth < 4; depth++, fiber = own(fiber, 'return')) roots.push(fiber); return roots; };
+    const initialGroupRoots = groupEligible() ? groupRoots() : null;
+    const initialGroupConversations = groupEligible() ? groupRowConversations(row) : null;
+    const initialGroupOwners = initialGroupConversations?.map(value => Object.getPrototypeOf(value));
+    const groupSignature = () => JSON.stringify([groupEligible(), row.getAttribute('data-conversation-type'), row.getAttribute('data-is-group'), groupRowConversations(row).map(value => groupPrototypeIdentity(value).signature)]);
+    const initialGroupSignature = groupEligible() ? groupSignature() : null;
+    let prototypeConflict = false;
+    if (groupEligible()) for (const value of groupRowConversations(row)) {
+      const group = groupPrototypeIdentity(value); prototypeConflict ||= group.conflict;
+      for (const [family, id] of [['conversation', group.id], ['conversation-short', group.shortId]]) if (id) { const set = identities.get(family) ?? new Set(); set.add(id); identities.set(family, set); }
+    }
+    if (prototypeConflict || [...identities.values()].some(values => values.size !== 1) || types.size > 1) return { identityKey: null, identitySource: null, identityConflict: true };
     const selected = [...identities].find(([family]) => ['conversation', 'conversation-short', 'group'].includes(family)) ?? [...identities].find(([family]) => family === 'user') ?? [...identities][0];
     if (!selected) return { identityKey: null, identitySource: null, identityConflict: false, renderedType: [...types][0] ?? null };
     const fingerprint = await digest([...selected[1]][0]);
+    if (initialGroupSignature !== null && (!row.isConnected || initialGroupSignature !== groupSignature() || JSON.stringify(groupRoots().map((value, index) => value === initialGroupRoots[index])) !== JSON.stringify(initialGroupRoots.map(() => true)) || JSON.stringify(groupRowConversations(row).map((value, index) => value === initialGroupConversations[index] && Object.getPrototypeOf(value) === initialGroupOwners[index])) !== JSON.stringify(initialGroupConversations.map(() => true)))) return { identityKey: null, identitySource: null, identityConflict: true };
     return { identityKey: fingerprint ? `${selected[0]}:${fingerprint}` : null, identitySource: fingerprint ? 'rendered-row-metadata' : null, identityConflict: false, renderedType: [...types][0] ?? null };
   };
   const dialog = document.querySelector('[data-e2e="im-dialog"]');
@@ -130,22 +194,24 @@ export async function readContactDom() {
     const link = name?.closest('a[href]') || name?.querySelector('a[href]') || row.querySelector('a[data-e2e="conversation-user"][href]');
     try { const url = new URL(link?.getAttribute('href'), location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) profileUrl = url.origin + url.pathname; } catch {}
     const relationshipLabel = clean(row.querySelector('[data-e2e="follow-status"],[data-e2e="relationship"]')?.textContent);
+    const displayName = clean(name?.textContent);
     const groupAvatar = row.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]');
     const declared = row.getAttribute('data-conversation-type') || metadata.renderedType;
-    const isGroup = declared === 'group' || row.getAttribute('data-is-group') === 'true' || Boolean(groupAvatar);
+    const looksLikeGroup = !profileUrl && /[,，、]/.test(displayName);
+    const isGroup = declared === 'group' || row.getAttribute('data-is-group') === 'true' || Boolean(groupAvatar) || looksLikeGroup;
     const isDirect = !isGroup && (['direct', 'single', 'personal'].includes(declared) || row.getAttribute('data-is-group') === 'false' || Boolean(profileUrl) || /^user(?:-id)?:/.test(metadata.identityKey || '') && Boolean(row.querySelector('.commonIMAvataravatarContainer img')));
-    const conversationType = isGroup ? 'group' : isDirect ? 'direct' : 'unknown';
+    const conversationType = isGroup || !isDirect ? 'group' : 'direct';
     const groupImages = [...(groupAvatar?.querySelectorAll('img') ?? [])].map(image => resource(image.getAttribute('src'))).filter(Boolean).sort();
     const avatar = isGroup ? groupImages.length ? `group-avatar:${JSON.stringify(groupImages)}` : groupAvatar ? 'group-marker' : resource(row.querySelector('img')?.getAttribute('src')) : resource(row.querySelector('.commonIMAvataravatarContainer img,img')?.getAttribute('src'));
     const identityConflict = metadata.identityConflict || Boolean(metadata.renderedType && metadata.renderedType !== conversationType);
     const identityKey = isGroup && metadata.identityKey && !/^(?:conversation|conversation-short|group):/.test(metadata.identityKey) ? null : metadata.identityKey;
     return ({
     index,
-    displayName: clean(name?.textContent),
+    displayName,
     nativeId: row.getAttribute('data-conversation-id') || row.getAttribute('data-conversation-short-id') || null,
     avatar,
     unread: Boolean(row.querySelector('[class*="unread"],[class*="Unread"],[data-e2e="unread-count"]')),
-    isGroup: isGroup ? true : isDirect ? false : null, conversationType,
+    isGroup: conversationType === 'group', conversationType,
     profileUrl, relationshipLabel: !isGroup && ['已关注', '相互关注', '互相关注'].includes(relationshipLabel) ? relationshipLabel : null,
     ...metadata, identityKey, identityConflict,
   }); }));
@@ -187,13 +253,14 @@ export function readChatBlockers() {
   };
 }
 
-export async function readConversationDom({ expectedKey, expectedType, expectedRenderedKey } = {}) {
+export async function readConversationDom({ expectedKey, expectedType, expectedRenderedKey, allowWeak = false } = {}) {
   const clean = value => (value ?? '').trim();
-  const readableText = element => {
+  const quoteSelector = '[data-e2e="message-quote"],[data-e2e="message-reply-preview"],[class*="MessageItemReply"],[class*="MessageItemQuote"],[class*="QuoteMessage"]';
+  const readableText = (element, skipQuotes = false) => {
     const parts = [];
     const visit = node => {
       if (node.nodeType === Node.TEXT_NODE) { parts.push(node.textContent || ''); return; }
-      if (!(node instanceof Element) || node.matches('script,style,[aria-hidden="true"]')) return;
+      if (!(node instanceof Element) || node.matches('script,style,[aria-hidden="true"]') || skipQuotes && node.matches(quoteSelector)) return;
       if (node.tagName === 'IMG') { const label = clean(node.getAttribute('title') || node.getAttribute('alt') || node.getAttribute('aria-label')); parts.push(label || '[未命名表情]'); return; }
       if (node.tagName === 'BR') { parts.push('\n'); return; }
       for (const child of node.childNodes) visit(child);
@@ -213,6 +280,23 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
   const avatar = declaredGroup ? groupImages.length ? `group-avatar:${JSON.stringify(groupImages)}` : groupAvatar ? 'group-marker' : resource(header?.querySelector('img')?.getAttribute('src')) : resource(header?.querySelector('img')?.getAttribute('src'));
   const conversationNativeId = header?.getAttribute('data-conversation-id') || root?.getAttribute('data-conversation-id') || header?.getAttribute('data-conversation-short-id') || root?.getAttribute('data-conversation-short-id') || null;
   const own = (value, key) => value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+  const groupPrototypeIdentity = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { id: null, shortId: null, conflict: false, signature: 'absent' };
+    const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
+    const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
+    const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
+    for (const key of ['id', 'shortId']) {
+      const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+      signatures.push(shape(descriptor));
+      if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
+      if (!descriptor) continue;
+      if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
+      if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+      result[key] = descriptor.value;
+    }
+    result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
+    return result;
+  };
   const digest = async value => globalThis.crypto?.subtle ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(n => n.toString(16).padStart(2, '0')).join('') : null;
   const identities = new Map(), types = new Set(), add = (family, value) => {
     if (typeof value !== 'string' && !Number.isSafeInteger(value)) return;
@@ -232,24 +316,71 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
   for (const declared of [header?.getAttribute('data-conversation-type'), root?.getAttribute('data-conversation-type')]) if (declared && ['direct', 'single', 'personal', 'group'].includes(declared)) types.add(declared === 'group' ? 'group' : 'direct');
   if (declaredGroup) types.add('group');
   else if (profileUrl || identities.has('user') || identities.has('user-id') || header?.getAttribute('data-is-group') === 'false') types.add('direct');
-  const conversationType = types.size === 1 ? [...types][0] : 'unknown';
+  const looksLikeGroup = /[,，、]/.test(displayName);
+  const conversationType = types.size === 1 ? [...types][0] : (declaredGroup || looksLikeGroup || !profileUrl) ? 'group' : 'direct';
+  const groupPrototype = conversationType === 'group' ? groupPrototypeIdentity(conversation) : null;
+  const groupPrototypeOwner = groupPrototype && conversation ? Object.getPrototypeOf(conversation) : null;
+  if (groupPrototype) { add('conversation', groupPrototype.id); add('conversation-short', groupPrototype.shortId); }
   const conflictingNativeIds = new Set([header?.getAttribute('data-conversation-id'), root?.getAttribute('data-conversation-id'), header?.getAttribute('data-conversation-short-id'), root?.getAttribute('data-conversation-short-id')].filter(Boolean));
-  let identityConflict = keys.length > 1 || types.size > 1 || conflictingNativeIds.size > 1 || [...identities.values()].some(values => values.size !== 1);
+  let identityConflict = Boolean(groupPrototype?.conflict) || keys.length > 1 || types.size > 1 || conflictingNativeIds.size > 1 || [...identities.values()].some(values => values.size !== 1);
   const selected = [...identities].find(([family]) => ['conversation', 'conversation-short', 'group'].includes(family)) ?? [...identities].find(([family]) => family === 'user') ?? [...identities][0];
-  const metadataSignature = () => JSON.stringify(['conversationId', 'id', 'conversationShortId', 'shortId', 'groupId', 'secUid', '_toParticipantSecUserId', 'userId', 'conversationType', 'type'].map(key => { const value = own(conversation, key); return typeof value === 'string' || Number.isSafeInteger(value) ? String(value) : null; }));
+  const metadataSignature = () => JSON.stringify([['conversationId', 'id', 'conversationShortId', 'shortId', 'groupId', 'secUid', '_toParticipantSecUserId', 'userId', 'conversationType', 'type'].map(key => { const value = own(conversation, key); return typeof value === 'string' || Number.isSafeInteger(value) ? String(value) : null; }), conversationType === 'group' ? groupPrototypeIdentity(conversation).signature : null, ['conversationId','id'].map(key=>{const d=conversation&&Object.getPrototypeOf(conversation)&&Object.getOwnPropertyDescriptor(Object.getPrototypeOf(conversation),key);return !d?null:!Object.hasOwn(d,'value')?['accessor']:['data',typeof d.value,typeof d.value==='string'?d.value:null];})]);
   const domMetadataSignature = () => JSON.stringify([header, root].map(element => element ? ['data-e2e', 'data-conversation-id', 'data-conversation-short-id', 'data-conversation-type', 'data-is-group'].map(key => element.getAttribute(key)) : null).concat(Boolean(header?.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]'))));
   const initialMetadata = metadataSignature(), initialDomMetadata = domMetadataSignature();
   const fingerprint = selected && !identityConflict ? await digest([...selected[1]][0]) : null;
   const currentProps = keys.length === 1 ? own(header, keys[0]) : null;
   const currentChildren = own(currentProps, 'children'), currentConversation = own(own(Array.isArray(currentChildren) ? own(currentChildren, '0') : currentChildren, 'props'), 'conversation');
   const currentHeaders = [...document.querySelectorAll('[data-e2e="im-dialog"] [class*="StackLayoutStackChatHeaderuser"],[data-e2e="im-dialog"] [data-e2e="chat-header"],[data-e2e="im-dialog"] [data-e2e="group-chat-header"]')].filter(visible);
-  if (!header?.isConnected || currentHeaders.length !== 1 || currentHeaders[0] !== header || currentProps !== props || currentConversation !== conversation || metadataSignature() !== initialMetadata || domMetadataSignature() !== initialDomMetadata) identityConflict = true;
+  if (!header?.isConnected || currentHeaders.length !== 1 || currentHeaders[0] !== header || currentProps !== props || currentConversation !== conversation || groupPrototype && conversation && Object.getPrototypeOf(conversation) !== groupPrototypeOwner || metadataSignature() !== initialMetadata || domMetadataSignature() !== initialDomMetadata) identityConflict = true;
   const identityKey = fingerprint && (conversationType !== 'group' || ['conversation', 'conversation-short', 'group'].includes(selected[0])) ? `${selected[0]}:${fingerprint}` : null;
-  const identity = { displayName, avatar, nativeId: conversationNativeId, identityKey, profileUrl, identityConflict, isGroup: conversationType === 'group' ? true : conversationType === 'direct' ? false : null, conversationType };
+  const identity = { displayName, avatar, nativeId: conversationNativeId, identityKey, profileUrl, identityConflict, ...(groupPrototype?.id || groupPrototype?.shortId ? { groupPrototypeIdentity: true } : {}), isGroup: conversationType === 'group', conversationType };
   const stableKey = conversationNativeId ? `native:${conversationNativeId}` : identityKey ? `rendered:${identityKey}` : conversationType === 'direct' && profileUrl ? `user:${profileUrl}` : null;
-  if (!header || identityConflict || !stableKey || conversationType === 'unknown' || expectedKey && (stableKey !== expectedKey || conversationType !== expectedType || expectedRenderedKey && identityKey && identityKey !== expectedRenderedKey)) return { ...identity, messages: [], identityUnavailable: true, loading: false };
+  if (!header || identityConflict || (!stableKey && !allowWeak) || expectedKey && (stableKey !== expectedKey || conversationType !== expectedType || expectedRenderedKey && identityKey && identityKey !== expectedRenderedKey)) return { ...identity, messages: [], identityUnavailable: true, loading: false };
   let timestamp = null;
   const messages = [];
+  const dataField = (object, key) => {
+    if (!object || typeof object !== 'object') return undefined;
+    const ownDescriptor = Object.getOwnPropertyDescriptor(object, key), prototype = Object.getPrototypeOf(object);
+    const inherited = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+    if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value') || inherited && !Object.hasOwn(inherited, 'value')) return undefined;
+    if (ownDescriptor && inherited && ownDescriptor.value !== inherited.value) return undefined;
+    return ownDescriptor ? ownDescriptor.value : inherited?.value;
+  };
+  const renderedMessage = element => {
+    const keys = Object.getOwnPropertyNames(element).filter(key => key.startsWith('__reactProps$'));
+    const children = keys.length === 1 ? own(own(element, keys[0]), 'children') : null;
+    const child = Array.isArray(children) ? own(children, '0') : children;
+    return own(own(child, 'props'), 'message');
+  };
+  const conversationIdCandidate = conversationNativeId || groupPrototype?.id || dataField(conversation, 'conversationId') || dataField(conversation, 'id') || null;
+  const expectedConversationId = typeof conversationIdCandidate==='string' && conversationIdCandidate.length<=512 && !/[\u0000-\u0020\u007f]/.test(conversationIdCandidate) ? conversationIdCandidate : null;
+  const selfUids = new Set();
+  let selfConflict = false, selfLoggedOut = false;
+  const selfAnchors = [...document.querySelectorAll('.tab-user_self a[href]')].filter(element => visible(element) && !element.closest('[data-e2e="im-dialog"],[data-e2e="comment-item"]'));
+  if (selfAnchors.length === 1) {
+    let route; try { route = new URL(selfAnchors[0].getAttribute('href'), location.origin); } catch {}
+    const routeId = route?.origin === 'https://www.douyin.com' && !route.username && !route.password ? /^\/user\/([A-Za-z0-9_-]{1,300})\/?$/.exec(route.pathname)?.[1] : null;
+    if (routeId) for (const element of new Set([selfAnchors[0], selfAnchors[0].closest('.tab-user_self')])) {
+      if (!element) continue;
+      const keys = Object.getOwnPropertyNames(element).filter(key => key.startsWith('__reactFiber$'));
+      if (keys.length > 1) { selfConflict = true; continue; }
+      let fiber = keys.length === 1 ? own(element, keys[0]) : null;
+      for (let depth = 0; fiber && depth <= 5; depth++) {
+        if (depth) fiber = dataField(fiber, 'return'); if (!fiber) break;
+        const user = dataField(dataField(fiber, 'memoizedProps'), 'userInfo');
+        if (!user || typeof user !== 'object') continue;
+        const loggedIn = dataField(user, 'isLogin'), status = dataField(user, 'statusCode');
+        if (loggedIn === false || typeof status === 'number' && status !== 0) { selfLoggedOut = true; continue; }
+        if (loggedIn !== true || status !== 0) continue;
+        const info = dataField(user, 'info'), secure = dataField(info, 'secUid') ?? dataField(info, 'sec_uid');
+        if (routeId !== 'self' && secure !== routeId) { selfConflict = true; continue; }
+        const values = ['uid', 'userId', 'user_id'].map(key => dataField(info, key)).filter(value => value !== undefined);
+        if (values.some(value => typeof value !== 'string' || !/^\d{1,64}$/.test(value))) { selfConflict = true; continue; }
+        values.forEach(value => selfUids.add(value));
+      }
+    }
+  }
+  const selfUid = !selfConflict && !selfLoggedOut && selfUids.size === 1 ? [...selfUids][0] : null;
   const contents = '[data-e2e="msg-item-content"],[data-e2e="message-content"],[data-testid="message-content"]';
   const nodes = [...(root?.querySelectorAll(`[class*="MessageBoxTimetimeLayout"],time,${contents}`) ?? [])].filter(node => !node.matches(contents) || !node.parentElement?.closest(contents));
   const list = root?.querySelector('[class*="messageMessageListlist"],[data-e2e="message-list"]');
@@ -264,18 +395,26 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
   for (const node of nodes) {
     if (!node.matches(contents)) { timestamp = node.getAttribute('datetime') || clean(node.textContent) || timestamp; continue; }
     const box = node.closest('[class*="messageMessageBoxmessageBox"],[data-e2e="message-row"]') || node;
+    const model = renderedMessage(node), modelConversationId = dataField(model, 'conversationId');
+    const modelBound = typeof expectedConversationId === 'string' && modelConversationId === expectedConversationId;
+    const parsed = modelBound ? own(model, '_parsedContent') : null;
     const ancestors = []; for (let e = node; e && e !== root && root?.contains(e); e = e.parentElement) ancestors.push(e);
     const fromMe = ancestors.some(e => e.getAttribute('data-direction') === 'outgoing' || e.getAttribute('data-is-self') === 'true' || e.getAttribute('data-is-from-me') === 'true' || [...e.classList].some(token => /(?:^|[_-]|Content|Box)isFromMe(?:[_-]|$)/i.test(token)));
     const incoming = ancestors.some(e => e.getAttribute('data-direction') === 'incoming' || e.getAttribute('data-is-self') === 'false' || e.getAttribute('data-is-from-me') === 'false');
     const direction = fromMe && !incoming ? 'outgoing' : incoming && !fromMe || !fromMe && box.classList.contains('messageMessageBoxmessageBox') ? 'incoming' : 'unknown';
-    const textNode = node.querySelector('[class*="MessageItemTextcontainer"],[data-e2e="message-text"]');
-    const emoji = node.querySelector('[class*="MessageItemEmojiemojiBox"],[data-e2e="message-emoji"]');
-    const share = node.querySelector('[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]');
-    const image = !textNode && !emoji && !share ? node.querySelector('[class*="MessageItemImagecontainer"],[class*="MessageItemImageimageBox"],[class*="MessageItemImageImageBox"],[data-e2e="message-image"]') : null;
-    const voice = !textNode && !emoji && !share && !image ? node.querySelector('[class*="MessageItemAudio"],[class*="MessageItemVoice"],[data-e2e="message-voice"],[data-e2e="message-audio"]') : null;
+    // 引用预览属于历史资料，不能冒充本条正文、媒体或新的群聊呼叫。
+    const ownNodes = selector => [...node.querySelectorAll(selector)].filter(element => !element.closest(quoteSelector));
+    const ownNode = selector => ownNodes(selector)[0] || null;
+    const quoted = [...node.querySelectorAll(quoteSelector)].filter(element => !element.parentElement?.closest(quoteSelector));
+    const reference = quoted.length ? { text: quoted.map(element => readableText(element)).join('\n').slice(0, 1200), scope: 'visible-quoted-message', contentStatus: 'preview-only' } : null;
+    const textNode = ownNode('[class*="MessageItemTextcontainer"],[data-e2e="message-text"]');
+    const emoji = ownNode('[class*="MessageItemEmojiemojiBox"],[data-e2e="message-emoji"],[data-e2e="message-sticker"],[class*="MessageItemSticker"]');
+    const share = ownNode('[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]');
+    const image = !emoji && !share ? ownNode('[class*="MessageItemImagecontainer"],[class*="MessageItemImageimageBox"],[class*="MessageItemImageImageBox"],[data-e2e="message-image"]') : null;
+    const voice = !emoji && !share && !image ? ownNode('[class*="MessageItemAudio"],[class*="MessageItemVoice"],[data-e2e="message-voice"],[data-e2e="message-audio"]') : null;
     const inlineEmoji = textNode ? [...textNode.querySelectorAll('[class*="TextMessageTextemoji"] img,[data-e2e="inline-emoji"] img,img[data-e2e="inline-emoji"]')] : [];
-    const kind = textNode ? 'text' : emoji ? 'emoji' : share ? 'video' : image ? 'image' : voice ? 'voice' : 'unsupported';
-    const text = textNode ? readableText(textNode) : '';
+    let kind = emoji ? 'emoji' : share ? 'video' : image ? 'image' : voice ? 'voice' : textNode || reference ? 'text' : 'unsupported';
+    let text = textNode ? readableText(textNode, true).slice(0, 8000) : '';
     let media = null;
     if (inlineEmoji.length && inlineEmoji.some(item => !clean(item.getAttribute('title') || item.getAttribute('alt') || item.getAttribute('aria-label')))) {
       media = { type: 'emoji', inline: true, label: null, images: inlineEmoji.map(item => ({ src: item.currentSrc || item.getAttribute('src') || '', label: clean(item.getAttribute('title') || item.getAttribute('alt') || item.getAttribute('aria-label')) || null })), requiresVisual: true, understandingScope: 'single-message-image' };
@@ -286,24 +425,46 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
       media = { type: 'emoji', label, images, requiresVisual: true, understandingScope: 'single-message-image' };
     }
     if (share) {
-      let url = null, videoId = null;
+      let url = null, videoId = null, publicUrlSource = null;
+      const domIds = new Set(); let invalidLink = false;
       for (const link of share.querySelectorAll('a[href]')) {
-        try { const candidate = new URL(link.getAttribute('href'), location.href); const match = /^\/video\/(\d+)\/?$/.exec(candidate.pathname);
-          if (candidate.protocol === 'https:' && /^(?:www\.)?douyin\.com$/.test(candidate.hostname) && match) { videoId = match[1]; url = `https://www.douyin.com/video/${videoId}`; break; }
-        } catch {}
+        const href = link.getAttribute('href');
+        if (typeof href !== 'string' || href.length > 300) { invalidLink = true; continue; }
+        try {
+          const candidate = new URL(href, location.href), match = /^\/video\/(\d{1,64})\/?$/.exec(candidate.pathname);
+          if (!/^(?:www\.)?douyin\.com$/.test(candidate.hostname) || !candidate.pathname.startsWith('/video/')) continue;
+          if (candidate.protocol !== 'https:' || candidate.username || candidate.password || candidate.port || !match) { invalidLink = true; continue; }
+          domIds.add(match[1]);
+        } catch { invalidLink = true; }
+      }
+      const parsedDescriptor = modelBound ? Object.getOwnPropertyDescriptor(model, '_parsedContent') : null;
+      const parsedObject = parsedDescriptor && Object.hasOwn(parsedDescriptor, 'value') && parsedDescriptor.value && typeof parsedDescriptor.value === 'object' && !Array.isArray(parsedDescriptor.value) ? parsedDescriptor.value : null;
+      const itemDescriptor = parsedObject ? Object.getOwnPropertyDescriptor(parsedObject, 'itemId') : null;
+      const nativeItemId = itemDescriptor && Object.hasOwn(itemDescriptor, 'value') && typeof itemDescriptor.value === 'string' && /^\d{1,64}$/.test(itemDescriptor.value) ? itemDescriptor.value : null;
+      const invalidNative = Boolean(parsedDescriptor && !parsedObject || itemDescriptor && !nativeItemId);
+      const stableServerId = modelBound ? dataField(model, 'serverId') : null;
+      const stableMessage = box.getAttribute('data-message-id') || box.getAttribute('data-msg-id') || node.getAttribute('data-message-id') || (typeof stableServerId === 'string' && /^[1-9]\d{0,63}$/.test(stableServerId) ? stableServerId : null);
+      const trustedNativeId = typeof stableMessage === 'string' && stableMessage.length > 0 && stableMessage.length <= 500 && stableMessage.trim() === stableMessage && !/[\u0000-\u001f\u007f]/.test(stableMessage) ? nativeItemId : null;
+      const domId = domIds.size === 1 ? [...domIds][0] : null;
+      const cardIdentityConflict = invalidLink || invalidNative || domIds.size > 1 || node.querySelectorAll('[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]').length !== 1 || Boolean(nativeItemId && domId && nativeItemId !== domId);
+      if (!cardIdentityConflict) {
+        videoId = trustedNativeId || domId;
+        if (videoId) { url = 'https://www.douyin.com/video/' + videoId; publicUrlSource = trustedNativeId ? domId ? 'dom-link-and-rendered-item-id' : 'rendered-message-item-id' : 'dom-link'; }
       }
       const title = clean(share.querySelector('[class*="MessageItemShareAwemetitle"],[class*="MessageItemShareAwemedesc"],[data-e2e="shared-video-title"]')?.textContent) || null;
       const author = clean(share.querySelector('[class*="MessageItemShareAwemeauthorName"],[data-e2e="shared-video-author"]')?.textContent) || null;
       const cover = share.querySelector('.MessageItemShareAwemeawemeContainer,img:not(.MessageItemShareAwemephotosTag):not(.MessageItemShareAwemeauthorAvatar)');
       media = { type: 'shared-work', videoId, url, title, author, isPhotoGallery: Boolean(share.querySelector('.MessageItemShareAwemephotosTag')),
         images: cover ? [{ src: cover.currentSrc || cover.getAttribute('src') || '', label: clean(cover.getAttribute('alt')) || null }] : [],
-        requiresVisual: true, understandingScope: 'card-cover-and-dom-metadata', publicUrlSource: url ? 'dom-link' : null, canResolveByOpeningCard: true };
+        requiresVisual: true, understandingScope: 'card-cover-and-dom-metadata', publicUrlSource: url ? publicUrlSource : null, identityConflict: cardIdentityConflict, canResolveByOpeningCard: !cardIdentityConflict };
     }
     if (image) {
       const images = [...image.querySelectorAll('img')].map(item => ({ src: item.currentSrc || item.getAttribute('src') || '', label: clean(item.getAttribute('alt') || item.getAttribute('aria-label')) || null }));
       if (image.tagName === 'IMG') images.unshift({ src: image.currentSrc || image.getAttribute('src') || '', label: clean(image.getAttribute('alt')) || null });
-      const actual = image.tagName === 'IMG' ? image : image.querySelector('img');
-      media = { type: 'image', images, imageReady: images.length === 1 && Boolean(images[0].src) && actual?.complete === true && actual.naturalWidth > 0, requiresVisual: true, understandingScope: 'single-message-image' };
+      const actualImages = image.tagName === 'IMG' ? [image] : [...image.querySelectorAll('img')];
+      media = { type: 'image', images, imageReady: images.length > 0 && images.length <= 4 && actualImages.every(item => item.complete === true && item.naturalWidth > 0) && images.every(item => Boolean(item.src)), requiresVisual: true, understandingScope: 'single-message-image' };
+      const digest = modelBound ? own(parsed, 'md5') : null;
+      if(typeof digest==='string'&&/^[a-f0-9]{32}$/i.test(digest))media.imageMd5=digest.toLowerCase();
     }
     if (voice) {
       const audio = voice.matches('audio') ? voice : voice.querySelector('audio');
@@ -330,19 +491,82 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
       const durationSeconds = durationVerified ? rendererDuration === null ? visibleDuration : rendererDuration / 1000 : null;
       media = { type: 'voice', durationSeconds, audioSources: source ? [{ src: source }] : [], requiresTranscription: true, understandingScope: 'single-message-audio' };
     }
+    // 只读取本条已渲染消息的可见资料，不打开链接、下载文件或执行卡片动作。
+    const notice = ownNode('[data-e2e="message-recalled"],[data-e2e="message-withdrawn"],[class*="MessageItemRecall"],[class*="MessageItemRevoke"]');
+    const system = ownNode('[data-e2e="message-system"],[data-e2e="system-notice"],[class*="MessageItemSystem"]');
+    let nonReplyableNotice = false;
+    if (notice || system) { kind = notice ? 'recalled' : 'system'; text = readableText(notice || system).slice(0, 600); media = null; nonReplyableNotice = true; }
+    if (!media && !nonReplyableNotice && text) {
+      const urls = [...new Set((text.match(/https:\/\/www\.douyin\.com\/video\/\d{1,64}(?=$|[/?#\s<>"'，。！？])(?:[/?#][^\s<>"'，。！？]*)?/g) || []).map(value => { try { const target = new URL(value), match = /^\/video\/(\d{1,64})\/?$/.exec(target.pathname); return match ? target.origin + '/video/' + match[1] : null; } catch { return null; } }).filter(Boolean))];
+      if (urls.length === 1) { const url = urls[0]; media = { type: 'shared-work', videoId: url.split('/').at(-1), url, title: null, author: null, images: [], requiresVisual: true, understandingScope: 'public-work-link-only', publicUrlSource: 'current-message-public-work-link', identityConflict: false, canResolveByOpeningCard: false }; }
+    }
+    if (!media && !nonReplyableNotice) {
+      const cards = [
+        ['file', '[data-e2e="message-file"],[class*="MessageItemFile"]'],
+        ['location', '[data-e2e="message-location"],[class*="MessageItemLocation"]'],
+        ['user-card', '[data-e2e="message-user-card"],[class*="MessageItemShareUser"],[class*="MessageItemUserCard"]'],
+        ['live', '[data-e2e="message-live"],[class*="MessageItemShareLive"],[class*="MessageItemLive"]'],
+        ['music', '[data-e2e="message-music"],[class*="MessageItemShareMusic"]'],
+        ['call', '[data-e2e="message-call"],[class*="MessageItemCall"]'],
+        ['gift', '[data-e2e="message-gift"],[class*="MessageItemGift"],[class*="MessageItemRedPacket"]'],
+        ['video-attachment', '[data-e2e="message-video"],[class*="MessageItemVideo"]'],
+        ['link', '[data-e2e="message-link"],[class*="MessageItemShareLink"],[class*="MessageItemLink"]'],
+      ];
+      const match = cards.map(([type, selector]) => ({ type, element: ownNode(selector) })).find(item => item.element);
+      if (match) {
+        kind = match.type;
+        media = { type: match.type, title: readableText(match.element).slice(0, 1000) || null, understandingScope: 'visible-message-metadata-only', contentStatus: 'not-opened' };
+        const href = match.element.querySelector('a[href]')?.getAttribute('href');
+        if (href) { try { const target = new URL(href, location.href); if (['https:', 'http:'].includes(target.protocol) && !target.username && !target.password) media.domain = target.hostname; } catch {} }
+      } else if (kind === 'unsupported') {
+        const label = clean(node.getAttribute('aria-label') || ownNode('[data-e2e="message-placeholder"]')?.textContent).slice(0, 200);
+        kind = 'unknown';
+        media = { type: 'unknown', label: label || '未识别的消息附件', understandingScope: 'visible-message-metadata-only', contentStatus: 'unavailable' };
+      }
+    }
+    if (media && ['emoji', 'image'].includes(media.type)) {
+      media.animatedHint = (media.images || []).some(item => { try { return /\.gif$/i.test(new URL(item.src, location.href).pathname); } catch { return false; } }) || Boolean(emoji?.matches('[data-animated="true"]'));
+    }
     const indexNode = node.closest('[data-index]');
     const rawOrder = indexNode?.getAttribute('data-index');
     const order = rawOrder !== null && rawOrder !== undefined && /^\d+$/.test(rawOrder) ? Number(rawOrder) : null;
-    const nativeId = box.getAttribute('data-message-id') || box.getAttribute('data-msg-id') || node.getAttribute('data-message-id') || null;
-    const ownTimestamp = box.getAttribute('data-sent-at') || box.getAttribute('data-timestamp') || node.getAttribute('data-sent-at');
+    const serverId = modelBound ? dataField(model, 'serverId') : null;
+    const rendererClientId = modelBound ? dataField(model, 'clientId') : null;
+    const clientId = direction === 'outgoing' && typeof rendererClientId === 'string' && /^[A-Za-z0-9_.:-]{1,160}$/.test(rendererClientId) ? rendererClientId : null;
+    const nativeId = box.getAttribute('data-message-id') || box.getAttribute('data-msg-id') || node.getAttribute('data-message-id') || (typeof serverId === 'string' && /^[1-9]\d{0,63}$/.test(serverId) ? serverId : null);
+    let modelTimestamp = null;
+    if (modelBound) { try { const time = Date.prototype.getTime.call(dataField(model, 'createdAt')); if (Number.isFinite(time) && time >= Date.UTC(2000, 0, 1) && time <= Date.now() + 60_000) modelTimestamp = new Date(time).toISOString(); } catch {} }
+    const nativeServerMessageBound = modelBound && typeof serverId === 'string' && /^[1-9]\d{0,63}$/.test(serverId) && nativeId === serverId;
+    const ownTimestamp = box.getAttribute('data-sent-at') || box.getAttribute('data-timestamp') || node.getAttribute('data-sent-at') || modelTimestamp;
     const ownTimeNode = box.querySelector('[class*="MessageBoxTimetimeLayout"],time');
     const ownTime = ownTimeNode?.getAttribute('datetime') || clean(ownTimeNode?.textContent);
     const dated = ownTimestamp || ownTime || (!newestFirst ? timestamp : null);
-    const memberNode = declaredGroup ? box.querySelector('[data-e2e="message-sender"],[data-e2e="sender-name"]') : null;
-    const member = declaredGroup ? { nativeId: box.getAttribute('data-sender-id') || memberNode?.getAttribute('data-user-id') || null, name: clean(memberNode?.textContent) || null } : null;
-    const mentionedSelf = Boolean(declaredGroup && box.querySelector('[data-mention-self="true"],[data-is-self-mention="true"],[data-e2e="mention"][data-self="true"]'));
+    let member = null;
+    if (identity.isGroup) {
+      const memberNodes = [...box.querySelectorAll('[data-e2e="message-sender"],[data-e2e="sender-name"],[class*="MessageBoxMessageTitleavatarName"]')].filter(element => !element.closest('[class*="MessageItemShareAwemecontainer"],[data-e2e="shared-video-card"]'));
+      const memberNode = memberNodes.length === 1 ? memberNodes[0] : null;
+      const domSenders = new Set([box.getAttribute('data-sender-id'), memberNode?.getAttribute('data-user-id')].filter(value => typeof value === 'string' && value.length > 0 && value.length <= 512 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value)));
+      const messageBound = modelBound && typeof serverId === 'string' && /^[1-9]\d{0,63}$/.test(serverId) && nativeId === serverId;
+      const prototype = model && typeof model === 'object' ? Object.getPrototypeOf(model) : null;
+      const senderDeclared = messageBound && Boolean(Object.getOwnPropertyDescriptor(model, 'sender') || prototype && Object.getOwnPropertyDescriptor(prototype, 'sender'));
+      const senderValue = messageBound ? dataField(model, 'sender') : undefined;
+      const nativeSender = typeof senderValue === 'string' && /^[1-9]\d{0,63}$/.test(senderValue) ? senderValue : null;
+      const domSender = domSenders.size === 1 ? [...domSenders][0] : null;
+      const conflict = domSenders.size > 1 || senderDeclared && !nativeSender || Boolean(nativeSender && domSender && nativeSender !== domSender);
+      member = { nativeId: conflict ? null : nativeSender || domSender, name: clean(memberNode?.textContent) || null };
+    }
+    const richInfos = own(parsed, 'richTextInfos'), parsedText = own(parsed, 'text');
+    const mentionLabels = [...node.querySelectorAll('.TextMessageTextmentionText')].map(element => readableText(element));
+    const nativeSelfMention = identity.isGroup && selfUid && typeof parsedText === 'string' && clean(parsedText) === text && mentionLabels.length > 0 && Array.isArray(richInfos) && richInfos.length <= 100 && richInfos.some(entry => {
+      const info = own(entry, 'info'), start = own(entry, 'location'), length = own(entry, 'length');
+      return own(info, 'uid') === selfUid && own(info, 'con_id') === modelConversationId && Number.isSafeInteger(start) && start >= 0 && Number.isSafeInteger(length) && length > 0 && start + length <= parsedText.length && /^[@＠]/.test(parsedText.slice(start, start + length)) && mentionLabels.includes(clean(parsedText.slice(start, start + length)));
+    });
+    const mentionedSelf = Boolean(identity.isGroup && (nativeSelfMention || [...box.querySelectorAll('[data-mention-self="true"],[data-is-self-mention="true"],[data-e2e="mention"][data-self="true"]')].some(element => !element.closest(quoteSelector))));
     messages.push({ nativeId, direction, sender: direction, text, kind, media, timestamp: ownTimestamp || timestamp, order, domIndex: order, domPosition: messages.length, orderMode: list ? 'relative' : 'absolute',
-      ...(declaredGroup ? { member, mentionedSelf } : {}),
+      ...(nativeServerMessageBound && modelTimestamp ? { nativeServerMessageBound: true, nativeCreatedAt: modelTimestamp } : {}),
+      ...(clientId ? { clientId } : {}), ...(direction==='outgoing'&&modelBound?{serverConfirmed:typeof serverId==='string'&&/^[1-9]\d{0,63}$/.test(serverId)}:{}),
+      ...(reference ? { reference } : {}), ...(nonReplyableNotice ? { nonReplyableNotice: true } : {}),
+      ...(identity.isGroup ? { member, mentionedSelf } : {}),
       dateEvidence: { raw: dated || timestamp || '', kind: dated ? /^今天(?:\s|$)/.test(dated) ? 'today' : /^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/.test(dated) ? 'absolute' : 'unknown' : 'unknown', source: ownTimestamp ? 'message-attribute' : ownTime ? 'message-time' : !newestFirst ? 'group-label' : 'unverified-group-label' },
       failed: Boolean(box.querySelector('[class*="sendFail"],[class*="SendFail"],[data-e2e="message-failed"]')),
       pending: Boolean(box.querySelector('[class*="sending"],[class*="Sending"],[data-e2e="message-pending"]')) });
@@ -372,6 +596,23 @@ export async function readChatIdentityDom() {
   const avatar = isGroup ? groupImages.length ? `group-avatar:${JSON.stringify(groupImages)}` : groupAvatar ? 'group-marker' : resource(header?.querySelector('img')?.getAttribute('src')) : resource(header?.querySelector('img')?.getAttribute('src'));
   const nativeId = header?.getAttribute('data-conversation-id') || root?.getAttribute('data-conversation-id') || header?.getAttribute('data-conversation-short-id') || root?.getAttribute('data-conversation-short-id') || null;
   const own = (value, key) => value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+  const groupPrototypeIdentity = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { id: null, shortId: null, conflict: false, signature: 'absent' };
+    const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
+    const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
+    const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
+    for (const key of ['id', 'shortId']) {
+      const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+      signatures.push(shape(descriptor));
+      if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
+      if (!descriptor) continue;
+      if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
+      if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+      result[key] = descriptor.value;
+    }
+    result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
+    return result;
+  };
   const digest = async value => globalThis.crypto?.subtle ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(n => n.toString(16).padStart(2, '0')).join('') : null;
   const identities = new Map(), types = new Set(), add = (family, value) => {
     if (typeof value !== 'string' && !Number.isSafeInteger(value)) return;
@@ -391,27 +632,32 @@ export async function readChatIdentityDom() {
   for (const declared of [header?.getAttribute('data-conversation-type'), root?.getAttribute('data-conversation-type')]) if (declared && ['direct', 'single', 'personal', 'group'].includes(declared)) types.add(declared === 'group' ? 'group' : 'direct');
   if (isGroup) types.add('group');
   else if (profileUrl || identities.has('user') || identities.has('user-id') || header?.getAttribute('data-is-group') === 'false') types.add('direct');
-  const conversationType = types.size === 1 ? [...types][0] : 'unknown';
+  const displayName = header?.querySelector('[class*="StackLayoutStackChatHeadertitle"],[data-e2e="chat-title"],[data-e2e="group-chat-title"]')?.textContent.replace(/\s+/g, ' ').trim();
+  const looksLikeGroup = /[,，、]/.test(displayName || '');
+  const conversationType = types.size === 1 ? [...types][0] : (isGroup || looksLikeGroup || !profileUrl) ? 'group' : 'direct';
+  const groupPrototype = conversationType === 'group' ? groupPrototypeIdentity(conversation) : null;
+  const groupPrototypeOwner = groupPrototype && conversation ? Object.getPrototypeOf(conversation) : null;
+  if (groupPrototype) { add('conversation', groupPrototype.id); add('conversation-short', groupPrototype.shortId); }
   const conflictingNativeIds = new Set([header?.getAttribute('data-conversation-id'), root?.getAttribute('data-conversation-id'), header?.getAttribute('data-conversation-short-id'), root?.getAttribute('data-conversation-short-id')].filter(Boolean));
-  let identityConflict = keys.length > 1 || types.size > 1 || conflictingNativeIds.size > 1 || [...identities.values()].some(values => values.size !== 1);
+  let identityConflict = Boolean(groupPrototype?.conflict) || keys.length > 1 || types.size > 1 || conflictingNativeIds.size > 1 || [...identities.values()].some(values => values.size !== 1);
   const selected = [...identities].find(([family]) => ['conversation', 'conversation-short', 'group'].includes(family)) ?? [...identities].find(([family]) => family === 'user') ?? [...identities][0];
-  const metadataSignature = () => JSON.stringify(['conversationId', 'id', 'conversationShortId', 'shortId', 'groupId', 'secUid', '_toParticipantSecUserId', 'userId', 'conversationType', 'type'].map(key => { const value = own(conversation, key); return typeof value === 'string' || Number.isSafeInteger(value) ? String(value) : null; }));
+  const metadataSignature = () => JSON.stringify([['conversationId', 'id', 'conversationShortId', 'shortId', 'groupId', 'secUid', '_toParticipantSecUserId', 'userId', 'conversationType', 'type'].map(key => { const value = own(conversation, key); return typeof value === 'string' || Number.isSafeInteger(value) ? String(value) : null; }), conversationType === 'group' ? groupPrototypeIdentity(conversation).signature : null]);
   const domMetadataSignature = () => JSON.stringify([header, root].map(element => element ? ['data-e2e', 'data-conversation-id', 'data-conversation-short-id', 'data-conversation-type', 'data-is-group'].map(key => element.getAttribute(key)) : null).concat(Boolean(header?.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]'))));
   const initialMetadata = metadataSignature(), initialDomMetadata = domMetadataSignature();
   const fingerprint = selected && !identityConflict ? await digest([...selected[1]][0]) : null;
   const currentProps = keys.length === 1 ? own(header, keys[0]) : null;
   const currentChildren = own(currentProps, 'children'), currentConversation = own(own(Array.isArray(currentChildren) ? own(currentChildren, '0') : currentChildren, 'props'), 'conversation');
   const currentHeaders = [...document.querySelectorAll('[data-e2e="im-dialog"] [class*="StackLayoutStackChatHeaderuser"],[data-e2e="im-dialog"] [data-e2e="chat-header"],[data-e2e="im-dialog"] [data-e2e="group-chat-header"]')].filter(visible);
-  if (!header?.isConnected || currentHeaders.length !== 1 || currentHeaders[0] !== header || currentProps !== props || currentConversation !== conversation || metadataSignature() !== initialMetadata || domMetadataSignature() !== initialDomMetadata) identityConflict = true;
+  if (!header?.isConnected || currentHeaders.length !== 1 || currentHeaders[0] !== header || currentProps !== props || currentConversation !== conversation || groupPrototype && conversation && Object.getPrototypeOf(conversation) !== groupPrototypeOwner || metadataSignature() !== initialMetadata || domMetadataSignature() !== initialDomMetadata) identityConflict = true;
   const identityKey = fingerprint && (conversationType !== 'group' || ['conversation', 'conversation-short', 'group'].includes(selected[0])) ? `${selected[0]}:${fingerprint}` : null;
   const rect = header?.getBoundingClientRect();
-  return { displayName: header?.querySelector('[class*="StackLayoutStackChatHeadertitle"],[data-e2e="chat-title"],[data-e2e="group-chat-title"]')?.textContent.replace(/\s+/g, ' ').trim(), avatar, nativeId, identityKey, profileUrl, identityConflict, isGroup: conversationType === 'group' ? true : conversationType === 'direct' ? false : null, conversationType,
-    identityUnavailable: !header || identityConflict || !(nativeId || identityKey || profileUrl) || conversationType === 'unknown', headerCount: headers.length,
+  return { displayName, avatar, nativeId, identityKey, profileUrl, identityConflict, ...(groupPrototype?.id || groupPrototype?.shortId ? { groupPrototypeIdentity: true } : {}), isGroup: conversationType === 'group', conversationType,
+    identityUnavailable: !header || identityConflict || !(nativeId || identityKey || profileUrl), headerCount: headers.length,
     geometry: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null };
 }
 
 export class ChatBrowser {
-  constructor({ source = 'api-chat', controller, voiceCaptureDir = resolveRuntimePaths().mediaCaptureDir, fetchImpl = voiceAudioResponse } = {}) {
+  constructor({ source = 'api-chat', controller, voiceCaptureDir = resolveRuntimePaths().mediaCaptureDir, fetchImpl = voiceAudioResponse, uploadContractHash = UPLOAD_STAGING_CONTRACT } = {}) {
     if (!['api-chat', 'dsh-chat'].includes(source)) throw new TypeError('私信入口须为 api-chat 或 dsh-chat。');
     if (!path.isAbsolute(voiceCaptureDir)) throw new TypeError('消息音频临时目录须为绝对路径。');
     this.controller = controller ?? new BrowserController({ source });
@@ -420,9 +666,28 @@ export class ChatBrowser {
     this.relationshipDiscovery = { status: 'unverified', code: 'FOLLOWING_NOT_CHECKED', reason: '尚未核对本人的关注关系。' };
     this.identities = new MessageIdentityTracker();
     this.mediaResources = new Map();
+    this.uploadContractHash = uploadContractHash; this.unsentImageDeliveries = new WeakMap();
+    this.chatPageAttemptAt = 0;
     this.voiceCaptureDir = path.resolve(voiceCaptureDir); this.voiceCaptures = new Map(); this.fetchImpl = fetchImpl;
     this.incomingBinding = `__deepseekIncoming_${randomUUID().replaceAll('-', '')}`;
     this.incomingPages = new WeakSet(); this.incomingHandlers = new Map(); this.incomingCleanup = new Set();
+  }
+  withPage(callback, { signal, launch = false, create = launch, authorizePrepare } = {}) {
+    return this.controller.withPage(callback, { signal, launch, create, ...(authorizePrepare ? { authorizePrepare } : {}) });
+  }
+  async isForeground(page) {
+    const focused = await page.evaluate(() => document.visibilityState === 'visible' && document.hasFocus()).catch(() => false);
+    if (!focused) return false;
+    let session;
+    try {
+      session = await page.context().newCDPSession(page);
+      const { targetInfo } = await session.send('Target.getTargetInfo');
+      if (!targetInfo?.targetId) return true;
+      const { bounds } = await session.send('Browser.getWindowForTarget', { targetId: targetInfo.targetId });
+      // 最小化后网页可能仍保留焦点；只依据浏览器确认的窗口状态排除前台。
+      return bounds?.windowState !== 'minimized';
+    } catch { return true; }
+    finally { await session?.detach().catch(() => {}); }
   }
   async subscribeIncoming(callback, { recipientIds = [], signal } = {}) {
     if (typeof callback !== 'function' || !Array.isArray(recipientIds) || recipientIds.length < 1 || recipientIds.some(id => typeof id !== 'string' || !/^conv:[a-f0-9]{64}$/.test(id))) throw new TypeError('消息唤醒需要已许可会话列表和回调。');
@@ -439,7 +704,7 @@ export class ChatBrowser {
     const recipients = new Set(recipientIds);
     this.incomingHandlers.set(token, recipientId => { if (active && !signal?.aborted && recipients.has(recipientId)) { try { Promise.resolve(callback({ type: 'wake', recipientId })).catch(() => {}); } catch {} } });
     try {
-      await this.controller.withPage(async current => {
+      await this.withPage(async current => {
         page = current;
         const flags = await this.dialog(page, signal);
         if (flags.blocked) throw new Error('消息通知需要本人先完成登录或验证。');
@@ -487,18 +752,18 @@ export class ChatBrowser {
       return cleanup;
     } catch (error) { await cleanup(); throw error; }
   }
-  async dialog(page, signal) {
+  async dialog(page, signal, { open = false } = {}) {
     stop(signal);
-    await page.evaluate(() => {
-      if (!window.__deepseekChatPauseVideo) {
-        window.__deepseekChatPauseVideo = true;
-        document.addEventListener('play', event => { if (event.target instanceof HTMLVideoElement) event.target.pause(); }, true);
-      }
-      for (const video of document.querySelectorAll('video')) video.pause();
-    });
     const flags = await page.evaluate(readChatBlockers);
     if (flags.loginRequired || flags.verificationRequired) return { ...flags, blocked: true };
-    if (!await page.locator('[data-e2e="im-dialog"]').isVisible().catch(() => false)) {
+    const dialog = page.locator('[data-e2e="im-dialog"]');
+    if (!open && !await dialog.isVisible().catch(() => false)) throw Object.assign(new Error('消息页未打开，未在后台打开消息面板。'), { code: 'CHAT_PAGE_NOT_OPEN' });
+    await page.evaluate(() => {
+      // 本次只暂停背景作品，不留下阻止后续播放的文档监听。
+      for (const video of document.querySelectorAll('video')) if (!video.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]')) video.pause();
+    });
+    if (!await dialog.isVisible().catch(() => false)) {
+      if (!open) throw Object.assign(new Error('消息页未打开，未在后台打开消息面板。'), { code: 'CHAT_PAGE_NOT_OPEN' });
       const entry = page.locator('[data-e2e="im-entry"]');
       try { await entry.waitFor({ state: 'visible', timeout: 20_000 }); }
       catch { throw new Error('没有找到抖音消息入口。'); }
@@ -508,17 +773,27 @@ export class ChatBrowser {
     stop(signal);
     return { ...flags, blocked: false };
   }
+  async gotoWithRetry(page, url, signal, attempts = 2) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      stop(signal);
+      if (page.isClosed()) return false;
+      try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }); return true; }
+      catch { if (attempt + 1 < attempts) await page.waitForTimeout(500); }
+    }
+    return false;
+  }
   async verifyFollowing(page, signal) {
-    // 本人的关注名单仅在首次发现联系人时核对；后续新增联系人不会进入服务的固定白名单。
+    // 本人的关注名单仅在首次发现联系人时核对；核对失败不阻断当前会话列表读取。
     this.following = [];
+    const onHome = () => { try { const url = new URL(page.url()); return url.hostname === 'www.douyin.com' && url.pathname === '/'; } catch { return false; } };
     this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '当前抖音网页版未提供可读取的关注列表。关注关系未确认；已有个人会话需由本人核对并单独授权。' };
     try {
-      await page.goto(HOME, { waitUntil: 'domcontentloaded' });
+      if (!onHome() && !await this.gotoWithRetry(page, HOME, signal)) { this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '读取关注关系时页面连接中断。未确认关注关系；现有会话需由本人核对并单独授权。' }; return; }
       const my = page.locator('a').filter({ has: page.locator('span').filter({ hasText: /^我的$/ }) });
       if (await my.count() !== 1) return;
       const target = new URL(await my.getAttribute('href'), HOME);
       if (target.protocol !== 'https:' || target.hostname !== 'www.douyin.com' || !/^\/user\/[^/?#]+\/?$/.test(target.pathname)) return;
-      await page.goto(target.href, { waitUntil: 'domcontentloaded' });
+      if (!await this.gotoWithRetry(page, target.href, signal)) { this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '读取关注关系时页面连接中断。未确认关注关系；现有会话需由本人核对并单独授权。' }; return; }
       const flags = await page.evaluate(readChatBlockers);
       if (flags.loginRequired || flags.verificationRequired) { this.relationshipDiscovery = { status: 'blocked', code: 'FOLLOWING_REQUIRES_USER', reason: '关注关系核对需要本人完成登录或验证。' }; return; }
       const follow = page.locator('[data-e2e="user-info-follow"]').filter({ visible: true });
@@ -532,17 +807,45 @@ export class ChatBrowser {
       }
     } catch (error) {
       stop(signal);
-      if (page.isClosed()) throw error;
-      const flags = await page.evaluate(readChatBlockers);
-      if (flags.loginRequired || flags.verificationRequired) this.relationshipDiscovery = { status: 'blocked', code: 'FOLLOWING_REQUIRES_USER', reason: '关注关系核对需要本人完成登录或验证。' };
-      else this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '关注入口被遮挡或当前页面未提供可读取的列表。未确认关注关系；现有会话需由本人核对后单独授权。' };
+      if (page.isClosed()) return;
+      try {
+        const flags = await page.evaluate(readChatBlockers);
+        if (flags.loginRequired || flags.verificationRequired) this.relationshipDiscovery = { status: 'blocked', code: 'FOLLOWING_REQUIRES_USER', reason: '关注关系核对需要本人完成登录或验证。' };
+        else this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '关注入口被遮挡或当前页面未提供可读取的列表。未确认关注关系；现有会话需由本人核对后单独授权。' };
+      } catch { this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '读取关注关系时页面连接中断。未确认关注关系；现有会话需由本人核对后单独授权。' }; }
     } finally {
       stop(signal);
-      if (this.relationshipDiscovery.status !== 'blocked') { await page.goto(HOME, { waitUntil: 'domcontentloaded' }); await this.dialog(page, signal); }
+      if (!page.isClosed() && this.relationshipDiscovery.status !== 'blocked') {
+        if (!onHome()) {
+          const back = await this.gotoWithRetry(page, HOME, signal);
+          if (!back) await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+        }
+        await this.dialog(page, signal, { open: true }).catch(() => {});
+      }
     }
   }
-  async contactList(page, signal, { enumerate = false, locateId } = {}) {
-    const flags = await this.dialog(page, signal);
+  async ensureChatPage(page, signal) {
+    const dialog = page.locator('[data-e2e="im-dialog"]').first();
+    if (await dialog.isVisible().catch(() => false)) return;
+    const now = Date.now();
+    if (this.chatPageAttemptAt && now - this.chatPageAttemptAt < 10000) return;
+    this.chatPageAttemptAt = now;
+    if (!/^https:\/\/(?:www\.)?douyin\.com(?:[/:]|$)/.test(page.url())) return;
+    if (await this.gotoWithRetry(page, HOME, signal)) {
+      await page.waitForTimeout(400);
+      const entry = page.locator('[data-e2e="im-entry"]').first();
+      if (await entry.count() === 1) await entry.click({ timeout: 3000 }).catch(() => {});
+      await dialog.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    }
+    await this.dialog(page, signal);
+  }
+  async contactList(page, signal, { enumerate = false, locateId, ensurePage = false } = {}) {
+    if (ensurePage) await this.ensureChatPage(page, signal);
+    const flags = await this.dialog(page, signal, { open: ensurePage });
+    if (!await page.locator('[data-e2e="im-dialog"]').first().isVisible().catch(() => false)) {
+      if (!ensurePage) throw Object.assign(new Error('消息页未打开，未读取私信。'), { code: 'CHAT_PAGE_NOT_OPEN' });
+      throw new Error('专用浏览器消息页未打开，请点“打开抖音”进入消息页后重试。');
+    }
     if (flags.blocked) return { ...flags, contacts: [] };
     await page.locator('[data-e2e="im-dialog"] [data-e2e="conversation-item"]').first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
     const collected = new Map(), started = Date.now(); let visibleRows = [], scannedToEnd = false, reason = '', found = false;
@@ -625,32 +928,125 @@ export class ChatBrowser {
     }, visibleRows.map(row => ({ id: contactOpaqueId(row), displayName: row.displayName, nativeId: row.nativeId })));
     return { ...flags, contacts, relationshipDiscovery: this.relationshipDiscovery, listDiscovery: { source: 'current-conversation-list', scannedToEnd, count: contacts.length, note: `已读取当前消息列表的 ${contacts.length} 个会话；不代表全部关注好友或所有群聊。`, ...(reason ? { reason } : {}) } };
   }
-  listContacts({ signal, verifyFollowing = this.following === null } = {}) {
-    return this.controller.withPage(async page => {
-      const initial = await this.dialog(page, signal);
+  async assertAutomaticPrepareSafe(signal, authorizePrepare) {
+    stop(signal);
+    if (typeof authorizePrepare !== 'function') throw Object.assign(new Error('自动准备缺少可信授权检查，未创建页面。'), { code: 'CHAT_PREPARE_UNSUPPORTED' });
+    await authorizePrepare(); stop(signal);
+    const browser = await this.controller.connectExistingBrowser?.({ signal });
+    if (!browser?.isConnected?.()) throw Object.assign(new Error('专用浏览器未运行，未自动打开回复页。'), { code: 'BROWSER_NOT_RUNNING' });
+    const context = browser.contexts()[0];
+    if (!context) throw new Error('没有读到专用浏览器上下文，未自动准备。');
+    for (const page of context.pages()) {
+      stop(signal); if (page.isClosed()) continue;
+      const address = page.url();
+      let origin; try { origin = new URL(address).origin; } catch { origin = null; }
+      if (address !== 'about:blank' && origin !== 'https://www.douyin.com') throw Object.assign(new Error('专用浏览器有页面已离开抖音，未自动读取内容或创建回复页。'), { code: 'CHAT_PAGE_LEFT_DOUYIN' });
+      if (await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，稍后自动准备回复通道。'), { code: 'CHAT_FOREGROUND' });
+      stop(signal);
+      const name = await page.evaluate(() => window.name);
+      if (address === 'about:blank') {
+        if (name) throw Object.assign(new Error('具名受管页面停留在空白页，未自动导航或创建回复页。'), { code: 'CHAT_PAGE_LEFT_DOUYIN' });
+        continue;
+      }
+      if (!/^deepseek-douyin-(?:launcher|api|dsh|api-chat|dsh-chat)$/.test(name)) continue;
+      const flags = await page.evaluate(readChatBlockers);
+      if (flags.blocked || flags.loginRequired || flags.verificationRequired) throw Object.assign(new Error('专用浏览器需要登录或验证，未自动准备回复通道。'), { code: 'CHAT_LOGIN_REQUIRED', needsUserAction: true });
+      if (name.endsWith('-chat') && await page.evaluate(() => [...document.querySelectorAll('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable="true"],[data-e2e="im-dialog"] [data-e2e="msg-input"] textarea,[data-e2e="im-dialog"] [data-e2e="msg-input"] input')].some(element => String(element.value ?? element.innerText ?? element.textContent ?? '').trim()))) throw Object.assign(new Error('专用聊天页保留了草稿，未自动导航或切换。'), { code: 'CHAT_DRAFT_PRESENT' });
+    }
+    await authorizePrepare(); stop(signal);
+  }
+
+  async prepareChat({ signal, automatic = false, authorizePrepare } = {}) {
+    if (automatic) await this.assertAutomaticPrepareSafe(signal, authorizePrepare);
+    let page;
+    try { page = await this.withPage(async current => current, { signal, launch: !automatic, create: false, ...(automatic ? { authorizePrepare } : {}) }); }
+    catch (error) { if (!['CHAT_PAGE_NOT_OPEN', 'CHAT_PAGE_LEFT_DOUYIN'].includes(error.code)) throw error; }
+    if (page && await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，未准备回复通道。'), { code: 'CHAT_FOREGROUND' });
+    return this.withPage(async current => {
+      if (automatic) await this.assertAutomaticPrepareSafe(signal, authorizePrepare);
+      if (await this.isForeground(current)) throw Object.assign(new Error('专用浏览器在前台，未准备回复通道。'), { code: 'CHAT_FOREGROUND' });
+      const flags = await this.dialog(current, signal, { open: true });
+      if (flags.blocked || flags.loginRequired || flags.verificationRequired) return { prepared: false, blocked: flags.blocked === true, loginRequired: flags.loginRequired === true, verificationRequired: flags.verificationRequired === true };
+      const list = await this.contactList(current, signal, { enumerate: false, ensurePage: true });
+      return { prepared: true, count: Array.isArray(list.contacts) ? list.contacts.length : 0 };
+    }, { signal, launch: !automatic, create: true, ...(automatic ? { authorizePrepare } : {}) });
+  }
+  listContacts({ signal, verifyFollowing = this.following === null, backgroundOnly = false } = {}) {
+    return this.withPage(async page => {
+      if (backgroundOnly && await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，暂不切换私信页。'), { code: 'CHAT_FOREGROUND' });
+      const initial = await this.dialog(page, signal, { open: !backgroundOnly });
       if (initial.blocked) return { ...initial, contacts: [] };
-      if (verifyFollowing) await this.verifyFollowing(page, signal);
-      if (this.relationshipDiscovery.status === 'blocked') return { blocked: true, contacts: [], relationshipDiscovery: this.relationshipDiscovery };
-      return this.contactList(page, signal, { enumerate: true });
+      if (verifyFollowing && !backgroundOnly) {
+        try { await this.verifyFollowing(page, signal); }
+        catch (error) {
+          if (page.isClosed()) throw new Error('专用浏览器页面已关闭，请点击“重新连接专用浏览器”后重试。');
+          this.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE', reason: '读取关注关系失败；未确认关注关系，现有会话需本人核对授权。' };
+        }
+      }
+      if (!backgroundOnly && verifyFollowing && this.relationshipDiscovery.status === 'blocked') return { blocked: true, contacts: [], relationshipDiscovery: this.relationshipDiscovery };
+      try { return await this.contactList(page, signal, { enumerate: true, ensurePage: !backgroundOnly }); }
+      catch (error) {
+        if (page.isClosed() || /ERR_CONNECTION_CLOSED|Target page|browser has been closed/i.test(String(error?.message || ''))) throw new Error('专用浏览器页面连接已断开，请点击“重新连接专用浏览器”后重试。');
+        throw error;
+      }
+    }, { signal, launch: !backgroundOnly, create: !backgroundOnly });
+  }
+  unreadCounts(recipientIds, { signal } = {}) {
+    if (!Array.isArray(recipientIds) || recipientIds.some(id => typeof id !== 'string')) return Promise.reject(new TypeError('需要许可会话列表。'));
+    return this.withPage(async page => {
+      return page.evaluate(ids => {
+        const dialog = document.querySelector('[data-e2e="im-dialog"]');
+        const counts = {};
+        if (!dialog) return { available: false, rows: 0, counts };
+        const rows = [...dialog.querySelectorAll('[data-e2e="conversation-item"][data-deepseek-chat-id]')];
+        if (!rows.length) return { available: false, rows: 0, counts };
+        const allowed = new Set(ids);
+        for (const row of rows) {
+          const id = row.getAttribute('data-deepseek-chat-id');
+          if (!allowed.has(id)) continue;
+          let count = 0;
+          for (const badge of row.querySelectorAll('[class*="unread"],[class*="Unread"],[data-e2e="unread-count"]')) {
+            const style = getComputedStyle(badge);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const numericBadge = badge.matches('[data-e2e="unread-count"],[class*="unread-count"],[class*="unreadCount"],[class*="UnreadCount"],[class*="unreadBadge"],[class*="UnreadBadge"]');
+            const raw = badge.getAttribute('data-unread-count') || badge.getAttribute('data-count') || badge.getAttribute('aria-label') || (numericBadge ? badge.textContent : '') || '';
+            const match = /^\s*(\d+)\+?(?:\s*条未读(?:消息)?)?\s*$/.exec(raw);
+            count = Math.max(count, match ? Number(match[1]) : 1);
+          }
+          if (row.getAttribute('data-unread') === 'true') count = Math.max(count, 1);
+          counts[id] = count;
+        }
+        return { available: true, rows: rows.length, counts };
+      }, recipientIds);
     }, { signal });
   }
-  async select(page, recipientId, signal, { refresh = false } = {}) {
+  async returnToConversationList(page) {
+    const back = page.locator('[data-stack-layer="chat"] .StackLayoutStackTitleBarbackBtn');
+    if (await back.count() === 1 && await back.isVisible().catch(() => false)) {
+      await back.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(100);
+    }
+  }
+  async select(page, recipientId, signal, { refresh = false, weak = false } = {}) {
     if (typeof recipientId !== 'string' || !/^conv:[a-f0-9]{64}$/.test(recipientId)) throw new TypeError('需要已发现的精确联系人 ID。');
     const flags = await this.contactList(page, signal, { locateId: recipientId });
     if (flags.blocked) return { flags };
     const contact = this.contacts.get(recipientId);
-    if (!contact || contact.conversationType === 'unknown') throw new Error('指定会话已变化或类型尚未核实，已停止操作。');
-    const row = page.locator(`[data-e2e="conversation-item"][data-deepseek-chat-id="${recipientId}"]`);
+    if (!contact || contact.conversationType === 'unknown') throw new Error('指定会话已变化或类型尚未核实；请确认专用浏览器已打开消息页后重试。');
+    const matches = value => weak ? sameWeakConversation(value, contact) : sameConversationIdentity(value, contact);
+    let row = page.locator(`[data-e2e="conversation-item"][data-deepseek-chat-id="${recipientId}"]`);
     if (await row.count() !== 1) throw new Error('指定会话不是唯一匹配，已停止操作。');
     const current = await page.evaluate(readChatIdentityDom);
-    if (refresh || !sameConversationIdentity(current, contact)) {
-      const back = page.locator('[data-stack-layer="chat"] .StackLayoutStackTitleBarbackBtn');
-      if (current.displayName && await back.count() === 1) {
-        await back.click({ timeout: 5000 });
-        await this.contactList(page, signal, { locateId: recipientId });
-      }
+    if (refresh || !matches(current)) {
       try { await row.click({ timeout: 5000 }); }
-      catch { throw new Error('指定会话未成功打开，未读取正文或点击发送。'); }
+      catch {
+        await this.returnToConversationList(page);
+        await this.contactList(page, signal, { locateId: recipientId });
+        row = page.locator(`[data-e2e="conversation-item"][data-deepseek-chat-id="${recipientId}"]`);
+        if (await row.count() !== 1) throw new Error('指定会话不是唯一匹配，已停止操作。');
+        try { await row.click({ timeout: 5000 }); }
+        catch { throw new Error('指定会话未成功打开，未读取正文或点击发送。'); }
+      }
     }
     let identity, previous, stableSamples = 0;
     for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -659,21 +1055,21 @@ export class ChatBrowser {
       if (blockers.loginRequired || blockers.verificationRequired) return { flags: { ...flags, ...blockers, blocked: true } };
       identity = await page.evaluate(readChatIdentityDom);
       const geometryStable = previous && identity.geometry && ['x', 'y', 'width', 'height'].every(key => Math.abs(identity.geometry[key] - previous.geometry[key]) <= 0.5);
-      stableSamples = sameConversationIdentity(identity, contact) ? geometryStable ? stableSamples + 1 : 1 : 0;
+      stableSamples = matches(identity) ? geometryStable ? stableSamples + 1 : 1 : 0;
       if (stableSamples >= 3) break;
-      previous = sameConversationIdentity(identity, contact) && identity.geometry ? identity : null;
+      previous = matches(identity) && identity.geometry ? identity : null;
       await page.waitForTimeout(150);
     }
-    if (stableSamples < 3) throw new Error(identity?.identityUnavailable ? '当前会话缺少可核对的稳定身份信息，或切换动画尚未结束；未读取正文或发送。' : '当前会话的稳定身份或类型与许可联系人不一致，未读取正文或发送。');
+    if (stableSamples < 3) throw Object.assign(new Error(identity?.identityUnavailable && !weak ? '当前会话缺少可核对的稳定身份信息，或切换动画尚未结束；未读取正文或发送。' : '当前会话的显示名、类型或稳定身份与许可联系人不一致，未读取正文或发送。'), { code: 'CHAT_CONVERSATION_IDENTITY_MISMATCH' });
     stop(signal);
     return { contact, flags };
   }
-  async stableConversation(page, contact, signal) {
+  async stableConversation(page, contact, signal, { weak = false } = {}) {
     let previous;
     for (let attempt = 0; attempt < 12; attempt += 1) {
       stop(signal);
-      const current = await page.evaluate(readConversationDom, expectedDomIdentity(contact));
-      if (!sameConversationIdentity(current, contact)) throw new Error('读取前会话身份发生变化。');
+      const current = await page.evaluate(readConversationDom, { ...expectedDomIdentity(contact), allowWeak: weak });
+      if (!(weak ? sameWeakConversation(current, contact) : sameConversationIdentity(current, contact))) throw new Error('读取前会话身份发生变化。');
       const signature = JSON.stringify(current.messages);
       if (!current.loading && previous === signature) return current;
       previous = current.loading ? undefined : signature;
@@ -681,63 +1077,75 @@ export class ChatBrowser {
     }
     throw new Error('指定会话的消息列表仍在加载或变化，未确认正文快照。');
   }
-  async verifyContactBinding(page, contact, expectedContact) {
+  async verifyContactBinding(page, contact, expectedContact, weak = false) {
     const rows = await page.evaluate(readContactDom), matching = rows.filter(row => contactOpaqueId(row) === contact.id);
     if (matching.length !== 1) throw new Error('许可会话的稳定身份已变化，未继续发送。');
     const row = matching[0], binding = contactIdentityBinding(row, rows);
     const current = { ...contact, name: row.displayName, displayName: row.displayName, nativeId: row.nativeId, identityKey: row.identityKey, profileUrl: row.profileUrl, isGroup: row.isGroup, conversationType: row.conversationType, identityVerified: Boolean(binding), identityBinding: binding, ...stableIdentityFields(row) };
-    if (!sameConversationIdentity(row, contact) || contact.identityVerified && binding !== contact.identityBinding || expectedContact && !matchesAuthorizedContact(expectedContact, current)) throw new Error('许可会话的稳定身份、类型或身份绑定已变化，未继续发送。');
+    if (!(weak ? sameWeakConversation(row, contact) : sameConversationIdentity(row, contact)) || !weak && contact.identityVerified && binding !== contact.identityBinding || expectedContact && !matchesAuthorizedContact(expectedContact, current)) throw new Error('许可会话的稳定身份、类型或身份绑定已变化，未继续发送。');
     return current;
   }
   publicMessages(recipientId, rawRows) {
+    const currentVoiceRefs = new Set();
     const rows = rawRows.map(row => {
-      const { member, ...rest } = row;
-      const base = member ? { ...rest, memberId: member.nativeId ? `member:${hash(`${recipientId}\0${member.nativeId}`)}` : null, memberName: member.name || null, mentionedSelf: row.mentionedSelf === true } : rest;
+      const { member, clientId, ...rest } = row;
+      const identified = clientId ? { ...rest, clientMessageKey: hash(`${recipientId}\0${clientId}`) } : rest;
+      const base = member ? { ...identified, memberId: member.nativeId ? `member:${hash(`${recipientId}\0${member.nativeId}`)}` : null, memberName: member.name || null, mentionedSelf: row.mentionedSelf === true } : identified;
       if (!row.media) return base;
       const { images = [], audioSources = [], ...media } = row.media;
       const resources = [...images, ...audioSources].filter(image => image.src).map(image => {
         const ref = `media:${hash(image.src.startsWith('data:') ? image.src : (() => { try { return new URL(image.src).pathname; } catch { return image.src; } })())}`;
-        this.mediaResources.set(ref, { src: image.src, label: image.label ?? null, recipientId, type: media.type });
+        if(media.type==='voice'){currentVoiceRefs.add(ref);this.mediaResources.delete(ref);this.mediaResources.set(ref, { src: image.src, label: image.label ?? null, recipientId, type: media.type });}
         return { resourceRef: ref, label: image.label ?? null };
       });
       return { ...base, media: { ...media, ...(media.type === 'voice' ? { sourceCount: resources.length } : { imageCount: resources.length }), resources } };
     });
+    for(const [ref,resource] of this.mediaResources)if(resource.recipientId===recipientId&&!currentVoiceRefs.has(ref))this.mediaResources.delete(ref);
+    while(this.mediaResources.size>128)this.mediaResources.delete(this.mediaResources.keys().next().value);
     const identified = this.identities.identify(recipientId, rows);
     return identified.map(row => row.media?.type === 'shared-work' ? { ...row, media: { ...row.media,
       safeOpenSelector: `[data-deepseek-message-id="${row.id}"] .MessageItemShareAwemecontainer` } } : row);
   }
   async markMessages(page, messages) {
-    await page.evaluate(mapping => {
+    const marked = await page.evaluate(mapping => {
       const visible = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e); return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight && s.visibility !== 'hidden' && s.display !== 'none'; };
       const header = [...document.querySelectorAll('[data-e2e="im-dialog"] [class*="StackLayoutStackChatHeaderuser"],[data-e2e="im-dialog"] [data-e2e="chat-header"],[data-e2e="im-dialog"] [data-e2e="group-chat-header"]')].filter(visible);
       const root = header.length === 1 ? header[0].closest('[class*="StackLayoutpagespageRoot"],[data-e2e="chat-page"]') : null;
       const selector = '[data-e2e="msg-item-content"],[data-e2e="message-content"],[data-testid="message-content"]';
       const nodes = [...(root?.querySelectorAll(selector) ?? [])].filter(node => !node.parentElement?.closest(selector));
-      if (nodes.length !== mapping.length || new Set(mapping.map(item => item.domPosition)).size !== nodes.length) throw new Error('消息窗口已经改变。');
+      if (nodes.length !== mapping.length || new Set(mapping.map(item => item.domPosition)).size !== nodes.length) return false;
+      if (mapping.some(item => !Number.isSafeInteger(item.domPosition) || item.domPosition < 0 || item.domPosition >= nodes.length)) return false;
       for (const item of mapping) {
-        if (!Number.isSafeInteger(item.domPosition) || item.domPosition < 0 || item.domPosition >= nodes.length) throw new Error('消息 DOM 位置不可核对。');
         nodes[item.domPosition].setAttribute('data-deepseek-message-id', item.id);
       }
+      return true;
     }, messages.map((message, index) => ({ id: message.id, domPosition: message.domPosition ?? index })));
+    if (!marked) throw Object.assign(new Error('消息列表正在更新，未使用过期快照。'), { code: 'CHAT_SNAPSHOT_CHANGED' });
   }
-  readConversation(recipientId, { allowed = false, signal, refresh = false } = {}) {
+  readConversation(recipientId, { allowed = false, signal, refresh = false, weak = false, backgroundOnly = false } = {}) {
     if (allowed !== true) return Promise.reject(new Error('读取正文需要这个指定联系人的明确授权。'));
-    return this.controller.withPage(async page => {
-      const { contact, flags } = await this.select(page, recipientId, signal, { refresh });
+    return this.withPage(async page => {
+      if (backgroundOnly && await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，暂不切换私信页。'), { code: 'CHAT_FOREGROUND' });
+      const { contact, flags } = await this.select(page, recipientId, signal, { refresh, weak });
       if (flags.blocked) return { ...flags, conversation: null, contact: null, messages: [] };
-      const raw = await this.stableConversation(page, contact, signal);
-      if (!sameConversationIdentity(raw, contact)) throw new Error('读取前会话身份发生变化。');
+      let raw, messages;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        stop(signal);
+        raw = await this.stableConversation(page, contact, signal, { weak });
+        if (!(weak ? sameWeakConversation(raw, contact) : sameConversationIdentity(raw, contact))) throw new Error('读取前会话身份发生变化。');
+        messages = this.publicMessages(recipientId, raw.messages);
+        try { await this.markMessages(page, messages); break; }
+        catch (error) { if (error.code !== 'CHAT_SNAPSHOT_CHANGED' || attempt === 1) throw error; }
+      }
       const { avatar, nativeId: _nativeId, identityKey: _identityKey, profileUrl: _profileUrl, identityConflict: _identityConflict, ...publicContact } = contact;
-      const messages = this.publicMessages(recipientId, raw.messages);
-      await this.markMessages(page, messages);
       return { ...flags, conversation: { id: contact.id, displayName: contact.displayName, isGroup: contact.isGroup, conversationType: contact.conversationType }, contact: publicContact,
         messages, dayEvidence: { observedAt: raw.observedAt, latestEndVerified: raw.latestEndVerified, chronology: raw.chronology, historyStartVerified: raw.historyStartVerified, emptyTodayVerified: raw.emptyTodayVerified } };
-    }, { signal });
+    }, { signal, launch: !backgroundOnly, create: !backgroundOnly });
   }
   captureMessage(recipientId, messageId, { allowed = false, signal } = {}) {
     if (allowed !== true) return Promise.reject(new Error('查看画面需要这个指定联系人的明确授权。'));
     if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) return Promise.reject(new TypeError('需要已读取的精确消息 ID。'));
-    return this.controller.withPage(async page => {
+    return this.withPage(async page => {
       const { contact, flags } = await this.select(page, recipientId, signal);
       if (flags.blocked) return { ...flags, frames: [], imageStatus: '登录或验证画面未采集。' };
       const raw = await this.stableConversation(page, contact, signal);
@@ -746,7 +1154,9 @@ export class ChatBrowser {
       if (!message?.media || message.unsupported || !['emoji', 'image', 'shared-work'].includes(message.media.type)) throw new Error('该消息没有已识别的图片、表情或分享作品画面。');
       if (message.media.type === 'image' && message.media.imageReady !== true) throw new Error('这条图片仍在加载或未提供实际图像，未把占位符当作图片。');
       await this.markMessages(page, messages);
-      const frame = page.locator(`[data-e2e="im-dialog"] [data-deepseek-message-id="${messageId}"]`).locator(message.media.inline ? '[class*="MessageItemTextcontainer"],[data-e2e="message-text"]' : '.MessageItemEmojiemojiBox,.MessageItemShareAwemecontainer,[class*="MessageItemImagecontainer"],[class*="MessageItemImageimageBox"],[class*="MessageItemImageImageBox"],[data-e2e="message-image"],[data-e2e="message-emoji"],[data-e2e="shared-video-card"]');
+      const visualSelector = message.media.inline ? '[class*="MessageItemTextcontainer"],[data-e2e="message-text"]' : '.MessageItemEmojiemojiBox,.MessageItemShareAwemecontainer,[class*="MessageItemImagecontainer"],[class*="MessageItemImageimageBox"],[class*="MessageItemImageImageBox"],[data-e2e="message-image"],[data-e2e="message-emoji"],[data-e2e="message-sticker"],[class*="MessageItemSticker"],[data-e2e="shared-video-card"]';
+      const quoteSelector = '[data-e2e="message-quote"],[data-e2e="message-reply-preview"],[class*="MessageItemReply"],[class*="MessageItemQuote"],[class*="QuoteMessage"]';
+      const frame = page.locator(`[data-e2e="im-dialog"] [data-deepseek-message-id="${messageId}"]`).locator(`:is(${visualSelector}):not(:is(${quoteSelector}) *)`);
       if (await frame.count() !== 1) throw new Error('没有唯一的指定消息画面。');
       const current = await page.evaluate(readChatIdentityDom);
       const protectedScreen = await page.evaluate(readChatBlockers);
@@ -762,6 +1172,17 @@ export class ChatBrowser {
       if(!unobstructed) throw new Error('指定消息被其他界面遮挡，未采集。');
       // 倒转的虚拟列表不能依赖 locator 的自动滚动稳定等待；只截取当前消息的可见矩形。
       const data = await page.screenshot({ type:'jpeg',quality:70,clip,timeout:5000 });
+      const frames = [{ mimeType: 'image/jpeg', data: data.toString('base64') }];
+      if (message.media.animatedHint === true) {
+        await new Promise(resolve => setTimeout(resolve, 300)); stop(signal);
+        const protection = await page.evaluate(readChatBlockers), identity = await page.evaluate(readChatIdentityDom);
+        if (protection.loginRequired || protection.verificationRequired || !sameConversationIdentity(identity, contact)) throw new Error('动图采样期间会话或验证状态改变，画面已丢弃。');
+        const middle = this.publicMessages(recipientId, (await this.stableConversation(page, contact, signal)).messages).find(item => item.id === messageId);
+        const bounds = await frame.boundingBox();
+        if (!middle || messageFingerprint(middle) !== messageFingerprint(message) || !bounds || ['x','y','width','height'].some(key => Math.abs(bounds[key] - rectangle[key]) > 1) || !await frame.evaluate(element => { const r = element.getBoundingClientRect(); return element.contains(document.elementFromPoint(Math.max(1, Math.min(innerWidth - 1, r.x + r.width / 2)), Math.max(1, Math.min(innerHeight - 1, r.y + r.height / 2)))); })) throw new Error('动图采样期间指定消息变化或被遮挡，画面已丢弃。');
+        const next = await page.screenshot({ type:'jpeg',quality:70,clip,timeout:5000 });
+        frames.push({ mimeType: 'image/jpeg', data: next.toString('base64') });
+      }
       const afterRectangle=await frame.boundingBox();
       if(!afterRectangle||['x','y','width','height'].some(key=>Math.abs(afterRectangle[key]-rectangle[key])>1)) throw new Error('截图期间指定消息位置改变，画面已丢弃。');
       const afterIdentity=await page.evaluate(readChatIdentityDom);
@@ -771,17 +1192,16 @@ export class ChatBrowser {
       const afterRaw=await this.stableConversation(page,contact,signal);
       const afterMessages=this.publicMessages(recipientId,afterRaw.messages);
       const afterMessage=afterMessages.find(item=>item.id===messageId);
-      const mediaIdentity=value=>JSON.stringify([value?.sender,value?.kind,value?.text,value?.media?.type,value?.media?.resources,value?.media?.label,value?.media?.title,value?.media?.videoId]);
-      if(!afterMessage || mediaIdentity(afterMessage)!==mediaIdentity(message)) throw new Error('截图期间指定消息发生变化，画面已丢弃。');
+      if(!afterMessage || messageFingerprint(afterMessage)!==messageFingerprint(message)) throw new Error('截图期间指定消息发生变化，画面已丢弃。');
       return { ...flags, conversation: { id: recipientId, displayName: contact.displayName }, messageId,
-        media: message.media, understandingScope: message.media.understandingScope,
-        frames: [{ mimeType: 'image/jpeg', data: data.toString('base64') }], imageStatus: '已采集指定消息的实际画面，尚需支持图像的模型读取。' };
+        media: message.media, understandingScope: frames.length > 1 ? 'single-message-animation-sampling' : message.media.understandingScope,
+        frames, ...(frames.length > 1 ? { note: '同一消息按先后顺序采集的两帧，至少间隔300毫秒；可能遗漏快速动作，没有音频，不代表完整动图。' } : {}), imageStatus: '已采集指定消息的实际画面，尚需支持图像的模型读取。' };
     }, { signal });
   }
   captureVoiceMessage(recipientId, messageId, { allowed = false, signal } = {}) {
     if (allowed !== true) return Promise.reject(new Error('读取语音需要这个指定联系人的明确授权。'));
     if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) return Promise.reject(new TypeError('需要已读取的精确消息 ID。'));
-    return this.controller.withPage(async page => {
+    return this.withPage(async page => {
       const { contact, flags } = await this.select(page, recipientId, signal);
       if (flags.blocked) throw new Error('登录或验证尚未完成，未读取语音。');
       await this.verifyContactBinding(page, contact);
@@ -834,14 +1254,20 @@ export class ChatBrowser {
   openSharedVideo(recipientId, messageId, { allowed = false, signal } = {}) {
     if (allowed !== true) return Promise.reject(new Error('打开分享作品需要这个指定联系人的明确授权。'));
     if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) return Promise.reject(new TypeError('需要已读取的精确消息 ID。'));
-    return this.controller.withPage(async page => {
+    return this.withPage(async page => {
       const { contact, flags } = await this.select(page, recipientId, signal);
       if (flags.blocked) return { ...flags, opened: false };
       const raw = await this.stableConversation(page, contact, signal);
       const messages = this.publicMessages(recipientId, raw.messages);
       const message = messages.find(item => item.id === messageId);
       if (message?.media?.type !== 'shared-work') throw new Error('该消息不是已识别的分享作品卡片。');
-      if (message.media.url) return { ...flags, opened: false, videoId: message.media.videoId, url: message.media.url, source: 'dom-link' };
+      if (message.media.identityConflict === true) throw new Error('分享卡片的公开链接与原生作品身份有冲突，未打开。');
+      if (message.media.url) {
+        let target; try { target = new URL(message.media.url); } catch { throw new Error('分享卡片公开链接格式无效，未打开。'); }
+        const id = /^\/video\/(\d{1,64})\/?$/.exec(target.pathname)?.[1];
+        if (message.media.url.length > 300 || target.protocol !== 'https:' || target.hostname !== 'www.douyin.com' || target.username || target.password || target.port || !id || message.media.videoId !== id) throw new Error('分享卡片公开链接与作品编号不一致，未打开。');
+        return { ...flags, opened: false, videoId: id, url: 'https://www.douyin.com/video/' + id, source: message.media.publicUrlSource || 'dom-link', isPhotoGallery: message.media.isPhotoGallery };
+      }
       await this.markMessages(page, messages);
       const card = page.locator(`[data-e2e="im-dialog"] ${message.media.safeOpenSelector}`);
       if (await card.count() !== 1) throw new Error('没有唯一的指定分享卡片。');
@@ -875,43 +1301,133 @@ export class ChatBrowser {
       }
     }, { signal });
   }
-  sendMessage(recipientId, message, { allowed = false, expectedContact, expectedMessageIds, expectedMessageContent, signal: parentSignal, authorize } = {}) {
+  canFallbackFromImage(delivery, recipientId) { return Boolean(delivery && this.unsentImageDeliveries.get(delivery) === recipientId && delivery.confirmed === false && delivery.deliveryUncertain === false); }
+  sendImageMessage(recipientId, asset, { allowed = false, expectedContact, expectedMessageIds, expectedMessageContent, expectedMessageEvidence, signal, authorize, weak = false, backgroundOnly = false } = {}) {
+    if (allowed !== true || typeof authorize !== 'function' || typeof authorize.beginDispatch !== 'function') return Promise.reject(new Error('图片发送需要当前许可及最终输入授权。'));
+    const type = imageFileType(asset?.bytes);
+    if (asset.sha256 !== hash(asset.bytes) || type.mimeType !== asset.mimeType || type.extension !== asset.extension) return Promise.reject(new Error('图片内容、摘要或类型不一致。'));
+    const name = `dafeiyu-${randomUUID()}.${type.extension}`, token = 'dyImage_' + randomUUID().replaceAll('-', '');
+    const authorized = async phase => { stop(signal); if (await authorize({ phase, recipientId }) !== true) throw new Error('图片回复许可已撤回。'); stop(signal); };
+    return this.withPage(async page => {
+      let staged = false, attempted = false, accepted = 0, release, contact, preview, stage = 'context';
+      const unsent = code => { const result = { confirmed: false, deliveryUncertain: false, failureCode: code, failureStage:stage, sendClicks:0,platformSendStarted:false }; this.unsentImageDeliveries.set(result, recipientId); return result; };
+      const cleanup = async () => {
+        if (!staged || attempted) return !staged;
+        await page.evaluate(token => window[token]?.dispose?.(), token).catch(() => {});
+        const current = await page.evaluate(readImageUploadPreviewDom, { name, bytes: asset.bytes.length });
+        if (!current || preview && current.localId !== preview.localId) return false;
+        const cancel = page.locator('.MsgInputSendFileModalbox button.MsgInputSendFileModalbtnCancle');
+        if (await cancel.count() !== 1) return false;
+        // 仅取消与本次随机文件名、字节数和本地ID一致的自有预览。
+        await cancel.click({ timeout: 1500 });
+        return await page.locator('.MsgInputSendFileModalbox').count() === 0;
+      };
+      try {
+        if (backgroundOnly && await this.isForeground(page)) return unsent('CHAT_FOREGROUND');
+        await authorized('prepare');
+        const selected = await this.select(page, recipientId, signal, { weak }); contact = selected.contact;
+        if (selected.flags.blocked) return unsent('CHAT_ACCOUNT_ACTION_REQUIRED');
+        if (weak && !contactIdentityBinding(contact)) return unsent('CHAT_IMAGE_STABLE_ID_REQUIRED');
+        await this.verifyContactBinding(page, contact, expectedContact, weak);
+        const matches = value => weak ? sameWeakConversation(value, contact) : sameConversationIdentity(value, contact);
+        const read = async () => {
+          const raw = await this.stableConversation(page, contact, signal, { weak });
+          if (!matches(raw)) throw new Error('图片发送期间会话身份改变。');
+          return { raw, messages: this.publicMessages(recipientId, raw.messages) };
+        };
+        const initial = await read(), expected = expectedMessageContent ?? messageContent(initial.messages), ids = expectedMessageIds ?? initial.messages.map(item => item.id);
+        if (JSON.stringify(expected.map(item => item.id)) !== JSON.stringify(ids)) return unsent('CHAT_WATERMARK_CHANGED');
+        const watermark = { content: expected, chronology: expectedMessageEvidence?.chronology ?? initial.raw.chronology, latestEndVerified: expectedMessageEvidence?.latestEndVerified ?? messageWatermark(initial.messages, initial.raw).latestEndVerified };
+        const currentContext = async () => { await authorized('monitor'); await this.verifyContactBinding(page, contact, expectedContact, weak); const value = await read(); if (!compareMessageWatermark(watermark, value.messages, value.raw).matches) throw new Error('图片准备期间消息已变化。'); return value; };
+        if (!compareMessageWatermark(watermark, initial.messages, initial.raw).matches) return unsent('CHAT_WATERMARK_CHANGED');
+        const editor = page.locator('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable=true]');
+        if (await editor.count() !== 1 || readableDraft(await editor.innerText()) || await editor.locator('img,video,audio,[data-slate-void=true]').count() || await page.locator('.MsgInputSendFileModalbox').count()) return unsent('CHAT_USER_DRAFT_PRESENT');
+        const contract = await page.evaluate(readUploadStagingContractDom);
+        if (typeof contract !== 'string' || hash(contract) !== this.uploadContractHash) return unsent('CHAT_UPLOAD_CONTRACT_UNSUPPORTED');
+        const input = page.locator('[data-e2e="im-dialog"] [data-e2e="msg-input"] input[type=file][multiple]');
+        if (await input.count() !== 1) return unsent('CHAT_UPLOAD_INPUT_UNAVAILABLE');
+        await currentContext();
+        stage = 'stage-file';
+        staged = true;
+        await input.setInputFiles({ name, mimeType: type.mimeType, buffer: asset.bytes }, { timeout: 5000 });
+        const until = Date.now() + 6000;
+        do { stop(signal); preview = await page.evaluate(readImageUploadPreviewDom, { name, bytes: asset.bytes.length }); if (preview) break; await new Promise(resolve => setTimeout(resolve, 100)); } while (Date.now() < until);
+        if (!preview) throw new Error('没有取得本次图片的唯一发送预览。');
+        await currentContext();
+        stage = 'install-final-guard';
+        const args = JSON.stringify({ token, name, bytes: asset.bytes.length });
+        const expression = `(()=>{const readPreview=${readImageUploadPreviewDom.toString()};return (${installImageDispatchGuardDom.toString()})(${args})})()`;
+        if (await page.evaluate(expression) !== true) throw new Error('图片最终输入门禁未就绪。');
+        stage = 'geometry';
+        const button = page.locator('.MsgInputSendFileModalbox button.MsgInputSendFileModalbtnSure');
+        if (await button.count() !== 1) throw new Error('图片发送按钮不唯一。');
+        const box = await button.boundingBox();
+        if (!box || box.width < 2 || box.height < 2) throw new Error('图片发送按钮不可见。');
+        const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        if (!await button.evaluate((element, point) => element.contains(document.elementFromPoint(point.x, point.y)), point)) throw new Error('图片发送按钮被遮挡。');
+        await currentContext();
+        stage = 'authorization';
+        release = authorize.beginDispatch();
+        await authorized('before-click');
+        attempted = true;
+        stage = 'dispatch';
+        await page.mouse.click(point.x, point.y);
+        release(); release = undefined;
+        const witness = await page.evaluate(token => { const item = window[token]; return item ? { accepted: item.accepted, blocked: item.blocked } : null; }, token);
+        accepted = witness?.accepted ?? -1;
+        if (accepted === 0 && witness?.blocked === true) { attempted = false; return await cleanup() ? unsent('CHAT_IMAGE_FINAL_GUARD_REJECTED') : { confirmed: false, deliveryUncertain: false, failureCode: 'CHAT_IMAGE_PREVIEW_RETAINED' }; }
+        if (accepted !== 1) return { confirmed: false, deliveryUncertain: true, failureCode: 'CHAT_IMAGE_INPUT_UNCERTAIN' };
+        stage = 'receipt';
+        const baseline = new Set(initial.messages.map(item => item.id)), imageRef = 'media:' + hash(preview.imagePath.startsWith('data:') ? preview.imagePath : new URL(preview.imagePath).pathname), imageMd5 = createHash('md5').update(asset.bytes).digest('hex');
+        let clientMessageKey = null;
+        const deadline = Date.now() + 15000;
+        do {
+          stop(signal);
+          const flags = await page.evaluate(readChatBlockers); if (flags.blocked || flags.loginRequired || flags.verificationRequired) break;
+          const value = await read(), fresh = value.messages.filter(item => item.sender === 'outgoing' && item.media?.type === 'image' && !baseline.has(item.id));
+          const stagedMatches = fresh.filter(item => item.clientMessageKey && item.media.resources?.some(resource => resource.resourceRef === imageRef));
+          if (stagedMatches.length > 1) break;
+          if (stagedMatches.length === 1) { if (clientMessageKey && clientMessageKey !== stagedMatches[0].clientMessageKey) break; clientMessageKey = stagedMatches[0].clientMessageKey; }
+          const matches = fresh.filter(item => (item.media.imageMd5===imageMd5 || clientMessageKey && item.clientMessageKey === clientMessageKey || item.media.resources?.some(resource=>resource.resourceRef===imageRef)) && item.serverConfirmed === true && !item.failed && !item.pending);
+          if (matches.length === 1) return { confirmed: true, deliveryUncertain: false, messageId: matches[0].id, media: { type: 'image' }, confirmedBy: matches[0].media.imageMd5===imageMd5 ? 'uploaded-image-digest-and-server-message' : clientMessageKey ? 'owned-preview-client-and-server-message' : 'owned-preview-image-and-server-message' };
+          if (matches.length > 1 || fresh.some(item => item.clientMessageKey === clientMessageKey && item.failed)) break;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        } while (Date.now() < deadline);
+        return { confirmed: false, deliveryUncertain: true, failureCode: 'CHAT_IMAGE_RECEIPT_UNCONFIRMED' };
+      } catch {
+        if (!attempted && await cleanup().catch(() => false)) return unsent('CHAT_IMAGE_PRECHECK_REJECTED');
+        if (!staged && !attempted) return unsent('CHAT_IMAGE_PRECHECK_REJECTED');
+        return { confirmed: false, deliveryUncertain: attempted, failureStage:stage, failureCode: attempted ? 'CHAT_IMAGE_RECEIPT_UNCONFIRMED' : 'CHAT_IMAGE_PREVIEW_RETAINED' };
+      } finally {
+        release?.();
+        await page.evaluate(token => window[token]?.dispose?.(), token).catch(() => {});
+      }
+    }, { signal });
+  }
+  sendMessage(recipientId, message, { allowed = false, expectedContact, expectedMessageIds, expectedMessageContent, expectedMessageEvidence, signal: parentSignal, authorize, weak = false, backgroundOnly = false } = {}) {
     if (allowed !== true) return Promise.reject(new Error('发送需要这个指定联系人的明确授权。'));
     if (typeof message !== 'string' || !message.trim() || [...message].length > 1000) return Promise.reject(new TypeError('发送内容须为 1 到 1000 字的非空文字。'));
     if (authorize !== undefined && (typeof authorize !== 'function' || typeof authorize.beginDispatch !== 'function')) return Promise.reject(new TypeError('主动问候需要本机许可检查和最终短输入控制。'));
     const interrupt = new AbortController(), signal = AbortSignal.any([interrupt.signal, ...(parentSignal ? [parentSignal] : [])]);
     const authorized = async phase => { stop(signal); if (authorize && await authorize({ phase, recipientId }) !== true) throw new Error('主动问候许可已撤回，未继续发送。'); stop(signal); };
-    return this.controller.withPage(async page => {
+    return this.withPage(async page => {
+      if (backgroundOnly && await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，暂不切换私信页。'), { code: 'CHAT_FOREGROUND' });
       await authorized('prepare');
-      const { contact, flags } = await this.select(page, recipientId, signal);
+      const { contact, flags } = await this.select(page, recipientId, signal, { weak });
       if (flags.blocked) return { ...flags, confirmed: false, deliveryUncertain: false };
-      await this.verifyContactBinding(page, contact, expectedContact);
-      const before = await page.evaluate(readConversationDom, expectedDomIdentity(contact));
-      if (!sameConversationIdentity(before, contact) || before.identityUnavailable) throw new Error('填写回复前会话的稳定身份已变化，未填写或发送。');
+      const matches = value => weak ? sameWeakConversation(value, contact) : sameConversationIdentity(value, contact);
+      await this.verifyContactBinding(page, contact, expectedContact, weak);
+      const before = await page.evaluate(readConversationDom, { ...expectedDomIdentity(contact), allowWeak: weak });
+      if (!matches(before) || !weak && before.identityUnavailable) throw new Error('填写回复前会话的稳定身份已变化，未填写或发送。');
       const initialMessages = this.publicMessages(recipientId, before.messages);
       const expected = expectedMessageIds ?? initialMessages.map(item => item.id);
-      const contentOf = messages => messages.map(item => ({ id: item.id, fingerprint: messageFingerprint(item) }));
-      const expectedContent = expectedMessageContent ?? contentOf(initialMessages);
-      if (!Array.isArray(expected) || expected.some(id => typeof id !== 'string') || initialMessages.some(item => item.direction === 'unknown') || JSON.stringify(initialMessages.map(item => item.id)) !== JSON.stringify(expected)
-        || !Array.isArray(expectedContent) || expectedContent.some(item => !item || typeof item.id !== 'string' || !/^[a-f0-9]{64}$/.test(item.fingerprint ?? '')) || JSON.stringify(contentOf(initialMessages)) !== JSON.stringify(expectedContent)) return { confirmed: false, deliveryUncertain: false, reason: '私信水位或内容已变化，未填写或发送回复。' };
+      const expectedContent = expectedMessageContent ?? messageContent(initialMessages);
+      const exactInitial = JSON.stringify(initialMessages.map(item => item.id)) === JSON.stringify(expected) && JSON.stringify(messageContent(initialMessages)) === JSON.stringify(expectedContent);
+      const initialEvidence = messageWatermark(initialMessages, before);
+      const expectedWatermark = { content: expectedContent, chronology: expectedMessageEvidence?.chronology ?? (exactInitial ? initialEvidence.chronology : 'unknown'), latestEndVerified: expectedMessageEvidence?.latestEndVerified === true || expectedMessageEvidence === undefined && exactInitial && initialEvidence.latestEndVerified };
       let guardDiagnostic;
-      const sameWatermark = (messages, raw) => {
-        const known = new Map(expectedContent.map(item => [item.id, item.fingerprint])), actual = contentOf(messages), anchor = expected.at(-1), anchorIndex = messages.findIndex(item => item.id === anchor);
-        const diagnostic = { expectedCount: expected.length, currentCount: messages.length, expectedLatestEndVerified: initialMessages.length > 0 && initialMessages.every(item => item.latestEndVerified === true), currentLatestEndVerified: messages.length > 0 && messages.every(item => item.latestEndVerified === true), chronology: raw?.chronology || 'unknown', suffixOffset: messages.length <= expected.length ? expected.length - messages.length : null,
-          latestAnchorPresent: anchorIndex >= 0, latestAnchorAtEnd: anchorIndex >= 0 && anchorIndex === messages.length - 1, latestAnchorFingerprintMatches: anchorIndex >= 0 && actual[anchorIndex].fingerprint === known.get(anchor), allOverlapContentMatches: actual.filter(item => known.has(item.id)).every(item => item.fingerprint === known.get(item.id)), unknownDirectionCount: messages.filter(item => item.direction === 'unknown').length,
-          additionalCount: messages.filter(item => !known.has(item.id)).length, additionalClassifications: Object.fromEntries(['old-history', 'known-old-window', 'new-tail', 'ambiguous-new', 'baseline'].map(kind => [kind, messages.filter(item => !known.has(item.id) && item.arrivalClassification === kind).length])) };
-        guardDiagnostic = diagnostic;
-        if (messages.some(item => item.direction === 'unknown')) return false;
-        if (JSON.stringify(messages.map(item => item.id)) === JSON.stringify(expected)) return JSON.stringify(contentOf(messages)) === JSON.stringify(expectedContent);
-        // 输入框扩高和trial滚动可移除或补载旧前缀；原最新端和完整重叠后缀必须保持。
-        if (!messages.length || before.chronology !== 'oldest-first' || raw?.chronology !== 'oldest-first' || !initialMessages.every(item => item.latestEndVerified === true) || !messages.every(item => item.latestEndVerified === true) || !diagnostic.latestAnchorAtEnd || !diagnostic.latestAnchorFingerprintMatches) return false;
-        const firstOverlap = messages.findIndex(item => known.has(item.id)), expectedOffset = expected.indexOf(messages[firstOverlap]?.id);
-        if (firstOverlap < 0 || expectedOffset < 0) return false;
-        const overlap = messages.slice(firstOverlap), prefix = messages.slice(0, firstOverlap);
-        diagnostic.suffixOffset = expectedOffset; diagnostic.additionalPrefixCount = prefix.length;
-        return JSON.stringify(overlap.map(item => item.id)) === JSON.stringify(expected.slice(expectedOffset)) && JSON.stringify(contentOf(overlap)) === JSON.stringify(expectedContent.slice(expectedOffset))
-          && prefix.every(item => !known.has(item.id) && ['old-history', 'known-old-window'].includes(item.arrivalClassification) && item.eligibleForReply !== true);
-      };
+      const sameWatermark = (messages, raw) => { const result = compareMessageWatermark(expectedWatermark, messages, raw); guardDiagnostic = result.diagnostic; return result.matches; };
+      if (!Array.isArray(expected) || expected.some(id => typeof id !== 'string') || !Array.isArray(expectedContent) || JSON.stringify(expectedContent.map(item => item?.id)) !== JSON.stringify(expected) || !sameWatermark(initialMessages, before)) return { confirmed: false, deliveryUncertain: false, reason: '私信水位或内容已变化，未填写或发送回复。' };
       const receipt = { conversation: { id: contact.id, displayName: contact.displayName }, contact: { id: contact.id, name: contact.displayName } };
       const editor = page.locator('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable="true"]');
       if (await editor.count() !== 1) throw new Error('没有唯一的私信文字输入框。');
@@ -922,28 +1438,124 @@ export class ChatBrowser {
         await editor.fill(message);
         stop(signal);
         failureStage = 'identity';
-        const ready = await page.evaluate(readConversationDom, expectedDomIdentity(contact));
-        if (!sameConversationIdentity(ready, contact) || readableDraft(await editor.innerText()) !== readableDraft(message)) throw new Error('发送前身份或输入文字回读不一致。');
-        await this.verifyContactBinding(page, contact, expectedContact);
+        const ready = await page.evaluate(readConversationDom, { ...expectedDomIdentity(contact), allowWeak: weak });
+        if (!matches(ready) || readableDraft(await editor.innerText()) !== readableDraft(message)) throw new Error('发送前身份或输入文字回读不一致。');
+        await this.verifyContactBinding(page, contact, expectedContact, weak);
         failureStage = 'watermark';
         const readyMessages = this.publicMessages(recipientId, ready.messages);
         if (!sameWatermark(readyMessages, ready)) throw new Error('填写回复期间私信水位或内容发生变化，未点击发送。');
-        const escaped = contact.displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         failureStage = 'button';
-        const targetPage = page.locator('[class*="StackLayoutpagespageRoot"],[data-e2e="chat-page"]').filter({ has: page.locator('[class*="StackLayoutStackChatHeadertitle"],[data-e2e="chat-title"],[data-e2e="group-chat-title"]').filter({ hasText: new RegExp(`^${escaped}$`) }) });
-        const send = targetPage.locator('.e2e-send-msg-btn,[data-e2e="send-msg-btn"]');
-        if (await send.count() !== 1) throw new Error('没有唯一的指定会话发送按钮。');
-        await send.evaluate((button, token) => {
-          const entries = window.__deepseekChatInputs ??= Object.create(null), entry = { dispatched: false };
+        const targetPage = page.locator('[data-e2e="im-dialog"]').locator('[class*="StackLayoutpagespageRoot"],[data-e2e="chat-page"]').filter({ has: page.locator('[data-e2e="msg-input"] [contenteditable="true"]') });
+        if (await targetPage.count() !== 1) throw new Error('指定会话输入区域不唯一，未点击发送。');
+        const sendMarker = targetPage.locator('.e2e-send-msg-btn,[data-e2e="send-msg-btn"]');
+        if (await sendMarker.count() !== 1) throw new Error('没有唯一的指定会话发送按钮。');
+        const installed = await sendMarker.evaluate((marker, { token, groupRequired, recipientId }) => {
+          const scope = marker.closest('[class*="StackLayoutpagespageRoot"],[data-e2e="chat-page"]');
+          if (!scope || scope.querySelectorAll('.e2e-send-msg-btn,[data-e2e="send-msg-btn"]').length !== 1) return false;
+          const suitableParent = candidate => {
+            if (!candidate || !scope.contains(candidate) || candidate.querySelector('[contenteditable="true"],textarea,input') || candidate.querySelectorAll('.e2e-send-msg-btn,[data-e2e="send-msg-btn"]').length !== 1) return false;
+            const box = candidate.getBoundingClientRect(), icon = marker.getBoundingClientRect();
+            return box.width >= 2 && box.height >= 2 && box.width <= 192 && box.height <= 96 && box.width * box.height <= Math.max(1, icon.width * icon.height) * 16;
+          };
+          let button = marker;
+          const semantic = marker.closest('button,[role="button"]');
+          if (semantic && semantic !== marker && suitableParent(semantic)) button = semantic;
+          else if (marker instanceof SVGElement) {
+            for (let parent = marker.parentElement, depth = 0; parent && parent !== scope && depth < 3; parent = parent.parentElement, depth++) {
+              if (!suitableParent(parent)) continue;
+              const keys = Object.getOwnPropertyNames(parent).filter(key => key.startsWith('__reactProps$'));
+              const props = keys.length === 1 ? Object.getOwnPropertyDescriptor(parent, keys[0])?.value : null;
+              const click = props && typeof props === 'object' ? Object.getOwnPropertyDescriptor(props, 'onClick')?.value : null;
+              if (typeof click === 'function') { button = parent; break; }
+            }
+          }
+          const own = (value, key) => value && typeof value === 'object' ? Object.getOwnPropertyDescriptor(value, key)?.value : undefined;
+          const groupPrototypeIdentity = value => {
+              if (!value || typeof value !== 'object' || Array.isArray(value)) return { id: null, shortId: null, conflict: false, signature: 'absent' };
+              const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
+              const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
+              const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
+              for (const key of ['id', 'shortId']) {
+                const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+                signatures.push(shape(descriptor));
+                if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
+                if (!descriptor) continue;
+                if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
+                if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+                result[key] = descriptor.value;
+              }
+              result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
+              return result;
+            };
+          const groupRowConversations = row => {
+              const values = [], seen = new Set();
+              const visit = (props, depth) => {
+                if (!props || typeof props !== 'object' || seen.has(props)) return;
+                seen.add(props);
+                for (const key of ['conversation', 'conversationInfo', 'conversationData']) { const value = own(props, key); if (value && typeof value === 'object' && !Array.isArray(value)) values.push(value); }
+                if (depth >= 3) return;
+                const children = own(props, 'children');
+                if (Array.isArray(children)) { for (let index = 0; index < Math.min(100, own(children, 'length') || 0); index++) visit(own(own(children, String(index)), 'props'), depth + 1); }
+                else visit(own(children, 'props'), depth + 1);
+              };
+              const propsKeys = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactProps$'));
+              if (propsKeys.length === 1) visit(own(row, propsKeys[0]), 0);
+              const fiberKeys = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactFiber$'));
+              if (fiberKeys.length === 1) {
+                let fiber = own(row, fiberKeys[0]);
+                const fibers = new Set();
+                for (let depth = 0; fiber && typeof fiber === 'object' && depth < 4 && !fibers.has(fiber); depth++, fiber = own(fiber, 'return')) {
+                  fibers.add(fiber);
+                  const props = own(fiber, 'memoizedProps');
+                  for (const key of ['conversation', 'conversationInfo', 'conversationData']) { const value = own(props, key); if (value && typeof value === 'object' && !Array.isArray(value)) values.push(value); }
+                }
+              }
+              return [...new Set(values)];
+            };
+          const groupWitness = () => {
+            const headers = [...scope.querySelectorAll('[class*="StackLayoutStackChatHeaderuser"],[data-e2e="chat-header"],[data-e2e="group-chat-header"]')];
+            if (headers.length !== 1) return null;
+            const header = headers[0], keys = Object.getOwnPropertyNames(header).filter(key => key.startsWith('__reactProps$'));
+            if (keys.length !== 1) return null;
+            const props = own(header, keys[0]), children = own(props, 'children'), conversation = own(own(Array.isArray(children) ? own(children, '0') : children, 'props'), 'conversation');
+            const current = groupPrototypeIdentity(conversation);
+            if (current.conflict || !current.id && !current.shortId) return null;
+            const dialog = scope.closest('[data-e2e="im-dialog"]');
+            if (!scope.isConnected || !dialog) return null;
+            const rows = [...dialog.querySelectorAll('[data-e2e="conversation-item"]')].filter(row => row.getAttribute('data-deepseek-chat-id') === recipientId);
+            if (rows.length !== 1) return null;
+            const rowValues = groupRowConversations(rows[0]).map(groupPrototypeIdentity);
+            if (rowValues.some(value => value.conflict) || !rowValues.some(value => value.id === current.id && value.shortId === current.shortId)) return null;
+            return JSON.stringify([current.signature, rowValues.map(value => value.signature), header.getAttribute('data-conversation-type'), header.getAttribute('data-is-group'), Boolean(header.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]'))]);
+          };
+          const safeGroupWitness = () => { try { return groupWitness(); } catch { return null; } };
+          const initialGroupWitness = groupRequired ? safeGroupWitness() : null;
+          if (groupRequired && initialGroupWitness === null) return false;
+          const entries = window.__deepseekChatInputs ??= Object.create(null), entry = { dispatched: false, marker, button, scope, groupBlocked: false };
+          marker.setAttribute('data-deepseek-send-marker', token);
           button.setAttribute('data-deepseek-send-token', token);
-          const witness = event => { if (event.isTrusted && (event.target === button || button.contains(event.target))) entry.dispatched = true; };
-          document.addEventListener('click', witness, true);
-          entry.cleanup = () => { document.removeEventListener('click', witness, true); if (button.getAttribute('data-deepseek-send-token') === token) button.removeAttribute('data-deepseek-send-token'); }; entries[token] = entry;
-        }, witnessId);
+          const witness = event => {
+            if (!event.isTrusted || !(event.target === button || button.contains(event.target))) return;
+            if (groupRequired && (entry.groupBlocked || safeGroupWitness() !== initialGroupWitness)) { entry.groupBlocked = true; event.preventDefault(); event.stopImmediatePropagation(); return; }
+            if (event.type === 'click') entry.dispatched = true;
+          };
+          const witnessTypes = ['pointerdown', 'mousedown', 'mouseup', 'click'];
+          for (const type of witnessTypes) document.addEventListener(type, witness, true);
+          entry.cleanup = () => {
+            for (const type of witnessTypes) document.removeEventListener(type, witness, true);
+            const marked = new Set([button, marker, ...document.querySelectorAll(`[data-deepseek-send-token="${token}"],[data-deepseek-send-marker="${token}"]`)]);
+            for (const element of marked) for (const attribute of ['data-deepseek-send-token', 'data-deepseek-send-marker']) if (element.getAttribute(attribute) === token) element.removeAttribute(attribute);
+          }; entries[token] = entry;
+          return true;
+        }, { token: witnessId, groupRequired: contact.isGroup === true && ready.groupPrototypeIdentity === true, recipientId });
+        if (!installed) throw new Error('发送图标没有唯一可核对的会话控件。');
+        const send = targetPage.locator(`[data-deepseek-send-token="${witnessId}"]`);
         const inputDispatched = () => page.evaluate(token => window.__deepseekChatInputs?.[token]?.dispatched === true, witnessId);
         const readSendPoint = async () => {
           if (await send.count() !== 1 || !await send.isVisible() || !await send.isEnabled()) return null;
           return send.evaluate((button, token) => {
+            const entry = window.__deepseekChatInputs?.[token];
+            if (!entry || entry.button !== button || !entry.marker.isConnected || !entry.scope.isConnected || !button.contains(entry.marker) || entry.marker.getAttribute('data-deepseek-send-marker') !== token || entry.scope.querySelectorAll('.e2e-send-msg-btn,[data-e2e="send-msg-btn"]').length !== 1) return null;
             if (button.getAttribute('data-deepseek-send-token') !== token || button.closest('[disabled],[aria-disabled="true"]')) return null;
             const r = button.getBoundingClientRect(), x = r.x + r.width / 2, y = r.y + r.height / 2;
             if (r.width < 2 || r.height < 2 || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
@@ -957,10 +1569,10 @@ export class ChatBrowser {
           if (clicked && await inputDispatched()) return;
           await authorized('monitor');
           if (await editor.count() !== 1 || await send.count() !== 1 || readableDraft(await editor.innerText()) !== readableDraft(message)) throw new Error('等待期间发送按钮或草稿发生变化，未发送。');
-          const current = await page.evaluate(readConversationDom, expectedDomIdentity(contact)), blockers = await page.evaluate(readChatBlockers);
+          const current = await page.evaluate(readConversationDom, { ...expectedDomIdentity(contact), allowWeak: weak }), blockers = await page.evaluate(readChatBlockers);
           if (clicked && await inputDispatched()) return;
-          if (blockers.loginRequired || blockers.verificationRequired || !sameConversationIdentity(current, contact)) throw new Error('等待期间会话身份或页面许可发生变化，未发送。');
-          await this.verifyContactBinding(page, contact, expectedContact);
+          if (blockers.loginRequired || blockers.verificationRequired || !matches(current) || current.displayName !== ready.displayName) throw new Error('等待期间会话身份或页面许可发生变化，未发送。');
+          await this.verifyContactBinding(page, contact, expectedContact, weak);
           const messages = this.publicMessages(recipientId, current.messages);
           if (!sameWatermark(messages, current)) throw new Error('等待期间收到新消息或消息内容变化，未发送。');
           stop(signal);
@@ -983,11 +1595,11 @@ export class ChatBrowser {
         if (!stablePoint) throw new Error('发送控件未通过连续几何及命中核对，未点击发送。');
         failureStage = 'identity';
         stop(signal); await checkPendingInput(); await authorized('before-click');
-        await this.verifyContactBinding(page, contact, expectedContact);
+        await this.verifyContactBinding(page, contact, expectedContact, weak);
         if (await inputDispatched()) throw new Error('等待期间已发生发送输入，未再点击一次。');
         failureStage = 'authorization';
         if (authorize) { releaseDispatch = await authorize.beginDispatch(); if (typeof releaseDispatch !== 'function') throw new Error('最终输入控制没有返回可释放的许可。'); }
-        await this.verifyContactBinding(page, contact, expectedContact);
+        await this.verifyContactBinding(page, contact, expectedContact, weak);
         await checkPendingInput();
         const finalPoint = await readSendPoint();
         if (!sameGeometry(finalPoint, stablePoint)) throw new Error('最终输入前发送控件移动、替换或被遮挡，未点击发送。');
@@ -995,22 +1607,22 @@ export class ChatBrowser {
         stop(signal); clicked = true;
         await page.mouse.click(finalPoint.clickX, finalPoint.clickY);
         releaseDispatch?.(); releaseDispatch = null;
-        if (!await inputDispatched()) throw new Error('没有核对到真实发送输入，结果需要核对。');
+        if (!await inputDispatched()) { if (await page.evaluate(token => window.__deepseekChatInputs?.[token]?.groupBlocked === true, witnessId)) { clicked = false; throw new Error('最终输入时群会话稳定身份已变化，未发送。'); } throw new Error('没有核对到真实发送输入，结果需要核对。'); }
         monitoring = false; clearInterval(monitor); stop(signal);
         failureStage = 'readback';
         const beforeIds = new Set(expected), sentCandidates = new Map();
         for (let attempt = 0; attempt < 20; attempt += 1) {
           if (attempt === 3 && !readableDraft(await editor.innerText().catch(() => ''))) {
             // 只重新挂载这个已授权会话一次，不重复输入或点击发送。
-            const reopened = await this.select(page, recipientId, signal, { refresh: true });
-            if (reopened.flags.blocked || !sameConversationIdentity(reopened.contact, contact)) return { ...receipt, confirmed: false, deliveryUncertain: true, reason: '发送后无法重新核对原会话，未再次发送。' };
+            const reopened = await this.select(page, recipientId, signal, { refresh: true, weak });
+            if (reopened.flags.blocked || !matches(reopened.contact)) return { ...receipt, confirmed: false, deliveryUncertain: true, reason: '发送后无法重新核对原会话，未再次发送。' };
           }
-          const after = await page.evaluate(readConversationDom, expectedDomIdentity(contact));
-          if (!sameConversationIdentity(after, contact)) return { ...receipt, confirmed: false, deliveryUncertain: true, reason: '发送后会话发生变化，未再次发送。' };
+          const after = await page.evaluate(readConversationDom, { ...expectedDomIdentity(contact), allowWeak: weak });
+          if (!matches(after)) return { ...receipt, confirmed: false, deliveryUncertain: true, reason: '发送后会话发生变化，未再次发送。' };
           const messages = this.publicMessages(recipientId, after.messages);
-          for (const item of messages) if (item.direction === 'outgoing' && item.text === message.trim() && item.arrivalClassification === 'new-tail' && !beforeIds.has(item.id)) sentCandidates.set(item.id, messageFingerprint(item));
+          for (const item of messages) if (item.direction === 'outgoing' && item.text === message.trim() && item.arrivalClassification === 'new-tail' && !beforeIds.has(item.id) && item.serverConfirmed !== false) sentCandidates.set(item.id, messageFingerprint(item));
           const sent = sentCandidates.size === 1 ? messages.find(item => sentCandidates.has(item.id) && item.direction === 'outgoing' && item.text === message.trim() && sentCandidates.get(item.id) === messageFingerprint(item)) : null;
-          if (sent && !sent.failed && !sent.pending) return { ...receipt, confirmed: true, messageId: sent.id, deliveryUncertain: false };
+          if (sent && sent.serverConfirmed !== false && !sent.failed && !sent.pending) return { ...receipt, confirmed: true, messageId: sent.id, deliveryUncertain: false };
           if (sent?.failed) return { ...receipt, confirmed: false, deliveryUncertain: true, reason: '网页显示发送失败，未自动重试。' };
           stop(signal);
           await page.waitForTimeout(200);
@@ -1034,7 +1646,7 @@ export class ChatBrowser {
         monitoring = false; clearInterval(monitor); releaseDispatch?.();
         await page.evaluate(token => { const entry = window.__deepseekChatInputs?.[token]; entry?.cleanup(); if (window.__deepseekChatInputs) delete window.__deepseekChatInputs[token]; }, witnessId).catch(() => {});
       }
-    }, { signal });
+    }, { signal, launch: !backgroundOnly, create: !backgroundOnly });
   }
   async close() {
     const results = await Promise.allSettled([...this.incomingCleanup].map(cleanup => cleanup()));

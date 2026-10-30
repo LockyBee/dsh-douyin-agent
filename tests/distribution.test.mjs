@@ -23,7 +23,14 @@ test('发行白名单覆盖原生入口和浏览器子进程的相对导入闭�
     const file = path.join(root, relative), source = await fs.readFile(file, 'utf8');
     for (const expression of relativeImports) {
       for (const match of source.matchAll(expression)) {
-        const resolved = path.resolve(path.dirname(file), match[1].split(/[?#]/)[0]);
+        let resolved = path.resolve(path.dirname(file), match[1].split(/[?#]/)[0]);
+        if (!path.extname(resolved)) {
+          const candidates = [resolved, `${resolved}.js`, `${resolved}.mjs`, path.join(resolved, 'index.js')];
+          const matches = [];
+          for (const candidate of candidates) if (await fs.stat(candidate).then(info => info.isFile(), () => false)) matches.push(candidate);
+          assert.equal(matches.length, 1, '无扩展名的运行导入须能唯一解析');
+          resolved = matches[0];
+        }
         const target = path.relative(root, resolved).split(path.sep).join('/');
         assert.ok(!target.startsWith('../') && !path.isAbsolute(target), '运行导入不得逃出发行包');
         await visit(target);

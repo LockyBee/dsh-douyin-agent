@@ -344,12 +344,15 @@ export function createApiServer({ controller, config, personaMemory, watchServic
         if (!chatService) return reply(response, 503, { error: '私信模块尚未就绪。' });
         let result;
         if (request.method === 'GET' && url.pathname === '/api/chat/state') result = chatService.state();
-        else if (request.method === 'GET' && url.pathname === '/api/chat/contacts') result = await chatService.listContacts();
+        else if (request.method === 'GET' && url.pathname === '/api/chat/unanswered') result = chatService.unanswered();
+        else if (request.method === 'GET' && url.pathname === '/api/chat/contacts') { result = await chatService.listContacts(); friendInteractions?.clearError?.(); }
         else if (request.method === 'POST') {
           const body = await readJson(request);
           if (url.pathname === '/api/chat/configure') result = await friendInteractions.configureContacts(body);
           else if (url.pathname === '/api/chat/start') { await friendInteractions.configure({enabled:true},{explicit:true}); result=chatService.state(); }
           else if (url.pathname === '/api/chat/stop') { await friendInteractions.configure({enabled:false},{explicit:true}); result=chatService.state(); }
+          else if (url.pathname === '/api/chat/prepare') { if (Object.keys(body).length) return reply(response,400,{error:'准备回复通道不接受参数。'}); result=await friendInteractions.prepareChat(); }
+          else if (url.pathname === '/api/chat/unanswered/resolve') { const resolved=await friendInteractions.resolveUnanswered(body); result={...resolved,unanswered:chatService.unanswered()}; }
           else if (url.pathname === '/api/chat/resolve') {
             if (Object.keys(body).length !== 1 || typeof body.recipientId !== 'string') return reply(response, 400, { error: '只接受已核对的许可联系人。' });
             result = await friendInteractions.resumeContact(body.recipientId);
@@ -479,18 +482,18 @@ export async function startApiServer({ port = Number(process.env.DOUYIN_API_PORT
   }
   if (!chatService) {
     const [{ ChatService }, { ChatBrowser }] = await Promise.all([import('./chat-service.mjs'), import('./chat-browser.mjs')]);
-    chatService = new ChatService({ browser: new ChatBrowser({ source: 'api-chat' }), config });
+    chatService = new ChatService({ browser: new ChatBrowser({ source: 'api-chat' }), config, onPrepared:options=>controller.releaseIdlePreparePage?.(options), observeSharedWork:typeof controller.observeSharedWork==='function'?input=>controller.observeSharedWork(input):undefined, videoLimits });
   }
   const { BrowserController } = await import('./core.mjs');
   if (!mediaAdapter) { const { MediaAdapter } = await import('./media/index.mjs'); mediaAdapter = new MediaAdapter(); }
   if (!personaMemory) { const { PersonaMemory } = await import('./persona-memory.mjs'); personaMemory = new PersonaMemory(); personaMemory.initialize({ importLegacy: false }); }
-  if (chatService?.agent) chatService.agent.personaMemory = personaMemory;
+  if (chatService?.agent) { chatService.agent.personaMemory = personaMemory; if (typeof controller.store === 'function') chatService.agent.getMemoryStore = () => controller.store(); }
   taskLimits ??= new TaskLimits({ stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir });
   const taskPolicy = taskLimits.state().policy;
   const agent = new ApiAgent({ controller, config, personaMemory, maxSteps: taskPolicy.maxSteps, maxToolCalls: taskPolicy.maxToolCalls, taskTimeoutMs: taskPolicy.timeoutSeconds * 1000 });
   if (!shareService) shareService = new AutonomousShare({ controller, videoLimits, personaMemory, stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir, source: 'api' });
   if (!commentService) commentService = new AutonomousComments({ controller, videoLimits, personaMemory, stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir, source: 'api' });
-  if (!reportService && personaMemory.personaFolder && personaMemory.stateFile) reportService = new DailyReport({ personaMemory });
+  if (!reportService && personaMemory.personaFolder && personaMemory.stateFile) reportService = new DailyReport({ personaMemory, stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir });
   if (!modeService) {
     if (typeof controller.getWatchMode === 'function') modeService = await controller.getWatchMode();
     else { const { WatchMode } = await import('./watch-mode.mjs'); modeService = new WatchMode({ stateDir: videoLimits.stateDir ?? resolveRuntimePaths().stateDir, source: 'api' }); }

@@ -39,6 +39,39 @@ test('原生失败或截断返回不当作成功决策，block-end正文也能�
   const f=fixture({async *stream(){yield{type:'block-end',index:0,block:{type:'text',text:JSON.stringify(decision())}};yield{type:'finish',reason:{kind:'stop'}};}});
   assert.deepEqual(JSON.parse((await f.provider({system:WATCH_SYSTEM_PROMPT,messages:watchDecisionMessages(observation())})).text),decision());
 });
+
+test('当前路由声明off能力时仅本次短回复关闭思考，文本和图片保持原上限与附件', async () => {
+  const f = fixture({ resolveModelInfo: async () => ({ inputModalities: ['text', 'image'], reasoning: { efforts: [{ id: 'off', name: 'Off' }, { id: 'high', name: 'High' }], defaultEffort: 'high' } }) });
+  await f.provider({ system: WATCH_SYSTEM_PROMPT, messages: watchDecisionMessages(observation()) });
+  assert.equal(f.requests[0].reasoningEffort, 'off'); assert.equal(f.requests[0].maxTokens, 1200); assert.equal(f.saved.length, 1);
+  const reply = createNativeWatchDecision({ llm: f.llm, attachments: f.attachments, agent: f.agent, maxTokens: 512 });
+  await reply({ system: '合成普通聊天系统提示', messages: [{ role: 'user', content: '合成文字消息' }] });
+  assert.equal(f.requests[1].reasoningEffort, 'off'); assert.equal(f.requests[1].maxTokens, 512);
+  assert.equal(f.requests[1].messages[0].content[0].text, '合成文字消息');
+  assert.equal(f.agent.session.requestHeader().config.reasoningEffort, undefined);
+});
+
+test('没有off能力不猜参数，能力每次重新核对，不缓存上一次关闭思考的选择', async () => {
+  let info = { inputModalities: ['text'], reasoning: { efforts: [{ id: 'off', name: 'Off' }] } };
+  const f = fixture({ resolveModelInfo: async () => info }), request = { system: '合成系统提示', messages: [{ role: 'user', content: '合成文字消息' }] };
+  await f.provider(request); assert.equal(f.requests[0].reasoningEffort, 'off');
+  info = { inputModalities: ['text'], reasoning: { efforts: [{ id: 'high', name: 'High' }], defaultEffort: 'high' } };
+  await f.provider(request); assert.equal(Object.hasOwn(f.requests[1], 'reasoningEffort'), false);
+  info = { inputModalities: ['text'] };
+  await f.provider(request); assert.equal(Object.hasOwn(f.requests[2], 'reasoningEffort'), false);
+});
+
+test('关闭思考后max-tokens仍拒绝，保留真实用量且不会自动重试', async () => {
+  let calls = 0;
+  const f = fixture({ resolveModelInfo: async () => ({ inputModalities: ['text'], reasoning: { efforts: [{ id: 'off', name: 'Off' }] } }),
+    async *stream(input) { calls++; assert.equal(input.reasoningEffort, 'off'); yield { type: 'text-delta', index: 0, text: '{"action":"st' };
+      yield { type: 'usage', usage: { inputTokens: 30, outputTokens: 1200, reasoningTokens: 1100, totalTokens: 1230 } }; yield { type: 'finish', reason: { kind: 'max-tokens' } }; } });
+  await assert.rejects(f.provider({ system: '合成系统提示', messages: [{ role: 'user', content: '合成文字消息' }] }), error => {
+    assert.match(error.message, /未完整返回（max-tokens）/); assert.equal(error.usage.reasoningTokens, 1100);
+    assert.equal(error.usage.completion_tokens, 1200); assert.equal(error.usage.total_tokens, 1230); return true;
+  });
+  assert.equal(calls, 1);
+});
 test('原生自主循环把观察写入同一人格文件，停止前的有限画面不直接学成喜欢',async t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'native-watch-shared-'));
   t.after(()=>{assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));fs.rmSync(root,{recursive:true,force:true});});

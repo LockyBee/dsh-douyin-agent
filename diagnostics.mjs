@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs';
+import { probeEdgeInstallation, sanitizeBrowserFailure } from './browser-host.mjs';
 
 const execute = promisify(execFile);
-const VERSION = '1.4.5';
+const VERSION = '1.4.6';
 const REPAIR = 'reapply_silent';
 const resolution = (kind, steps = [], action) => ({ kind, steps, ...(action ? { action } : {}) });
 const automatic = () => resolution('automatic', ['重新连接已核对归属的现有专用浏览器，重新应用已开启的静默设置，再回读窗口和媒体状态。'], REPAIR);
@@ -28,7 +29,7 @@ const failures = {
 
 export async function runDiagnostics({ source = 'api', modelConfigured = false, videoLimits, watchService, optionsService, usageLedger,
   controller, modeService, watchSchedule, settingsTransport, interactionStates,
-  paths = resolveRuntimePaths(), nodeResolver = resolveNodeExecutable, probeNode, now = Date.now } = {}) {
+  paths = resolveRuntimePaths(), nodeResolver = resolveNodeExecutable, probeNode, probeBrowserInstallation = probeEdgeInstallation, now = Date.now } = {}) {
   const checks = [];
   async function check(id, label, action) {
     try {
@@ -52,10 +53,26 @@ export async function runDiagnostics({ source = 'api', modelConfigured = false, 
     if (!version) throw Error();
     return { message: `Node.js ${version}，SQLite 可用。` };
   });
-  await check('browser', '浏览器安装', () => {
-    const candidates = [process.env['PROGRAMFILES(X86)'], process.env.PROGRAMFILES, process.env.LOCALAPPDATA].filter(Boolean).map(root => path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
-    if (!candidates.some(file => fs.existsSync(file))) throw Error();
-    return { message: 'Microsoft Edge 已安装；连接、登录和静默效果另行检查。' };
+  await check('browser', '浏览器安装', async () => {
+    const installed = await probeBrowserInstallation();
+    if (!installed?.installed) throw Error();
+    const version = /^\d+\.\d+\.\d+\.\d+$/.test(installed.version || '') ? installed.version : null;
+    let failed;
+    try {
+      if (paths.browserControlDir && paths.browserProfileDir) {
+        const file = path.join(paths.browserControlDir, 'browser.json');
+        if (fs.statSync(file).size <= 65536) {
+          const host = JSON.parse(fs.readFileSync(file, 'utf8')), item = host.launchFailure;
+          if (host.ready === false && path.resolve(host.profile) === path.resolve(paths.browserProfileDir) && Number.isFinite(item?.at) && now() - item.at >= 0 && now() - item.at < 24 * 60 * 60_000 && ['EDGE_LAUNCH_FAILED', 'BROWSER_PROFILE_IN_USE', 'EDGE_ACCESS_DENIED', 'EDGE_MISSING', 'EDGE_VERSION_INCOMPATIBLE'].includes(item.code)) failed = item;
+        }
+      }
+    } catch {}
+    if (failed) {
+      const update = ['EDGE_LAUNCH_FAILED', 'EDGE_VERSION_INCOMPATIBLE'].includes(failed.code);
+      const steps = failed.code === 'BROWSER_PROFILE_IN_USE' ? ['正常关闭旧专用窗口后重试，不删除资料目录。'] : failed.code === 'EDGE_ACCESS_DENIED' ? ['检查系统权限、安全软件和专用资料目录权限。'] : update ? ['更新 Microsoft Edge 与抖音助手后重试；若仍失败，提交本自检报告。'] : ['核对 Microsoft Edge 安装后重新自检。'];
+      return { warning: true, code: failed.code, message: '最近一次专用浏览器启动失败：' + sanitizeBrowserFailure(failed.message), details: sanitizeBrowserFailure(failed.details), evidence: { browserVersion: /^\d+\.\d+\.\d+\.\d+$/.test(failed.browserVersion || '') ? failed.browserVersion : null, installedBrowserVersion: version, channel: 'msedge', failureAt: failed.at }, resolution: resolution(update ? 'update' : 'user', steps) };
+    }
+    return { warning: !version, ...(version ? {} : { code: 'EDGE_VERSION_UNKNOWN' }), message: version ? '标准路径 Microsoft Edge 版本 ' + version + '；连接、登录和静默效果另行检查，版本号本身不能证明运行兼容。' : '已找到标准路径 Microsoft Edge，但未读到文件版本；启动失败时请更新 Edge 并查看本机启动详情。', evidence: { browserVersion: version, channel: 'msedge' } };
   });
   for (const [id, label, directory] of [['state', '共享状态目录', paths.stateDir], ['memory', '共享记忆目录', paths.memoryDir]]) await check(id, label, () => {
     fs.mkdirSync(directory, { recursive: true }); const probe = path.join(directory, `.selfcheck-${randomUUID()}`);
