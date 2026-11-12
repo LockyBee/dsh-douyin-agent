@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 const IMAGE = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/;
 
 // 复用当前 DSH 模型路由和附件接口；不读取模型凭据或普通会话历史。
-export function createNativeWatchDecision({ llm, attachments, agent, maxTokens = 1200 }) {
+export function createNativeWatchDecision({ llm, attachments, agent, maxTokens = 1200, purpose = 'watch' }) {
   if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 1200) throw new Error('原生模型生成上限须在1至1200之间。');
+  if (!['watch', 'chat'].includes(purpose)) throw new Error('原生模型用途无效。');
   const header = agent?.session?.requestHeader?.()?.config;
   const provider = header?.provider ?? agent?.options?.provider;
   const model = header?.model ?? agent?.options?.model;
@@ -14,7 +15,8 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
     const info = await llm.resolveModelInfo(provider, model, signal);
     const shortReplyControls = Array.isArray(info?.reasoning?.efforts) && info.reasoning.efforts.some(effort => effort.id === 'off') ? { reasoningEffort: 'off' } : {};
     const hasImages = messages.some(message => Array.isArray(message.content) && message.content.some(part => part.type === 'image_url'));
-    if (hasImages && (!info?.inputModalities?.includes('image') || typeof attachments?.saveImages !== 'function')) throw new Error('当前 DSH 模型或附件服务不能接收实际视频画面，已停止自主观看。');
+    const supportsImages = info?.inputModalities?.includes('image') && typeof attachments?.saveImages === 'function';
+    if (hasImages && !supportsImages && purpose !== 'chat') throw Object.assign(new Error('当前 DSH 模型或附件服务不能接收实际视频画面，已停止自主观看。'), { code: 'NATIVE_IMAGE_UNSUPPORTED' });
     const converted = [];
     for (const message of messages) {
       if(message.role==='system') {if(message.content!==system)throw new Error('自主观看系统提示不一致。');continue;}
@@ -27,6 +29,10 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
           if (!match) throw new Error('自主观看画面格式无效。');
           const data = Buffer.from(match[2], 'base64');
           if (!data.length || data.length > 2_000_000 || data.toString('base64') !== match[2]) throw new Error('自主观看画面超出限制或编码无效。');
+          if (!supportsImages) {
+            blocks.push({ type: 'text', text: '本条图片未交给模型：当前模型或附件服务不支持图片输入。你没有看到这张图；忽略前文关于可见画面或采样帧的描述，只依据文字聊天，不猜测图片或表情内容。' });
+            continue;
+          }
           const refs = await attachments.saveImages([{data,mediaType:match[1]}]);
           signal?.throwIfAborted();
           if (!Array.isArray(refs) || refs.length !== 1 || !refs[0]?.attachmentId) throw new Error('DSH 未保存完整的自主观看画面附件。');
@@ -48,7 +54,7 @@ export function createNativeWatchDecision({ llm, attachments, agent, maxTokens =
       if (chunk.type === 'usage') usage = { ...chunk.usage, prompt_tokens: chunk.usage.inputTokens ?? null, completion_tokens: chunk.usage.outputTokens ?? null, total_tokens: chunk.usage.totalTokens ?? (Number.isSafeInteger(chunk.usage.inputTokens) && Number.isSafeInteger(chunk.usage.outputTokens) ? chunk.usage.inputTokens + chunk.usage.outputTokens : null) };
       if (chunk.type === 'finish') finish = chunk.reason;
     }
-    if (finish?.kind !== 'stop' || !text.trim()) throw Object.assign(new Error(`DSH 自主观看决策未完整返回（${finish?.kind || '缺少完成标记'}），未执行动作。`), { usage, code:'WATCH_DECISION_INCOMPLETE' });
+    if (finish?.kind !== 'stop' || !text.trim()) throw Object.assign(new Error(`DSH ${purpose === 'chat' ? '聊天回复' : '自主观看决策'}未完整返回（${finish?.kind || '缺少完成标记'}），未执行动作。本次生成上限 ${maxTokens} Token。`), { usage, code:'WATCH_DECISION_INCOMPLETE', maxTokens, finishKind: finish?.kind || null, outputCharacters: text.length });
     return {text,usage};
   };
 }

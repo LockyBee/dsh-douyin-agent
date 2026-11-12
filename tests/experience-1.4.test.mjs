@@ -59,10 +59,11 @@ test('主题设置显式保存、跨入口读取，损坏不覆盖；首条主�
   const f = fixture(t); assert.throws(() => f.topics.configure({ mode: 'topic', topics: ['猫咪'], exclude: [] }));
   f.topics.configure({ mode: 'topic', topics: ['猫咪'], exclude: ['广告'] }, { explicit: true }); assert.deepEqual(new WatchOptions(f).state().policy.topics, ['猫咪']);
   f.video.markSession('api', { explicit: true }); const calls = [], id = '1234567890123';
-  const controller = { async execute(name,args) { calls.push({name,args}); if (name === 'douyin_search') return { searchResults: [{ index: 2, id }] }; if (name === 'douyin_observe') throw new Error('合成采样终止'); return { video: { id, paused: false } }; }, async pauseForLimits() {} };
+  const controller = { async execute(name,args) { calls.push({name,args}); if (name === 'douyin_search') return { searchResults: [{ index: 2, id }] }; if (name === 'douyin_observe') throw new Error('合成采样终止'); return { url: `https://www.douyin.com/video/${id}`, video: { id, paused: false, readyState: 4 } }; }, async pauseForLimits() {} };
   const watch = new AutonomousWatch({ controller, videoLimits: f.video, personaMemory: { context: () => '' }, stateDir: f.stateDir, config: { apiKey: 'synthetic-key' }, now: f.now });
   watch.start({}, { explicit: true }); await watch.completion;
   assert.deepEqual(calls.find(item => item.name === 'douyin_search').args, { query: '猫咪' }); assert.deepEqual(calls.find(item => item.name === 'douyin_open_video').args, { index: 2 }); assert.equal(watch.state().running, false);
+  assert.ok(calls.some(item => item.name === 'douyin_observe'));
   fs.writeFileSync(f.topics.file, '{'); assert.throws(() => f.topics.configure({ mode: 'recommend', topics: [], exclude: [] }, { explicit: true })); assert.equal(fs.readFileSync(f.topics.file,'utf8'), '{');
 });
 test('自检可报告缺少 Node，错误不回显凭据路径，不修改已有设置也不启动模型或浏览器', async t => {

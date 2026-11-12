@@ -21,6 +21,14 @@ function fixture(options={}) {
   const attachments={saveImages:async images=>{saved.push(images);return[{attachmentId:'synthetic-ref',mediaType:'image/png',bytes:Buffer.from(PNG,'base64').length,width:1,height:1}];}};
   return{llm,agent,attachments,requests,saved,provider:createNativeWatchDecision({llm,agent,attachments})};
 }
+test('原生聊天模型无图片能力时只交文字和不可见说明，不上传画面也不中断回复', async () => {
+  const f = fixture({ resolveModelInfo: async () => ({ inputModalities: ['text'] }) });
+  const provider = createNativeWatchDecision({ llm: f.llm, agent: f.agent, attachments: f.attachments, purpose: 'chat', maxTokens: 512 });
+  await provider({ system: WATCH_SYSTEM_PROMPT, messages: watchDecisionMessages(observation()) });
+  assert.equal(f.requests.length, 1); assert.equal(f.saved.length, 0);
+  assert.ok(f.requests[0].messages.flatMap(message => message.content).every(part => part.type === 'text'));
+  assert.ok(JSON.stringify(f.requests[0].messages).includes('你没有看到这张图')); assert.ok(!JSON.stringify(f.requests[0].messages).includes(PNG));
+});
 test('真实决策消息通过原生适配：核对system、转换附件、沿用当前模型路由与用量',async()=>{
   const f=fixture(),controller=new AbortController();
   const result=await f.provider({system:WATCH_SYSTEM_PROMPT,messages:watchDecisionMessages(observation(),{context:'合成人格'}),signal:controller.signal});
@@ -38,6 +46,14 @@ test('原生失败或截断返回不当作成功决策，block-end正文也能�
   for(const kind of ['error','max-tokens','aborted']){const f=fixture({async *stream(){yield{type:'text-delta',index:0,text:JSON.stringify(decision())};yield{type:'finish',reason:{kind}};}});await assert.rejects(f.provider({system:WATCH_SYSTEM_PROMPT,messages:watchDecisionMessages(observation())}),/未完整返回/);}
   const f=fixture({async *stream(){yield{type:'block-end',index:0,block:{type:'text',text:JSON.stringify(decision())}};yield{type:'finish',reason:{kind:'stop'}};}});
   assert.deepEqual(JSON.parse((await f.provider({system:WATCH_SYSTEM_PROMPT,messages:watchDecisionMessages(observation())})).text),decision());
+});
+test('截断诊断记录实际上限并区分聊天512和观看1200，不隐藏重试或执行残缺文本', async () => {
+  for (const [purpose, maxTokens] of [['watch', 1200], ['chat', 512]]) {
+    const f = fixture({ async *stream(input) { f.requests.push(input); yield { type: 'text-delta', index: 0, text: JSON.stringify(decision()) }; yield { type: 'usage', usage: { inputTokens: 10, outputTokens: maxTokens } }; yield { type: 'finish', reason: { kind: 'max-tokens' } }; } });
+    const provider = createNativeWatchDecision({ llm: f.llm, agent: f.agent, attachments: f.attachments, purpose, maxTokens });
+    await assert.rejects(provider({ system: WATCH_SYSTEM_PROMPT, messages: watchDecisionMessages(observation()) }), error => error.code === 'WATCH_DECISION_INCOMPLETE' && error.maxTokens === maxTokens && error.finishKind === 'max-tokens' && error.usage.completion_tokens === maxTokens && error.message.includes(purpose === 'chat' ? '聊天回复' : '自主观看'));
+    assert.equal(f.requests.length, 1); assert.equal(f.requests[0].maxTokens, maxTokens);
+  }
 });
 
 test('当前路由声明off能力时仅本次短回复关闭思考，文本和图片保持原上限与附件', async () => {

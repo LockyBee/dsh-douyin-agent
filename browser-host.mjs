@@ -1,4 +1,5 @@
-import { mkdirSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
@@ -113,18 +114,29 @@ export async function installNativeFocusReset(context, { onFailure = () => {}, t
 export async function runBrowserHost({ profile, controlDir, port, chromiumImpl = chromium, probeInstallation = probeEdgeInstallation, logger = console, processImpl = process } = {}) {
   if (!profile || !controlDir || !Number.isInteger(port) || port < 1024 || port > 65535) return { started: false, exitCode: 2 };
   mkdirSync(controlDir, { recursive: true });
-  const stateFile = path.join(controlDir, 'browser.json'); let context, installation, focusFailed = false;
-  const writeState = (ready, extra = {}) => {
+  const stateFile = path.join(controlDir, 'browser.json'), startedAt = Date.now(), instanceId = randomUUID(); let context, installation, focusFailed = false, closed = false, exited = false, readyPublished = false;
+  const writeState = (ready, extra = {}, initial = false) => {
+    if (!initial) {
+      let owner; try { owner = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { return false; }
+      if (owner.instanceId !== instanceId || owner.pid !== processImpl.pid || owner.profile !== profile || owner.port !== port) return false;
+    }
     const temporary = `${stateFile}.${processImpl.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ pid: processImpl.pid, profile, port, ready, startedAt: Date.now(), ...extra }));
+    writeFileSync(temporary, JSON.stringify({ pid: processImpl.pid, profile, port, ready, startedAt, instanceId, ...extra }));
     renameSync(temporary, stateFile);
+    return true;
   };
+  const exit = code => { if (!exited) { exited = true; processImpl.exit(code); } };
   try {
-    writeState(false);
+    writeState(false, {}, true);
     try { installation = await probeInstallation(); } catch {}
     context = await chromiumImpl.launchPersistentContext(profile, {
       channel: 'msedge', headless: false, viewport: null, ignoreDefaultArgs: ['--mute-audio'],
       args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--autoplay-policy=no-user-gesture-required'],
+    });
+    context.on('close', () => {
+      closed = true;
+      try { writeState(false, { closedAt: Date.now(), ...(focusFailed ? { launchFailure: { code: 'EDGE_FOCUS_RESET_FAILED', message: '宿主焦点检查失败，专用浏览器已退出。' } } : {}) }); } catch {}
+      exit(focusFailed || !readyPublished ? 1 : 0);
     });
     const nativeFocus = await installNativeFocusReset(context, { onFailure: error => {
       focusFailed = true;
@@ -132,7 +144,7 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
       void (async () => {
         let persisted = false;
         for (let attempt = 0; attempt < 10; attempt++) {
-          try { writeState(false, { launchFailure: { ...failure, at: Date.now() } }); persisted = true; break; } catch {}
+          try { if (writeState(false, { launchFailure: { ...failure, at: Date.now() } })) { persisted = true; break; } } catch {}
           await new Promise(resolve => setTimeout(resolve, 25));
         }
         try { logger.error(failure.message + (failure.details ? '\n' + failure.details : '')); } catch {}
@@ -140,10 +152,10 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
       })().catch(() => {});
     } });
     nativeFocus.assertHealthy();
-    writeState(true, { browserVersion: versionOf(installation?.version) });
+    if (closed || !writeState(true, { browserVersion: versionOf(installation?.version) })) throw new Error('专用浏览器已退出或宿主归属已变化。');
+    readyPublished = true;
     logger.log('专用抖音 Edge 已启动。');
-    context.on('close', () => processImpl.exit(focusFailed ? 1 : 0));
-    for (const signal of ['SIGINT', 'SIGTERM']) processImpl.on(signal, () => context.close().finally(() => processImpl.exit(0)));
+    for (const signal of ['SIGINT', 'SIGTERM']) processImpl.on(signal, () => context.close().finally(() => exit(0)));
     return { started: true, exitCode: 0 };
   } catch (error) {
     try { await context?.close(); } catch {}

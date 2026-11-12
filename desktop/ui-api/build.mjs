@@ -8,7 +8,9 @@ const parent = createRequire(new URL('../package.json', import.meta.url));
 const local = createRequire(new URL('./package.json', import.meta.url));
 const { version } = JSON.parse(await fs.readFile(path.join(root, '../package.json'), 'utf8'));
 const { build } = parent('esbuild');
-const upstream = path.resolve(root, '../.cache/upstream/fb2c4b9e698e30edb738bca4cf0618587db7d203');
+const builtAt = new Date().toISOString();
+const buildDate = new Intl.DateTimeFormat('zh-CN', { timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23' }).format(new Date(builtAt)).replaceAll('/', '-');
+const upstream = await fs.realpath(path.resolve(root, '../.cache/upstream/fb2c4b9e698e30edb738bca4cf0618587db7d203'));
 const packages = path.join(upstream, 'packages/client');
 await fs.mkdir(path.join(root, 'dist'), { recursive: true });
 const result = await build({
@@ -19,11 +21,11 @@ const result = await build({
     ...Object.fromEntries(['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/client'].map(name => [name, local.resolve(name)])) },
   nodePaths: [path.join(root, 'node_modules')],
   loader: { '.png':'file', '.svg':'file', '.woff': 'file', '.woff2': 'file', '.ttf': 'file' }, assetNames: 'assets/[name]-[hash]',
-  define: { 'process.env.NODE_ENV': '"production"', __APP_VERSION__: JSON.stringify(version) }, minify: true, legalComments: 'inline', metafile: true,
+  define: { 'process.env.NODE_ENV': '"production"', __APP_VERSION__: JSON.stringify(version), __APP_BUILD_DATE__: JSON.stringify(buildDate) }, minify: true, legalComments: 'inline', metafile: true,
 });
 const forbidden = Object.keys(result.metafile.inputs).filter(file => /(?:cordis|ui-renderer|dsh-app-boot|dsh-client-connection)[/\\]/.test(file));
 if (forbidden.length) throw new Error('独立前端意外引入 DSH 运行服务。');
 await fs.copyFile(path.join(root, 'index.html'), path.join(root, 'dist/index.html'));
 const licenses = await writeDependencyNotices({ metafile: result.metafile, projectRoot: root, upstreamRoot: upstream, workingDirectory: process.cwd() });
-await fs.writeFile(path.join(root, 'dist/build-info.json'), JSON.stringify({ version, upstreamCommit: 'fb2c4b9e698e30edb738bca4cf0618587db7d203', primitives: true, cordisRuntime: false, files: Object.keys(result.metafile.outputs).length, licenses }, null, 2) + '\n');
+await fs.writeFile(path.join(root, 'dist/build-info.json'), JSON.stringify({ version, builtAt, buildDate, upstreamCommit: 'fb2c4b9e698e30edb738bca4cf0618587db7d203', primitives: true, cordisRuntime: false, files: Object.keys(result.metafile.outputs).length, licenses }, null, 2) + '\n');
 console.log('独立 React 界面已构建，复用官方组件；不含 DSH Host 或 Cordis 运行服务。');

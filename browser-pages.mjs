@@ -18,7 +18,7 @@ export async function findSharedPage(browser, source, signal) {
   const aliases = browserPageAliases(source), matches = [];
   for (const page of browser.contexts().flatMap(context => context.pages())) {
     signal?.throwIfAborted();
-    if (page.isClosed() || !/^(?:about:blank|https:\/\/www\.douyin\.com(?:\/|$))/.test(page.url())) continue;
+    if (page.isClosed() || !/^(?:about:blank|https:\/\/www\.douyin\.com(?:\/|$))/.test(page.url())&&!/^https:\/\/live\.douyin\.com\/\d{4,30}\/?(?:[?#]|$)/.test(page.url())) continue;
     const label = await page.evaluate(() => window.name).catch(() => null);
     if (aliases.includes(label)) matches.push({ page, label });
   }

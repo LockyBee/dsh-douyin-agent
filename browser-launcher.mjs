@@ -68,7 +68,7 @@ function pauseResult() {
   videos.forEach(video => video.pause());
   return { paused: videos.every(video => video.paused), videos: videos.length };
 }
-function allowedPage(url) { try { return url === 'about:blank' || new URL(url).origin === 'https://www.douyin.com'; } catch { return false; } }
+function allowedPage(url) { try { return url === 'about:blank' || new URL(url).origin === 'https://www.douyin.com'||/^https:\/\/live\.douyin\.com\/\d{4,30}\/?(?:[?#]|$)/.test(url); } catch { return false; } }
 
 // 准备入口只暂停自己命名的页；自主观看存在时只显示原入口。
 export class BrowserLauncher {

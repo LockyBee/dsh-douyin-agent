@@ -31,6 +31,20 @@ async function tempDirectory(t) {
   t.after(async () => { assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^douyin-host-native-focus-/); await fs.rm(root, { recursive: true, force: true, maxRetries: 6, retryDelay: 300 }); });
   return root;
 }
+test('宿主正常退出撤销本实例就绪，旧宿主不覆盖新实例记录', async t => {
+  for (const replaced of [false, true]) {
+    const directory = await tempDirectory(t), context = new FakeContext(), exits = [];
+    await runBrowserHost({ profile: path.join(directory, 'profile'), controlDir: directory, port: 19230, chromiumImpl: { launchPersistentContext: async () => context }, probeInstallation: async () => ({ version: '106.0.1.2' }), logger: { log() {}, error() {} }, processImpl: { pid: process.pid, on() {}, exit: code => exits.push(code) } });
+    const file = path.join(directory, 'browser.json'), original = JSON.parse(await fs.readFile(file, 'utf8'));
+    assert.equal(original.ready, true); assert.ok(original.instanceId);
+    const newer = { ...original, instanceId: 'newer-instance', startedAt: original.startedAt + 1 };
+    if (replaced) await fs.writeFile(file, JSON.stringify(newer));
+    await context.close(); const after = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (replaced) assert.deepEqual(after, newer);
+    else { assert.equal(after.ready, false); assert.equal(after.startedAt, original.startedAt); assert.ok(after.closedAt); }
+    assert.deepEqual(exits, [0]);
+  }
+});
 test('宿主焦点：启动既有页及未来页仅发送关闭模拟命令，保留草稿并detach', async t => {
   const page = new FakePage(), context = new FakeContext([page]), reset = await installNativeFocusReset(context); t.after(() => reset.close());
   const newer = context.add(new FakePage()); await reset.flush(newer);

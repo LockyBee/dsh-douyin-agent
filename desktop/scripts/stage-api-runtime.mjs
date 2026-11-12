@@ -17,6 +17,16 @@ const NODE_LICENSE_SHA256 = '8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b
 const NODE_ARCHIVE_SHA256 = 'f2aa33b35b75aca5f3f7b85675a6f6423201053e9381911e64961f3bda2528ab';
 const DEPENDENCIES = { 'playwright-core': '1.64.0-alpha-1790635538000', yaml: '2.9.0' };
 export const DOMAIN_FILES = Object.freeze([
+  'conversation-memory.mjs',
+  'memory-history.mjs',
+  'memory-policy.mjs',
+  'memory-retrieval.mjs',
+  'qq-history-reader.mjs',
+  'owner-qq-context.mjs',
+  'tone-router.mjs',
+  'tone-examples.json',
+  'runtime-conversation-memory.mjs',
+  'conversation-history-store.mjs',
   'chat-output.mjs',
   'group-video-inbox.mjs',
   'browser-pages.mjs', 'video-storyboard.mjs', 'contact-authorization.mjs', 'friend-interactions.mjs', 'friend-interactions-guard.mjs',

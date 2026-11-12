@@ -24,6 +24,55 @@ function fixture(t, options = {}) {
 const prepare = async (f, limit = 40) => { await f.service.configure({ recipientIds: [contact.id], dailyReplyLimit: limit }); await f.service.start({ schedule: false }); };
 const pixel='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPEkAAAAASUVORK5CYII=';
 
+test('单条表情截图超时只降级该附件，后续文字继续正常回复', async t => {
+  const f = fixture(t); let notes;
+  f.service.observeMessage = async () => { throw Object.assign(new Error('合成截图超时'), { name: 'TimeoutError' }); };
+  f.agent.reply = async value => { notes = value.mediaObservations; return { text: '合成未见图回复' }; };
+  await prepare(f); f.messages.push({ ...message('emoji-timeout', ''), kind: 'emoji', media: { type: 'emoji', requiresVisual: true } }); await f.service.poll();
+  assert.equal(f.sent.length, 1); assert.equal(notes[0].understandingScope, 'single-message-visual-unavailable'); assert.deepEqual(notes[0].frames, []);
+  f.messages.push(message('after-timeout', '新的文字消息')); await f.service.poll(); assert.equal(f.sent.length, 2); assert.equal(f.service.state().contacts[0].status, 'ready');
+});
+
+test('生成后出现未知行时缓存原回复，恢复快照后只发送一次且不重复调用模型', async t => {
+  const f = fixture(t); let calls = 0;
+  f.agent.reply = async () => { calls++; f.messages.push({ id: 'unknown', sender: 'unknown', text: '' }); return { text: '合成缓存回复' }; };
+  await prepare(f); f.messages.push(message('fresh', '新的合成消息')); await f.service.poll();
+  assert.equal(calls, 1); assert.equal(f.sent.length, 0); assert.equal(f.service.state().contacts[0].pending.phase, 'snapshot-wait');
+  await f.service.poll(); await f.service.poll(); assert.equal(calls, 1); assert.equal(f.sent.length, 0);
+  f.messages.pop(); await f.service.poll(); await f.service.poll(); assert.equal(calls, 1); assert.equal(f.sent.length, 1);
+});
+
+test('旧未知前缀含次序和最新端证据时可正常生成并发送', async t => {
+  const f = fixture(t);
+  f.messages.unshift({ id: 'placeholder', sender: 'unknown', direction: 'unknown', text: '', eligibleForReply: false, arrivalClassification: 'baseline', latestEndVerified: true });
+  f.browser.readConversation = async () => ({ conversation: { id: contact.id }, contact: { ...contact }, dayEvidence: { chronology: 'oldest-first', latestEndVerified: true }, messages: f.messages.map(item => ({ ...item, latestEndVerified: true })) });
+  await prepare(f); f.messages.push(message('fresh', '新的合成消息')); await f.service.poll();
+  assert.equal(f.inputs.length, 1); assert.equal(f.sent.length, 1);
+});
+
+test('最终发送锁内出现未知行也复用缓存，过期缓存不发送', async t => {
+  for (const expired of [false, true]) {
+    const f = fixture(t); const read = f.browser.readConversation; let generated = false, reads = 0, calls = 0;
+    f.agent.reply = async () => { generated = true; calls++; return { text: '合成缓存回复' }; };
+    f.browser.readConversation = async (...args) => { if (generated && ++reads === 2) f.messages.push({ id: 'unknown-lock', sender: 'unknown', text: '' }); return read(...args); };
+    await prepare(f); f.messages.push(message('fresh-lock', '新的合成消息')); await f.service.poll();
+    assert.equal(f.sent.length, 0); assert.equal(calls, 1); assert.equal(f.service.state().contacts[0].pending.phase, 'snapshot-wait');
+    await f.service.poll(); assert.equal(calls, 1);
+    if (expired) f.service.watermarks.contacts[contact.id].pending.snapshotExpiresAt = Date.now() - 1;
+    f.messages.pop(); await f.service.poll(); assert.equal(calls, 1); assert.equal(f.sent.length, expired ? 0 : 1);
+  }
+});
+
+test('同一批消息因旧上下文连续变化最多生成三次，新消息仍可继续处理', async t => {
+  const f = fixture(t); let calls = 0;
+  f.agent.reply = async () => { calls++; f.messages[0].text += '旧行变化'; return { text: '不应发送的过期回复' }; };
+  await prepare(f); f.messages.push(message('same-batch', '新的合成消息'));
+  for (let i = 0; i < 7; i++) await f.service.poll();
+  assert.equal(calls, 3); assert.equal(f.sent.length, 0);
+  f.agent.reply = async () => { calls++; return { text: '新消息回复' }; };
+  f.messages.push(message('new-batch', '补充的新消息')); await f.service.poll(); assert.equal(calls, 4); assert.equal(f.sent.length, 1);
+});
+
 test('列表重绘未取得快照时保留水位并等待，下次可靠新消息只回复一次', async t => {
   const f = fixture(t); await prepare(f);
   const read = f.browser.readConversation, before = JSON.parse(fs.readFileSync(f.service.watermarkFile, 'utf8'));
@@ -200,12 +249,16 @@ test('DOM tracker 没有确认新到达资格的消息会暂停，不发给模�
   const f = fixture(t); await prepare(f); f.messages.push({ ...message('old-dom-row', '滚动加载的旧行'), eligibleForReply: false }); await f.service.poll();
   assert.equal(f.inputs.length, 0); assert.equal(f.service.state().contacts[0].status, 'paused'); assert.equal(f.service.state().contacts[0].pending.phase, 'unqualified');
 });
-test('旧窗口与历史分类只更新水位，不暂停、不进入后续新私信上下文', async (t) => {
+test('无法核对的旧未知行先等待，恢复后只回复真正的新私信', async (t) => {
   const f = fixture(t); await prepare(f);
   f.messages.push({ ...message('old-window', '相对时间变化的旧行'), arrivalClassification: 'known-old-window', eligibleForReply: false }, { ...message('old-history', '滚动加载的历史', 'unknown'), arrivalClassification: 'old-history', eligibleForReply: false });
   await f.service.poll(); assert.equal(f.service.state().contacts[0].status, 'ready'); assert.equal(f.inputs.length, 0);
   f.messages.push({ ...message('actual-new', '真正的新消息'), arrivalClassification: 'new-tail' }); await f.service.poll();
+  assert.equal(f.inputs.length, 0); assert.equal(f.sent.length, 0);
+  assert.equal(f.service.state().contacts[0].pending.phase, 'direction-wait');
+  f.messages.splice(f.messages.findIndex(item => item.id === 'old-history'), 1); await f.service.poll();
   assert.equal(f.inputs.length, 1); assert.deepEqual(f.inputs[0].map((item) => item.text), ['真正的新消息']);
+  assert.equal(f.sent.length, 1);
 });
 test('跨进程仅一个回复 worker；另一个入口可按当前 runId 请求停止，旧请求不影响新一轮', async (t) => {
   const f = fixture(t); await f.service.configure({ recipientIds: [contact.id] });

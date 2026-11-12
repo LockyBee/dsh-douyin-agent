@@ -188,6 +188,19 @@ test('活进程锁与坏锁不被抢占，死进程锁可恢复', t => {
   assert.equal(fs.existsSync(short.lockFile), false);
 });
 
+test('Windows短暂拒绝创建人格锁时有限等待后成功，持续拒绝不抢占原锁或改写记忆', t => {
+  const f=fixture(t);f.store.initialize();const open=fs.openSync;
+  try{
+    let attempts=0;fs.openSync=(file,...args)=>{if(file===f.store.lockFile&&++attempts<=2)throw Object.assign(new Error('合成短暂占用'),{code:attempts===1?'EPERM':'EBUSY'});return open(file,...args);};
+    f.store.recordObservation(state(),{source:'api'});assert.equal(f.store.snapshot().recentObservations.length,1);assert.equal(fs.existsSync(f.store.lockFile),false);
+  }finally{fs.openSync=open;}
+  const before=fs.readFileSync(f.store.stateFile),card=fs.readFileSync(f.store.roleCardFile),owner=JSON.stringify({pid:process.pid,nonce:'合成仍在运行的持有者'});fs.writeFileSync(f.store.lockFile,owner);
+  const short=new PersonaMemory({memoryDir:f.memoryDir,lockTimeoutMs:30});
+  try{fs.openSync=(file,...args)=>{if(file===short.lockFile)throw Object.assign(new Error('合成持续拒绝'),{code:'EACCES'});return open(file,...args);};assert.throws(()=>short.initialize(),{code:'PERSONA_BUSY'});}
+  finally{fs.openSync=open;}
+  assert.equal(fs.readFileSync(short.lockFile,'utf8'),owner);assert.deepEqual(fs.readFileSync(short.stateFile),before);assert.deepEqual(fs.readFileSync(short.roleCardFile),card);
+});
+
 test('死锁恢复后两个真实 Node 进程交替写入同一合成兴趣文件，没有丢失或重复主题证据', async t => {
   const f = fixture(t); f.store.initialize();
   fs.writeFileSync(f.store.lockFile, JSON.stringify({ pid: 2147483647, nonce: '合成死锁，多等待者同时恢复' }));

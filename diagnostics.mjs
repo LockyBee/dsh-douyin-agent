@@ -7,7 +7,7 @@ import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs'
 import { probeEdgeInstallation, sanitizeBrowserFailure } from './browser-host.mjs';
 
 const execute = promisify(execFile);
-const VERSION = '1.4.6';
+const VERSION = '1.4.7';
 const REPAIR = 'reapply_silent';
 const resolution = (kind, steps = [], action) => ({ kind, steps, ...(action ? { action } : {}) });
 const automatic = () => resolution('automatic', ['重新连接已核对归属的现有专用浏览器，重新应用已开启的静默设置，再回读窗口和媒体状态。'], REPAIR);

@@ -215,8 +215,8 @@ export async function apply(ctx, config = {}) {
     if (starting && !spark.running && !spark.starting && !spark.busy) spark.setGreetingProvider(createNativeSparkGreeting({ llm: optionalService(ctx, 'llm'), agent: exec.agent }));
     return spark;
   };
-  const watchSchedule = new ScheduledWatch({ source:'dsh', getVideoLimits: async () => (await getController()).limits(), getWatchState: async () => (await getWatch(settingsExec(),false)).state(), stopWatch:async()=> (await getWatch(settingsExec(),false)).stop({explicit:true}), startRound: async ({signal}) => { const watch=await getWatch(settingsExec(true),true); signal.throwIfAborted(); return watch.start({startSession:true},{explicit:true}); } });
-  const friendInteractions=new FriendInteractions({getChat:async()=>(await getController()).getChatService(),getShare:async()=>(await getWatch(settingsExec(),false)).getShareService(),getSpark:async()=>(await getController()).getSparkService(),modelReady:()=>modelSettings.state().configured,startChat:async(chat,{signal})=>{chat.agent.config.model=modelSettings.state().model;chat.setReplyProvider(request=>{chat.agent.config.model=modelSettings.state().model;return createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:settingsExec(true).agent,maxTokens:512})(request);});return chat.start({schedule:true,signal});}});
+  const watchSchedule = new ScheduledWatch({ source:'dsh', getVideoLimits: async () => (await getController()).limits(), getWatchState: async () => (await getWatch(settingsExec(),false)).state(), recoverRound: async () => (await getWatch(settingsExec(),false)).recoverExitedRun(), stopWatch:async()=> (await getWatch(settingsExec(),false)).stop({explicit:true}), startRound: async ({signal}) => { const watch=await getWatch(settingsExec(true),true); signal.throwIfAborted(); return watch.start({startSession:true},{explicit:true}); } });
+  const friendInteractions=new FriendInteractions({getChat:async()=>(await getController()).getChatService(),getShare:async()=>(await getWatch(settingsExec(),false)).getShareService(),getSpark:async()=>(await getController()).getSparkService(),modelReady:()=>modelSettings.state().configured,startChat:async(chat,{signal})=>{chat.agent.config.model=modelSettings.state().model;chat.setReplyProvider(request=>{chat.agent.config.model=modelSettings.state().model;return createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:settingsExec(true).agent,maxTokens:512,purpose:'chat'})(request);});return chat.start({schedule:true,signal});}});
   let diagnostics;
   const getDiagnostics = async () => {
     if (diagnostics) return diagnostics;
@@ -283,7 +283,7 @@ export async function apply(ctx, config = {}) {
           startChat: async () => {
             const chat = await (await getController()).getChatService();
             chat.agent.config.model = modelSettings.state().model;
-            chat.setReplyProvider(createNativeWatchDecision({ llm: optionalService(ctx, 'llm'), attachments: optionalService(ctx, 'attachments'), agent: settingsExec(true).agent, maxTokens: 512 }));
+            chat.setReplyProvider(createNativeWatchDecision({ llm: optionalService(ctx, 'llm'), attachments: optionalService(ctx, 'attachments'), agent: settingsExec(true).agent, maxTokens: 512, purpose: 'chat' }));
             return chat.start();
           },
         }));

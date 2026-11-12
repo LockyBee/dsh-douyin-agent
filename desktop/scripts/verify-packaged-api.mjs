@@ -45,7 +45,10 @@ async function checkIcon(file){const exe=ResEdit.NtExecutable.from(await fs.read
 await checkIcon(executable);await checkIcon(path.join(unpacked,'大肥鱼抖音助手.exe'));
 await fs.writeFile(`${executable}.sha256`, `${sha256}  ${path.basename(executable)}\n`);
 
-const cache = path.join(desktop, '.cache'), directory = await fs.mkdtemp(path.join(cache, 'packaged-api-smoke-'));
+const cache=process.env.DOUYIN_PACKAGED_SMOKE_ROOT||path.join(desktop,'.cache');
+if(!path.isAbsolute(cache))throw new Error('打包验收临时目录必须为绝对路径。');
+await fs.mkdir(cache,{recursive:true});
+const directory=await fs.mkdtemp(path.join(cache,'api-smoke-'));
 assert.equal(path.dirname(directory), cache);
 const userData = path.join(directory, 'user-data'), home = path.join(directory, 'home'), memory = path.join(directory, 'memory');
 const locationFile = path.join(directory, 'runtime-location.json');

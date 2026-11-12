@@ -11,8 +11,21 @@ async function fixture(t,{long=false}={}){
   t.after(async()=>{assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));assert.match(path.basename(directory),/^dy-rcopy-/);await fs.rm(directory,{recursive:true,force:true});});
   return{directory,seedDir,userData,manifestFile,manifest,runtime:path.join(userData,'runtimes',manifest.runtimeId.slice(0,20)),run:()=>prepareApiRuntime({seedDir,userData,manifestFile})};
 }
-test('运行资源完整性：普通复制和缓存复用都匹配完整manifest，包含第41模块',async t=>{
+test('运行资源完整性：普通复制和缓存复用都匹配完整manifest，包含记忆模块与语气JSON',async t=>{
   const f=await fixture(t);assert.equal(await f.run(),f.runtime);assert.deepEqual(await tree(f.runtime),{runtimeId:f.manifest.runtimeId,files:f.manifest.files});assert.ok(await fs.readFile(path.join(f.runtime,'receipt-baseline.mjs')));const before=await fs.readFile(path.join(f.runtime,'.runtime-ready.json'));assert.equal(await f.run(),f.runtime);assert.deepEqual(await fs.readFile(path.join(f.runtime,'.runtime-ready.json')),before);
+});
+const memoryFiles=['conversation-memory.mjs','memory-history.mjs','memory-policy.mjs','memory-retrieval.mjs','qq-history-reader.mjs','tone-router.mjs','tone-examples.json','runtime-conversation-memory.mjs','conversation-history-store.mjs'];
+test('记忆运行资源：领域清单逐项包含九个新增代码与静态JSON文件',()=>{
+  assert.equal(new Set(DOMAIN_FILES).size,DOMAIN_FILES.length);
+  for(const file of memoryFiles)assert.ok(DOMAIN_FILES.includes(file),file);
+});
+test('记忆运行资源：摘要自洽但缺少任一记忆文件仍拒绝生成ready',async t=>{
+  for(const file of memoryFiles){
+    const f=await fixture(t);await fs.unlink(path.join(f.seedDir,file));
+    const current={version:1,...await tree(f.seedDir)};await fs.writeFile(f.manifestFile,JSON.stringify(current));
+    await assert.rejects(f.run(),undefined,file);
+    assert.equal(sync.existsSync(path.join(f.userData,'runtimes',current.runtimeId.slice(0,20),'.runtime-ready.json')),false,file);
+  }
 });
 test('运行资源完整性：Electron长路径实拷贝完整，临时名不长于最终目录',async t=>{
   if(process.platform!=='win32')return t.skip('仅Windows长路径回归');const f=await fixture(t,{long:true});

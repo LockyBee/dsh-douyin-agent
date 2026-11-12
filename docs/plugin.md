@@ -1,16 +1,16 @@
-# DSH 原生抖音插件 1.4.6
+# DSH 原生抖音插件 1.4.7
 
 日常入口是 DSH“设置 → 刷抖音”，通过分类设置操作，不要求在聊天中输入工具名。插件使用 DSH 已配置的主模型；独立软件使用自己的 API Key，两版共用本机人格、兴趣、每日用量、许可名单与收据。
 
 ## 安装与更新
 
-DSH Desktop 在“应用 → 桌面插件”填写 `dsh-douyin-browser-local@1.4.6`，安装或更新后完全退出并重新打开同一份 DSH。Web profile 可执行：
+DSH Desktop 在“应用 → 桌面插件”填写 `dsh-douyin-browser-local@1.4.7`，安装或更新后完全退出并重新打开同一份 DSH。Web profile 可执行：
 
 ```powershell
-dsh plugin --profile web add dsh-douyin-browser-local@1.4.6
+dsh plugin --profile web add dsh-douyin-browser-local@1.4.7
 ```
 
-固定包及校验文件见 [1.4.6 下载页](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.6)，是否可下载以页面为准；npm、GitHub 与社区市场分别同步。需要 Windows、Microsoft Edge 和兼容 DSH，已检查 0.2.0-rc.2、0.2.1-rc.2 两代 SDK，完整允许版本以 `package.json` 的 `engines.dsh` 为准；不保证任意 0.2.x 预发布或第三方宿主。源码安装另需 Node.js 22.13+ 和本仓库依赖，不需要独立软件或 QQ 服务。
+固定包及校验文件见 [1.4.7 下载页](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.7)，是否可下载以页面为准；npm、GitHub 与社区市场分别同步。需要 Windows、Microsoft Edge 和兼容 DSH，已检查 0.2.0-rc.2、0.2.1-rc.2 两代 SDK，完整允许版本以 `package.json` 的 `engines.dsh` 为准；不保证任意 0.2.x 预发布或第三方宿主。源码安装另需 Node.js 22.13+ 和本仓库依赖，不需要独立软件或 QQ 服务。
 
 源码安装在仓库根目录先检查：
 

@@ -11,6 +11,76 @@ let browser;
 before(async () => { browser = await chromium.launch({ channel: 'msedge', headless: true }); });
 after(async () => { await browser?.close(); });
 
+async function stackedConversationFixture({ duplicateBack = false } = {}) {
+  const f = await fixture();
+  await f.page.evaluate(duplicate => {
+    const dialog = document.querySelector('[data-e2e="im-dialog"]');
+    dialog.style.cssText = 'position:relative;width:336px;height:600px';
+    const list = document.createElement('div'); list.setAttribute('data-stack-layer','list'); list.style.cssText = 'position:absolute;inset:0';
+    const rows = [...dialog.querySelectorAll('[data-e2e="conversation-item"]')];
+    for (const row of rows) { row.style.cssText='height:70px';list.append(row); }
+    const chatLayer = document.createElement('div'); chatLayer.setAttribute('data-stack-layer','chat'); chatLayer.style.cssText='position:absolute;inset:0;z-index:2;background:white';
+    const back = document.createElement('button');back.className='StackLayoutStackTitleBarbackBtn';back.textContent='返回会话';back.style.cssText='width:50px;height:35px';
+    chatLayer.append(back,dialog.querySelector('[data-e2e="chat-page"]'));dialog.append(list,chatLayer);
+    window.stackBackClicks=0;window.stackRowClicks=0;
+    back.addEventListener('click',()=>{window.stackBackClicks++;chatLayer.classList.add('StackLayoutStackLayoutV2stackLayerLeaving');setTimeout(()=>{chatLayer.style.display='none';chatLayer.classList.remove('StackLayoutStackLayoutV2stackLayerLeaving');},350);});
+    for(const row of rows)row.addEventListener('click',()=>{window.stackRowClicks++;chatLayer.style.display='block';});
+    if(duplicate){const old=document.createElement('div');old.setAttribute('data-stack-layer','chat');old.style.cssText='position:absolute;inset:0;z-index:0';const stale=back.cloneNode(true);old.append(stale);dialog.prepend(old);}
+  },duplicateBack);
+  return f;
+}
+
+test('窄消息面板先返回列表，等待转场再选择目标，不耗尽本次检查预算', async () => {
+  const f=await stackedConversationFixture();
+  try{
+    const contact=(await f.chat.listContacts({verifyFollowing:false})).contacts.find(c=>c.name==='测试乙');
+    const result=await f.chat.readConversation(contact.id,{allowed:true,signal:AbortSignal.timeout(3500)});
+    assert.equal(result.conversation.id,contact.id);assert.equal(await f.page.evaluate(()=>window.stackBackClicks),1);assert.equal(await f.page.evaluate(()=>window.stackRowClicks),1);assert.equal(await f.page.evaluate(()=>window.sent),0);
+  }finally{await f.chat.close();}
+});
+
+test('旧聊天层残留返回按钮时，只使用唯一实际可点击的返回入口', async () => {
+  const f=await stackedConversationFixture({duplicateBack:true});
+  try{
+    const contact=(await f.chat.listContacts({verifyFollowing:false})).contacts.find(c=>c.name==='测试乙');
+    const result=await f.chat.readConversation(contact.id,{allowed:true,signal:AbortSignal.timeout(3500)});
+    assert.equal(result.conversation.id,contact.id);assert.equal(await f.page.evaluate(()=>window.stackBackClicks),1);assert.equal(await f.page.evaluate(()=>window.sent),0);
+  }finally{await f.chat.close();}
+});
+
+test('聊天导航在utility世界低RAF时仍以可信几何输入完成返回和选人',async()=>{
+  const f=await stackedConversationFixture(),session=await f.page.context().newCDPSession(f.page),contexts=[];
+  try{
+    session.on('Runtime.executionContextCreated',({context})=>{if(context.name.startsWith('__playwright_utility_world_'))contexts.push(context.id);});await session.send('Runtime.enable');assert.ok(contexts.length);
+    for(const contextId of contexts)await session.send('Runtime.evaluate',{contextId,expression:'globalThis.requestAnimationFrame = () => 0;'});
+    const contact=(await f.chat.listContacts({verifyFollowing:false})).contacts.find(c=>c.name==='测试乙');
+    const result=await f.chat.readConversation(contact.id,{allowed:true,signal:AbortSignal.timeout(3500)});
+    assert.equal(result.conversation.id,contact.id);assert.equal(await f.page.evaluate(()=>window.stackBackClicks),1);assert.equal(await f.page.evaluate(()=>window.stackRowClicks),1);assert.equal(await f.page.evaluate(()=>window.sent),0);
+  }finally{await session.detach();await f.chat.close();}
+});
+
+test('会话导航输入前目标替换或遮挡时阻止点击，不重试落到其他会话',async()=>{
+  for(const change of ['marker','overlay']){
+    const f=await fixture();
+    try{
+      const contact=(await f.chat.listContacts({verifyFollowing:false})).contacts[0],row=f.page.locator(`[data-deepseek-chat-id="${contact.id}"]`),click=f.page.mouse.click.bind(f.page.mouse);let attempts=0;
+      await f.page.evaluate(()=>{window.navigationClicks=0;document.querySelector('[data-e2e="conversation-item"]').addEventListener('click',()=>window.navigationClicks++);});
+      f.page.mouse.click=async(x,y)=>{attempts++;await f.page.evaluate(change=>{if(change==='marker')document.querySelector('[data-e2e="conversation-item"]').setAttribute('data-deepseek-chat-id','changed');else{const overlay=document.createElement('button');overlay.style.cssText='position:fixed;inset:0;z-index:9999';overlay.addEventListener('click',()=>window.navigationClicks++);document.body.append(overlay);}},change);return click(x,y);};
+      await assert.rejects(f.chat.clickNavigation(f.page,row),error=>error.code==='CHAT_SNAPSHOT_CHANGED'&&error.beforeInput===false);
+      assert.equal(attempts,1);assert.equal(await f.page.evaluate(()=>window.navigationClicks),0);assert.equal(await f.page.evaluate(()=>Object.keys(window.__dafeiyuChatNavigation||{}).length),0);assert.equal(await f.page.evaluate(()=>window.sent),0);
+    }finally{await f.chat.close();}
+  }
+});
+
+test('读取前头部短暂重绘只等待，不读取其他会话或把许可会话永久暂停',async()=>{
+  const f=await fixture();
+  try{
+    const contact=(await f.chat.listContacts({verifyFollowing:false})).contacts[0],original=f.page.evaluate.bind(f.page);let changed=false;
+    f.page.evaluate=async(reader,arg)=>{if(reader===readConversationDom&&!changed){changed=true;await original(()=>{const header=document.querySelector('.StackLayoutStackChatHeaderuser');header.style.display='none';setTimeout(()=>header.style.display='',250);});}return original(reader,arg);};
+    const result=await f.chat.readConversation(contact.id,{allowed:true});assert.equal(result.conversation.id,contact.id);assert.ok(result.messages.length);assert.equal(await original(()=>window.sent),0);
+  }finally{await f.chat.close();}
+});
+
 test('消息列表变化只重取一次快照，持续变化仍拒绝读取且不发送', async () => {
   const f = await fixture();
   try {
@@ -89,6 +159,49 @@ async function virtualContactFixture() {
   f.chat.following = []; f.chat.relationshipDiscovery = { status: 'unavailable', code: 'FOLLOWING_LIST_UNAVAILABLE' };
   return f;
 }
+
+test('读取联系人默认不跳主页或个人页核对关注，保留当前许可会话', async () => {
+  const f = await fixture();
+  try {
+    let probes = 0; f.chat.following = null; f.chat.verifyFollowing = async () => { probes++; throw new Error('不应自动跳转'); };
+    const listed = await f.chat.listContacts(); assert.ok(listed.contacts.length >= 2); assert.equal(probes, 0);
+  } finally { await f.chat.close(); }
+});
+test('显式许可的弱身份群可核对全角成员数与界面计数后缀，仍不改许可类型', async () => {
+  const f = await fixture();
+  try {
+    await f.page.evaluate(() => {
+      const row = document.querySelector('[data-e2e="conversation-item"]'), header = document.querySelector('.StackLayoutStackChatHeaderuser');
+      row.removeAttribute('data-conversation-id'); header.removeAttribute('data-conversation-id'); row.setAttribute('data-conversation-type', 'group'); header.setAttribute('data-conversation-type', 'group');
+      row.querySelector('.conversationConversationItemtitle').textContent = '合成许可群';
+      row.addEventListener('click', () => { header.setAttribute('data-conversation-type', 'group'); header.querySelector('.StackLayoutStackChatHeadertitle').textContent = '合成许可群（8） | 128'; });
+    });
+    const contact = (await f.chat.listContacts({ verifyFollowing: false })).contacts[0];
+    const result = await f.chat.readConversation(contact.id, { allowed: true, weak: true }); assert.equal(result.conversation.isGroup, true); assert.equal(result.conversation.id, contact.id);
+    assert.equal(await f.page.evaluate(() => window.sent), 0);
+  } finally { await f.chat.close(); }
+});
+test('列表重排点开其他稳定会话时只重新定位一次，匹配后才读取目标正文', async () => {
+  const f = await fixture();
+  try {
+    const contact = (await f.chat.listContacts({ verifyFollowing: false })).contacts[0];
+    await f.page.evaluate(() => {
+      window.selectionRaceClicks = 0; const header = document.querySelector('.StackLayoutStackChatHeaderuser'); header.setAttribute('data-conversation-id', 'test-b');
+      document.querySelector('[data-e2e="conversation-item"]').addEventListener('click', () => { if (++window.selectionRaceClicks === 1) { header.setAttribute('data-conversation-id', 'test-b'); header.querySelector('.StackLayoutStackChatHeadertitle').textContent = '测试乙'; } });
+    });
+    const result = await f.chat.readConversation(contact.id, { allowed: true }); assert.equal(result.conversation.id, contact.id); assert.equal(await f.page.evaluate(() => window.selectionRaceClicks), 2); assert.equal(await f.page.evaluate(() => window.sent), 0);
+  } finally { await f.chat.close(); }
+});
+test('会话列表到达底部后等待延迟加载，不把短暂稳定当成全部读取完成', async () => {
+  const f = await virtualContactFixture();
+  try {
+    await f.page.evaluate(() => {
+      const viewport = document.querySelector('[data-e2e="conversation-list"]'); let scheduled = false;
+      viewport.addEventListener('scroll', () => { if (scheduled || viewport.scrollTop < viewport.scrollHeight - viewport.clientHeight - 2) return; scheduled = true; setTimeout(() => { window.syntheticContacts.push({ id: 'synthetic-late-contact', name: '合成迟到会话', type: 'direct', avatar: 'https://fixture.local/late.png' }); window.renderSyntheticContactList(); }, 700); });
+    });
+    const result = await f.chat.listContacts({ verifyFollowing: false }); assert.ok(result.contacts.some(item => item.name === '合成迟到会话'));
+  } finally { await f.chat.close(); }
+});
 
 async function fixture() {
   const page = await browser.newPage();
@@ -311,7 +424,7 @@ test('关注面板缺失时返回已有会话和明确的未确认关系，不�
     await page.exposeFunction('countSyntheticFollow', () => { followClicks += 1; });
     await page.route('https://www.douyin.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<!doctype html><html><body><a href="https://www.douyin.com/user/synthetic-self"><span>我的</span></a><button data-e2e="user-info-follow" onclick="window.countSyntheticFollow()">关注 31</button>${html}</body></html>` }));
     chat.following = null;
-    const result = await chat.listContacts();
+    const result = await chat.listContacts({ verifyFollowing: true });
     assert.equal(result.relationshipDiscovery.status, 'unavailable');
     assert.equal(result.relationshipDiscovery.code, 'FOLLOWING_LIST_UNAVAILABLE');
     assert.equal(followClicks, 2);
@@ -1574,6 +1687,48 @@ async function groupSendScopeFixture({ mode = 'delimiter', decoyRoot = false } =
   assert.equal(contact.isGroup, true); assert.equal(contact.identityVerified, true); assert.equal(before.conversation.isGroup, true);
   return { ...f, contact };
 }
+
+test('群身份长短ID分开核对，明确原型别名可读但冲突和getter不放行', async () => {
+  const f = await fixture();
+  try {
+    const html = await f.page.content();
+    await f.page.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: html }));
+    await f.page.goto('https://www.douyin.com/');
+    await f.page.evaluate(() => {
+      const row = document.querySelector('[data-e2e="conversation-item"]'), header = document.querySelector('.StackLayoutStackChatHeaderuser'), root = document.querySelector('[data-e2e="chat-page"]');
+      for (const node of [row, header, root]) { node.setAttribute('data-conversation-type', 'group'); node.setAttribute('data-conversation-id', '8123456789012345678'); node.setAttribute('data-conversation-short-id', '7123456789012345678'); }
+      for (const node of [row, header]) { const prototype = Object.create(null); Object.defineProperties(prototype, { conversationId: { value: '8123456789012345678', configurable: true }, conversationShortId: { value: '7123456789012345678', configurable: true } }); Object.defineProperty(node, '__reactProps$aliasTest', { configurable: true, value: { children: [{ props: { conversation: Object.create(prototype) } }] } }); }
+      window.aliasGetterCalls = 0;
+    });
+    const listed = (await f.page.evaluate(readContactDom))[0], identity = await f.page.evaluate(readChatIdentityDom), snapshot = await f.page.evaluate(readConversationDom);
+    assert.equal(listed.identityConflict, false); assert.ok(listed.identityKey);
+    assert.equal(identity.identityConflict, false); assert.equal(identity.identityUnavailable, false); assert.equal(identity.identityKey, listed.identityKey);
+    assert.equal(snapshot.identityConflict, false);
+    await f.page.evaluate(() => document.querySelector('[data-e2e="chat-page"]').setAttribute('data-conversation-short-id', '9999999999999999999'));
+    assert.equal((await f.page.evaluate(readChatIdentityDom)).identityConflict, true);
+    assert.equal((await f.page.evaluate(readConversationDom)).identityConflict, true);
+    await f.page.evaluate(() => {
+      document.querySelector('[data-e2e="chat-page"]').setAttribute('data-conversation-short-id', '7123456789012345678');
+      const header = document.querySelector('.StackLayoutStackChatHeaderuser'), model = header.__reactProps$aliasTest.children[0].props.conversation;
+      Object.defineProperty(Object.getPrototypeOf(model), 'conversationId', { get() { window.aliasGetterCalls++; return '8123456789012345678'; } });
+    });
+    assert.equal((await f.page.evaluate(readChatIdentityDom)).identityConflict, true); assert.equal(await f.page.evaluate(() => window.aliasGetterCalls), 0);
+  } finally { await f.chat.close(); }
+});
+
+test('只忽略明确的空分隔占位，保留有真实附件或原生消息绑定的未知行', async () => {
+  const f = await fixture();
+  try {
+    const initial = (await f.page.evaluate(readConversationDom)).messages.length;
+    await f.page.evaluate(() => {
+      const list = document.getElementById('message-list');
+      list.insertAdjacentHTML('beforeend', '<div data-e2e="msg-item-content" role="separator" style="width:10px;height:2px"></div>');
+    });
+    assert.equal((await f.page.evaluate(readConversationDom)).messages.length, initial);
+    await f.page.evaluate(() => document.querySelector('[role="separator"]').insertAdjacentHTML('beforeend', '<img src="data:image/png;base64,iVBORw0KGgo=" style="width:10px;height:10px">'));
+    assert.equal((await f.page.evaluate(readConversationDom)).messages.length, initial + 1);
+  } finally { await f.chat.close(); }
+});
 
 test('群发送范围：稳定群ID相同但逗号格式、成员顺序或群名变化仍只可信发送一次', async () => {
   for (const mode of ['delimiter', 'reordered', 'renamed']) {

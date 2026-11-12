@@ -1,7 +1,8 @@
+import { createRuntimeConversationMemory, memoryContactFromToken } from './runtime-conversation-memory.mjs';
 import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, unlinkSync, statSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { MemoryStore } from './memory.mjs?v=2';
@@ -223,11 +224,38 @@ async function version() {
     return response.ok && /(?:Edg|Chrome)/.test((await response.json()).Browser ?? '');
   } catch { return false; }
 }
+export function sameBrowserProfile(left, right, platform = process.platform) {
+  if (typeof left !== 'string' || !left || typeof right !== 'string' || !right) return false;
+  const normalize = value => platform === 'win32' ? path.win32.resolve(value).toLowerCase() : path.resolve(value);
+  return normalize(left) === normalize(right);
+}
+async function processBirthTime(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return null;
+  if (pid === process.pid) return Date.now() - process.uptime() * 1000;
+  const win = process.platform === 'win32';
+  const executable = win ? path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe') : 'ps';
+  const args = win ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$p=[System.Diagnostics.Process]::GetProcessById([int]$env:DOUYIN_PROBE_PID); ([DateTimeOffset]$p.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()'] : ['-p', String(pid), '-o', 'lstart='];
+  try {
+    const stdout = await new Promise((resolve, reject) => execFile(executable, args, { env: { ...process.env, DOUYIN_PROBE_PID: String(pid) }, windowsHide: true, timeout: 8000, maxBuffer: 2048 }, (error, output) => error ? reject(error) : resolve(output)));
+    const value = win ? Number(String(stdout).trim()) : Date.parse(String(stdout).trim());
+    return Number.isFinite(value) && value > 0 ? value : null;
+  } catch { return null; }
+}
+export async function dedicatedHostPlan(state, { profile, port, endpointReady = false, processAlive = alive, readProcessBirth = processBirthTime } = {}) {
+  let owned = sameBrowserProfile(state?.profile, profile) && state?.port === port && Number.isSafeInteger(state?.pid) && state.pid > 0 && processAlive(state.pid);
+  if (owned) {
+    const birth = await readProcessBirth(state.pid);
+    if (!Number.isFinite(birth)) return 'unverified';
+    if (Number.isFinite(birth) && (!Number.isFinite(state.startedAt) || birth > state.startedAt + 100)) owned = false;
+  }
+  if (endpointReady) return owned && state.ready === true ? 'connect' : 'foreign';
+  return owned ? 'wait' : 'launch';
+}
 export function dedicatedHostReadiness(state, { pid, profile, port, processAlive = alive } = {}) {
   if (!Number.isSafeInteger(pid) || pid < 1 || !processAlive(pid)) return 'failed';
   // 新宿主写入前可能仍读到旧的已退出记录；只核对本次等待的进程。
   if (!state || state.pid !== pid) return 'pending';
-  if (state.profile !== profile || state.port !== port) return 'foreign';
+  if (!sameBrowserProfile(state.profile, profile) || state.port !== port) return 'foreign';
   return state.ready === true ? 'ready' : 'pending';
 }
 async function endpoint(signal) {
@@ -236,13 +264,12 @@ async function endpoint(signal) {
     const stateFile = path.join(CONTROL, 'browser.json');
     let state;
     try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { /* 首次运行没有状态。 */ }
-    const owned = state?.profile === PROFILE && state.port === PORT && alive(state.pid);
-    if (await version()) {
-      if (!owned || !state.ready) throw new Error('9227 端口不属于本工具的专用浏览器，请先释放端口。');
-      return `http://127.0.0.1:${PORT}`;
-    }
+    const plan = await dedicatedHostPlan(state, { profile: PROFILE, port: PORT, endpointReady: await version() });
+    if (plan === 'unverified') throw Object.assign(new Error('专用浏览器宿主启动时间暂时无法核实，请稍后重试或运行一键自检；未重复打开窗口。'), { code: 'BROWSER_HOST_IDENTITY_UNVERIFIED' });
+    if (plan === 'foreign') throw new Error('9227 端口不属于本工具的专用浏览器，请先释放端口。');
+    if (plan === 'connect') return `http://127.0.0.1:${PORT}`;
     let hostPid = state?.pid;
-    if (!owned) {
+    if (plan === 'launch') {
       const output = openSync(path.join(CONTROL, 'browser-host.log'), 'a');
       try {
         const child = spawn(resolveNodeExecutable(), [path.join(ROOT, 'browser-host.mjs'), PROFILE, CONTROL, String(PORT)], {
@@ -268,7 +295,8 @@ async function endpoint(signal) {
 
 // 此函数仅读取网页 DOM 和 HTMLVideoElement，不调用抖音私有接口。
 export function readPageState() {
-  if(location.origin!=='https://www.douyin.com') return {
+  const directLive=location.origin==='https://live.douyin.com'&&/^\/\d{4,30}\/?$/.test(location.pathname);
+  if(location.origin!=='https://www.douyin.com'&&!directLive) return {
     url:null,title:null,video:null,searchResults:[],visibleText:'',loginRequired:false,verificationRequired:false,
     unsupportedPage:true,note:'当前专用标签页已离开抖音，没有读取该页面内容。',
   };
@@ -279,7 +307,7 @@ export function readPageState() {
   const clean = value => (value ?? '').replace(/\s+/g, ' ').trim();
   const boundedAuthor = value => { const name = clean(value).replace(/^@\s*/, ''); return name && name.length <= 256 && !name.includes('\0') ? name : null; };
   const workId = value => {
-    try { const u = new URL(value, location.href); return /\/video\/(\d+)/.exec(u.pathname)?.[1] || u.searchParams.get('modal_id') || u.searchParams.get('aweme_id'); } catch { return null; }
+    try { const u = new URL(value, location.href); return /\/(?:video|note)\/(\d+)/.exec(u.pathname)?.[1] || u.searchParams.get('modal_id') || u.searchParams.get('aweme_id'); } catch { return null; }
   };
   const privateArea='[data-e2e="im-dialog"],[data-e2e="conversation-item"]';
   const privateChatVisible=[...document.querySelectorAll('[data-e2e="im-dialog"]')].some(visible);
@@ -288,7 +316,9 @@ export function readPageState() {
     for(let node=element;node;node=node.parentElement)if(Number(getComputedStyle(node).opacity)===0)return false;
     return true;
   };
-  const videoElements = [...document.querySelectorAll('video')].filter(e=>videoVisible(e)&&!e.closest(privateArea)).map(element => {
+  const noteRoots=[...document.querySelectorAll('[data-e2e="note-detail"],[data-e2e="image-detail"]')].filter(visible),noteRoot=noteRoots.length===1&&/^\/(?:video|note)\/\d+/.test(location.pathname)?noteRoots[0]:null;
+  const notePlayer=noteRoot?.querySelector('[data-e2e="player-container"].note-detail-container')||noteRoot;
+  const videoElements = [...document.querySelectorAll('video')].filter(e=>videoVisible(e)&&!e.closest(privateArea)&&(!notePlayer||notePlayer.contains(e))).map(element => {
     const r = element.getBoundingClientRect();
     return { element, area: Math.max(0, Math.min(innerWidth, r.right) - Math.max(0, r.left)) * Math.max(0, Math.min(innerHeight, r.bottom) - Math.max(0, r.top)) };
   }).sort((a,b) => b.area - a.area);
@@ -325,19 +355,74 @@ export function readPageState() {
       viewport: { x: Math.max(0,r.left), y: Math.max(0,r.top), width: Math.min(innerWidth,r.right)-Math.max(0,r.left), height: Math.min(innerHeight,r.bottom)-Math.max(0,r.top) } };
   }
   const route = new URL(location.href);
-  const recommendFeed = ['/', '/recommend', '/recommend/'].includes(route.pathname) && !workId(route.href);
-  const feedCards = [...document.querySelectorAll('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"]')].filter(e => visible(e) && !e.closest(privateArea));
+  const recommendFeed = ['/', '/recommend', '/recommend/', '/jingxuan', '/jingxuan/'].includes(route.pathname) && !workId(route.href);
+  const feedCards = [...document.querySelectorAll('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"],[data-e2e="note-detail"],[data-e2e="image-detail"]')].filter(e => visible(e) && !e.closest(privateArea));
   if (!activeContainer && feedCards.length === 1) activeContainer = feedCards[0];
+  if(!activeContainer&&noteRoot)activeContainer=noteRoot;
+  let imagePost=null;
+  const imagePostMarker=activeContainer&&(activeContainer.matches('[data-e2e="note-detail"],[data-e2e="image-detail"]')||/^\/note\//.test(route.pathname)||activeContainer.querySelector('.dySwiperSlide,[data-e2e="photo-image"],[data-e2e="note-image"],[class*="ImageSwiper"],[class*="image-post"],[class*="imagePost"],[class*="note-content"]'));
+  const declaredLiveCard=activeContainer?.getAttribute('data-live-status')==='live'&&/^\d{4,30}$/.test(activeContainer.getAttribute('data-room-id')||activeContainer.getAttribute('data-live-room-id')||'');
+  if(!element&&activeContainer&&imagePostMarker&&!declaredLiveCard&&(feedCards.length===1||activeContainer===noteRoot)&&!privateChatVisible&&!loginRequired&&!verificationRequired){
+    const imageContainer=activeContainer===noteRoot?notePlayer:activeContainer;
+    const ids=new Set([/(?:^|\s)video_(\d{10,30})(?:\s|$)/.exec(activeContainer.className??'')?.[1],activeContainer.getAttribute('data-aweme-id'),...([...imageContainer.querySelectorAll('a[href]')].filter(link=>visible(link)&&new URL(link.href).origin==='https://www.douyin.com'&&!/\/user\//.test(link.href)).map(link=>workId(link.href))),activeContainer===noteRoot?workId(route.href):/^\/note\//.test(route.pathname)?workId(route.href):null].filter(id=>typeof id==='string'&&/^\d{10,30}$/.test(id)));
+    const images=[...imageContainer.querySelectorAll('img')].filter(image=>{
+      if(!videoVisible(image)||!image.complete||image.naturalWidth<120||image.naturalHeight<120)return false;
+      for(let node=image;node&&node!==activeContainer;node=node.parentElement)if(/blur\(/.test(getComputedStyle(node).filter))return false;
+      const r=image.getBoundingClientRect();if(r.width<120||r.height<120)return false;
+      const hit=document.elementFromPoint((Math.max(0,r.left)+Math.min(innerWidth,r.right))/2,(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2);
+      const slide=image.closest('.dySwiperSlide');
+      return Boolean(hit&&(hit===image||image.contains(hit)||slide&&hit.closest('.dySwiperSlide')===slide||slide&&activeContainer.contains(hit)&&hit.closest('.xg-icon-play')));
+    });
+    if(ids.size===1&&images.length===1){
+      const image=images[0],r=image.getBoundingClientRect(),id=[...ids][0];
+      const marker=value=>{let a=2166136261,b=2246822519;for(const char of value){a=Math.imul(a^char.charCodeAt(0),16777619);b=Math.imul(b^char.charCodeAt(0),3266489917);}return(a>>>0).toString(16).padStart(8,'0')+(b>>>0).toString(16).padStart(8,'0');};
+      const slide=image.closest('.swiper-slide,.dySwiperSlide,[data-e2e="photo-slide"],[data-e2e="image-slide"],[role="tabpanel"]');
+      const slideItems=slide?.parentElement?[...slide.parentElement.children].filter(e=>e.matches('.swiper-slide,.dySwiperSlide,[data-e2e="photo-slide"],[data-e2e="image-slide"],[role="tabpanel"]')&&!e.classList.contains('swiper-slide-duplicate')):[];
+      const count=value=>/^\d{1,5}$/.test(String(value??''))&&Number(value)>0?Number(value):null;
+      const zeroIndex=slide?.getAttribute('data-swiper-slide-index')??slide?.getAttribute('data-index');
+      const rawIndex=count(slide?.getAttribute('aria-posinset'))??(/^\d{1,5}$/.test(zeroIndex??'')?Number(zeroIndex)+1:slide?.matches('.dySwiperSlide')?slideItems.indexOf(slide)+1:null);
+      const index=rawIndex??count(activeContainer.querySelector('.swiper-pagination-current,[data-e2e="image-current"]')?.textContent?.trim());
+      const slides=slideItems;
+      const total=count(slide?.getAttribute('aria-setsize'))??count(activeContainer.querySelector('.swiper-pagination-total,[data-e2e="image-total"]')?.textContent?.trim())??(slides.length>1?slides.length:null);
+      const nextSelector='[data-e2e="image-next"],[data-e2e="photo-next"],[data-e2e="note-next"],.swiper-button-next,[aria-label="下一张"],[aria-label="下一页"]';
+      const next=[...activeContainer.querySelectorAll(nextSelector)].filter(e=>videoVisible(e)&&!e.matches(':disabled,[aria-disabled="true"],.swiper-button-disabled'));
+      if(!next.length&&slide?.matches('.dySwiperSlide'))for(const group of activeContainer.querySelectorAll('div')){
+        const counter=/^\s*(\d{1,4})\s*\/\s*(\d{1,4})\s*$/.exec(group.textContent||'');if(!counter||Number(counter[1])!==index||Number(counter[2])!==total)continue;
+        const arrows=[...group.children].filter(e=>!e.textContent.trim()&&e.querySelectorAll('svg').length===1&&videoVisible(e)).sort((a,b)=>a.getBoundingClientRect().left-b.getBoundingClientRect().left);
+        if(arrows.length===2){const a=arrows[0].getBoundingClientRect(),b=arrows[1].getBoundingClientRect();if(a.width>=12&&a.width<=64&&b.width>=12&&b.width<=64&&Math.abs(a.top-b.top)<4&&b.left>a.right&&!next.includes(arrows[1]))next.push(arrows[1]);}
+      }
+      const validCount=!index||!total||index<=total;
+      imagePost={id,url:`https://www.douyin.com/note/${id}`,recognized:true,source:'active-image-element',loaded:true,title:clean(activeContainer.querySelector('[data-e2e="video-desc"],[data-e2e="video-title"],[class*="video-info-detail"]')?.textContent).slice(0,1000)||null,
+        width:image.naturalWidth,height:image.naturalHeight,viewport:{x:Math.max(0,r.left),y:Math.max(0,r.top),width:Math.min(innerWidth,r.right)-Math.max(0,r.left),height:Math.min(innerHeight,r.bottom)-Math.max(0,r.top)},imageKey:marker((image.currentSrc||image.src)+'\0'+image.naturalWidth+'x'+image.naturalHeight+'\0'+(index||0)),album:{index:validCount?index:null,total:validCount?total:null,hasNext:validCount&&next.length===1&&!(index&&total&&index>=total),atEnd:Boolean(validCount&&index&&total&&index>=total),source:'visible-carousel-dom'},observationScope:'current-visible-image'};
+    }
+  }
   let livePreview = null;
-  if (recommendFeed && activeContainer?.matches('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"]') && !video?.id && !privateChatVisible && !loginRequired && !verificationRequired) {
-    const roomIds = [...activeContainer.querySelectorAll('a[href]')].filter(visible).map(link => {
+  if (recommendFeed && activeContainer?.matches('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"]') && !video?.id && !imagePost && !privateChatVisible && !loginRequired && !verificationRequired) {
+    const roomIds = [...(activeContainer.matches('a[href]') ? [activeContainer] : []), ...activeContainer.querySelectorAll('a[href]')].filter(visible).map(link => {
       try { const target = new URL(link.href, location.href); return target.origin === 'https://live.douyin.com' ? /^\/(\d{4,30})\/?$/.exec(target.pathname)?.[1] : null; } catch { return null; }
     }).filter(Boolean);
     const unique = [...new Set(roomIds)];
-    if (unique.length === 1) {
+    const declaredRoom=activeContainer.getAttribute('data-room-id')||activeContainer.getAttribute('data-live-room-id');
+    const declaredLive=activeContainer.matches('[data-e2e="feed-live-card"],[data-e2e="feed-live"]')&&activeContainer.getAttribute('data-live-status')==='live'&&/^\d{4,30}$/.test(declaredRoom||'');
+    if (unique.length === 1 || unique.length===0&&declaredLive) {
       const r = (element || activeContainer).getBoundingClientRect();
-      livePreview = { recognized: true, source: 'active-feed-live-link', scope: 'recommend-feed', roomId: unique[0],
+      livePreview = { recognized: true, source: unique.length?'active-feed-live-link':'active-feed-live-room', scope: 'recommend-feed', roomId: unique[0]||declaredRoom,
+        video:element?{readyState:element.readyState,paused:element.paused,time:element.currentTime,width:element.videoWidth,height:element.videoHeight,decodedFrames:element.getVideoPlaybackQuality?.().totalVideoFrames??null}:null,
         viewport: { x: Math.max(0,r.left), y: Math.max(0,r.top), width: Math.min(innerWidth,r.right)-Math.max(0,r.left), height: Math.min(innerHeight,r.bottom)-Math.max(0,r.top) } };
+    } else if(unique.length===0&&feedCards.length===1&&element&&element.readyState>=2&&!Number.isFinite(element.duration)&&element.videoWidth>=2&&element.videoHeight>=2){
+      const explicit=activeContainer.matches('[data-e2e="feed-live-card"],[data-e2e="feed-live"]'),badges=[...activeContainer.querySelectorAll('span,div,button,a')].filter(e=>!e.childElementCount&&visible(e)&&/^(直播中|进入直播间|点击进入直播间)$/.test(clean(e.textContent)));
+      const marker=explicit||[...activeContainer.querySelectorAll('[data-e2e="live-avatar"],[data-e2e="live-enter-room"],[data-e2e="live-player"]')].some(visible);
+      const media=element.currentSrc||element.src||(explicit&&element.srcObject instanceof MediaStream&&element.srcObject.active?'stream:'+element.srcObject.id:'');
+      if(marker&&badges.length&&media){let a=2166136261,b=2246822519;for(const char of media){a=Math.imul(a^char.charCodeAt(0),16777619);b=Math.imul(b^char.charCodeAt(0),3266489917);}const r=element.getBoundingClientRect();livePreview={recognized:true,source:'active-feed-live-status',scope:'recommend-feed',roomId:null,previewKey:(a>>>0).toString(16).padStart(8,'0')+(b>>>0).toString(16).padStart(8,'0'),navigation:'skip-only',viewport:{x:Math.max(0,r.left),y:Math.max(0,r.top),width:Math.min(innerWidth,r.right)-Math.max(0,r.left),height:Math.min(innerHeight,r.bottom)-Math.max(0,r.top)}};}
+    }
+  }
+  let liveRoom=null;
+  if(directLive&&!privateChatVisible&&!loginRequired&&!verificationRequired){
+    const roomId=/^\/(\d{4,30})/.exec(location.pathname)[1],ended=[...document.querySelectorAll('[data-e2e="live-ended"],[data-e2e="room-end"]')].some(visible)||(!element||element.readyState<2||element.ended)&&/直播已结束|直播结束了|主播不在直播|直播间不存在/.test(text);
+    const explicit=[...new Set([...document.querySelectorAll('[data-room-id],[data-live-room-id]')].filter(visible).map(e=>e.getAttribute('data-room-id')||e.getAttribute('data-live-room-id')).filter(id=>/^\d{4,30}$/.test(id||'')))];
+    if((!explicit.length||explicit.length===1&&explicit[0]===roomId)&&(ended||videoElements.length===1)){
+      const r=element?.getBoundingClientRect();liveRoom={recognized:true,source:'direct-live-url-and-player',scope:'live-room',roomId,ended,video:element?{readyState:element.readyState,paused:element.paused,time:element.currentTime,width:element.videoWidth,height:element.videoHeight,decodedFrames:element.getVideoPlaybackQuality?.().totalVideoFrames??null}:null,viewport:r?{x:Math.max(0,r.left),y:Math.max(0,r.top),width:Math.min(innerWidth,r.right)-Math.max(0,r.left),height:Math.min(innerHeight,r.bottom)-Math.max(0,r.top)}:null};
+      if(video){video.id=null;video.url=null;video.title=null;video.author=null;}
     }
   }
   const searchResults = [];
@@ -358,7 +443,7 @@ export function readPageState() {
   }
   const u = new URL(location.href);
   for (const key of [...u.searchParams.keys()]) if (!['modal_id','aweme_id','recommend'].includes(key)) u.searchParams.delete(key);
-  return { url: u.href, title: document.title, video, videoSelection: { candidateCount: videoElements.length, ambiguous: videoElements.length > 1 || videoIdentityConflict, identityConflict: videoIdentityConflict }, pageKind: livePreview ? 'live-preview' : video?.id ? 'video' : location.pathname.startsWith('/search/') ? 'search' : 'unknown', livePreview, searchResults: searchResults.slice(0,20), visibleText: text,
+  return { url: u.href, title: document.title, video, imagePost, liveRoom, videoSelection: { candidateCount: videoElements.length, ambiguous: videoElements.length > 1 || videoIdentityConflict, identityConflict: videoIdentityConflict }, pageKind: liveRoom?'live-room':livePreview ? 'live-preview' : imagePost ? 'image-post' : video?.id ? 'video' : location.pathname.startsWith('/search/') ? 'search' : 'unknown', livePreview, searchResults: searchResults.slice(0,20), visibleText: directLive?'':text,
     loginRequired, verificationRequired, privateChatVisible, documentReadyState: document.readyState };
 }
 
@@ -470,7 +555,7 @@ export class BrowserController {
       if(!connection?.isConnected()) {
         let owner;
         try { owner=JSON.parse(readFileSync(path.join(this.controlDirectory,'browser.json'),'utf8')); } catch { return {paused:0,existingPage:false}; }
-        if(owner.profile!==PROFILE || owner.port!==PORT || !owner.ready || !alive(owner.pid) || !await version()) return {paused:0,existingPage:false};
+        if(!sameBrowserProfile(owner.profile,PROFILE) || owner.port!==PORT || !owner.ready || !alive(owner.pid) || !await version()) return {paused:0,existingPage:false};
         return await pauseExistingVideoPages({ endpoint:`http://127.0.0.1:${PORT}`,source:this.source });
       }
       let paused=0,existingPage=false;
@@ -510,7 +595,7 @@ export class BrowserController {
   }
   getChatService() {
     this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=18'),import('./chat-service.mjs?v=18'),import('./usage-ledger.mjs')])
-      .then(([{ChatBrowser},{ChatService},{UsageLedger}])=>{const stateDir=this.limits().stateDir,source=this.source==='dsh'?'dsh':'api';const service=new ChatService({stateDir,browser:new ChatBrowser({source:source==='dsh'?'dsh-chat':'api-chat'}),onPrepared:options=>this.releaseIdlePreparePage(options),observeSharedWork:input=>this.observeSharedWork(input),videoLimits:this.limits()});service.agent.personaMemory=this.getPersonaMemory();service.agent.getMemoryStore=()=>this.store();service.agent.usageLedger=new UsageLedger({stateDir});service.agent.source=source;return service;})
+      .then(([{ChatBrowser},{ChatService},{UsageLedger}])=>{const stateDir=this.limits().stateDir,source=this.source==='dsh'?'dsh':'api';const service=new ChatService({stateDir,browser:new ChatBrowser({source:source==='dsh'?'dsh-chat':'api-chat'}),onPrepared:options=>this.releaseIdlePreparePage(options),observeSharedWork:input=>this.observeSharedWork(input),videoLimits:this.limits()});service.agent.personaMemory=this.getPersonaMemory();service.agent.getMemoryStore=()=>this.store();service.agent.createConversationMemory=({scopeToken,messages})=>{const contact=memoryContactFromToken(scopeToken);return createRuntimeConversationMemory({store:this.store(),contact,messages,host:source==='dsh'?'dsh':'desktop',isAuthorized:()=>service.isMemoryScopeAuthorized(contact)});};service.agent.usageLedger=new UsageLedger({stateDir});service.agent.source=source;return service;})
       .catch(error=>{this.chatPromise=null;throw error;});
     return this.chatPromise;
   }
@@ -543,7 +628,7 @@ export class BrowserController {
     if (this.browser?.isConnected()) return this.browser;
     let owner;
     try { owner = JSON.parse(readFileSync(path.join(this.controlDirectory, 'browser.json'), 'utf8')); } catch { return null; }
-    if (owner.profile !== PROFILE || owner.port !== PORT || !owner.ready || !alive(owner.pid) || !await version()) return null;
+    if (!sameBrowserProfile(owner.profile, PROFILE) || owner.port !== PORT || !owner.ready || !alive(owner.pid) || !await version()) return null;
     // 保存静默设置只重新连接已经存在的专用浏览器，不启动窗口或新建标签。
     this.browser = await connectDedicatedBrowser(`http://127.0.0.1:${PORT}`, { signal });
     this.page = null;
@@ -583,7 +668,7 @@ export class BrowserController {
     aborted(signal);
     const label=browserPageLabel(this.source);
     let createdPage = null;
-    const eligiblePage = candidate => { const address = candidate.url(); return address === 'about:blank' || /^https:\/\/www\.douyin\.com(?:\/|$)/.test(address); };
+    const eligiblePage = candidate => { const address = candidate.url(); return address === 'about:blank' || /^https:\/\/www\.douyin\.com(?:\/|$)/.test(address)||/^https:\/\/live\.douyin\.com\/\d{4,30}\/?(?:[?#]|$)/.test(address); };
     try {
     if(this.browser?.isConnected()&&this.page&&!this.page.isClosed()) {
       if(this.source==='verification')return this.page;
@@ -643,33 +728,37 @@ export class BrowserController {
     }
   }
 
+  async evaluatePage(reader,arg,signal) {
+    for(let attempt=0;;attempt++){aborted(signal);try{return await this.page.evaluate(reader,arg);}catch(error){if(attempt>=5||!/Execution context was destroyed|Cannot find context with specified id|Cannot find context with id/.test(error.message||''))throw error;await wait(150,signal);}}
+  }
   async navigate(url, signal) {
     aborted(signal);
     await this.page.goto(url, { waitUntil: 'domcontentloaded' });
-    await this.page.evaluate(name => { window.name = name; }, browserPageLabel(this.source));
+    await this.evaluatePage(name => { window.name = name; }, browserPageLabel(this.source),signal);
     if (url === RECOMMEND && this.page.url().includes('/jingxuan')) {
       await this.page.locator('a').filter({hasText:/^推荐$/}).click();
     }
-    const targetId=/\/video\/(\d+)/.exec(url)?.[1];
+    const targetId=/\/(?:video|note)\/(\d+)/.exec(url)?.[1];
     await this.settle(signal, {kind:targetId?'video':url.includes('/search/')?'search':'recommend',videoId:targetId});
   }
   async settle(signal, {kind='recommend',videoId}={}) {
     for (let i=0;i<=60;i++) {
       aborted(signal);
-      const state = await this.page.evaluate(readPageState);
+      const state = await this.evaluatePage(readPageState,undefined,signal);
       aborted(signal);
       if(state.loginRequired||state.verificationRequired) return state;
-      const detail=/\/video\/\d+/.test(state.url??'')||/[?&]modal_id=\d+/.test(state.url??'');
+      const detail=/\/(?:video|note)\/\d+/.test(state.url??'')||/[?&]modal_id=\d+/.test(state.url??'');
+      const imageReady=state.pageKind==='image-post'&&state.imagePost?.recognized===true&&state.imagePost.source==='active-image-element'&&state.imagePost.loaded===true;
       if(kind==='search' && state.searchResults.length && !detail) return state;
       if(kind==='search' && /暂无搜索结果|没有找到相关|暂无结果/.test(state.visibleText)) return state;
-      if(kind==='video' && detail && state.video?.id===videoId && state.video.readyState>=2) return state;
-      if(kind==='recommend' && (state.video?.id && state.video.readyState>=2 || state.livePreview?.recognized === true)) return state;
+      if(kind==='video' && detail && (state.video?.id===videoId && state.video.readyState>=2 || imageReady&&state.imagePost.id===videoId)) return state;
+      if(kind==='recommend' && (state.video?.id && state.video.readyState>=2 || imageReady || state.livePreview?.recognized === true)) return state;
       if(i<60)await wait(500, signal);
     }
     throw new Error(kind==='search'?'搜索结果未就绪，未确认搜索完成。':kind==='video'?'目标作品尚未加载完成，请读取状态后重试。':'推荐流尚未读到就绪视频。');
   }
   async state({ record = true } = {}) {
-    const state = await this.page.evaluate(readPageState);
+    const state = await this.evaluatePage(readPageState);
     if (['api','dsh'].includes(this.source)) this.limits().notePlayback?.(this.source,state);
     if (record && state.video?.id) {
       try { this.store().recordVideo(state, this.source); } catch { state.memoryWarning = '视频状态已读取，记忆记录暂不可用。'; }
@@ -693,7 +782,7 @@ export class BrowserController {
     });
     this.queue=operation;return operation;
   }
-  execute(name, args = {}, { signal, humanAuthorized = false, autonomousRunId, expectedVideoId, sharedCaptureMode } = {}) {
+  execute(name, args = {}, { signal, humanAuthorized = false, autonomousRunId, expectedVideoId, expectedImageKey, advanceImage=false, expectedLiveRoomId, expectedLivePreviewKey, enterLive=false, exitLive=false, sharedCaptureMode } = {}) {
     const definition = TOOL_DEFINITIONS.find(tool=>tool.name===name);
     if (!definition) return Promise.reject(new Error('不支持的抖音工具。'));
     if (sharedCaptureMode !== undefined && (sharedCaptureMode !== SHARED_CAPTURE_MODE || name !== 'douyin_observe')) return Promise.reject(new Error('内部分享采样模式未由宿主授权。'));
@@ -702,6 +791,10 @@ export class BrowserController {
       else validateToolArguments(definition,args);
     } catch(error) { return Promise.reject(error); }
     if(expectedVideoId!==undefined&&(!['douyin_next','douyin_previous'].includes(name)||typeof expectedVideoId!=='string'||!/^\d{1,64}$/.test(expectedVideoId)))return Promise.reject(new TypeError('预期作品ID只供换片宿主使用，须为纯数字字符串。'));
+    if(advanceImage!==false&&(advanceImage!==true||name!=='douyin_next'||!expectedVideoId||typeof expectedImageKey!=='string'||!/^\w{1,64}$/.test(expectedImageKey)))return Promise.reject(new TypeError('图文翻页必须绑定宿主实际观察的作品和当前图片。'));
+    if(expectedLiveRoomId!==undefined&&(!['douyin_next','douyin_previous'].includes(name)||typeof expectedLiveRoomId!=='string'||!/^\d{4,30}$/.test(expectedLiveRoomId)))return Promise.reject(new TypeError('直播换片必须绑定实际房间。'));
+    if(expectedLivePreviewKey!==undefined&&(!['douyin_next','douyin_previous'].includes(name)||!(/^[a-f0-9]{16}$/.test(expectedLivePreviewKey))||expectedVideoId||expectedLiveRoomId))return Promise.reject(new TypeError('无房间地址的预览换片必须使用宿主当前采样标识。'));
+    if((enterLive!==false||exitLive!==false)&&((enterLive!==true&&exitLive!==true)||enterLive===true&&exitLive===true||name!=='douyin_next'||!expectedLiveRoomId))return Promise.reject(new TypeError('直播进出需要宿主绑定的房间和单一动作。'));
     if (name.startsWith('douyin_diagnostics')) {
       if (!this.diagnosticsService) return Promise.reject(new Error('诊断服务尚未加载，请更新插件或软件。'));
       signal?.throwIfAborted();
@@ -784,7 +877,7 @@ export class BrowserController {
         }
         await this.checkVideoLimits(name);
         if(this.limitsEnabled && !this.limits().state().allowed) await this.pauseForLimits();
-        if(!['douyin_open','douyin_search','douyin_open_video'].includes(name) && new URL(this.page.url()).origin!=='https://www.douyin.com') {
+        if(!['douyin_open','douyin_search','douyin_open_video'].includes(name) && new URL(this.page.url()).origin!=='https://www.douyin.com'&&!/^https:\/\/live\.douyin\.com\/\d{4,30}\/?(?:[?#]|$)/.test(this.page.url())) {
           return this.page.evaluate(readPageState);
         }
         if (name==='douyin_open') await this.navigate(RECOMMEND,signal);
@@ -801,7 +894,10 @@ export class BrowserController {
             else throw new Error('搜索结果卡片已变化，请重新搜索。');
           }
         }
-        if (name==='douyin_next'||name==='douyin_previous') return await this.switchVideo(name==='douyin_next'?1:-1,signal,{recordLearning:!autonomousRunId,expectedVideoId});
+        if(advanceImage)return this.advanceImagePage(signal,{expectedVideoId,expectedImageKey});
+        if(enterLive)return this.openLiveRoom(signal,{expectedLiveRoomId});
+        if(exitLive)return this.exitLiveRoom(signal,{expectedLiveRoomId});
+        if (name==='douyin_next'||name==='douyin_previous') return await this.switchVideo(name==='douyin_next'?1:-1,signal,{recordLearning:!autonomousRunId,expectedVideoId,expectedLiveRoomId,expectedLivePreviewKey});
         if (name==='douyin_play'||name==='douyin_pause') {
           await (await this.currentVideo()).evaluate(async(video, play)=>{ if(play) await video.play();else video.pause(); },name==='douyin_play');
           if (name==='douyin_play') await wait(600,signal);
@@ -835,18 +931,27 @@ export class BrowserController {
     if(index===undefined) throw new Error('没有在视口内找到视频。');
     return this.page.locator('video').nth(index);
   }
-  async switchVideo(direction,signal,{recordLearning=true,expectedVideoId}={}) {
+  async switchVideo(direction,signal,{recordLearning=true,expectedVideoId,expectedLiveRoomId,expectedLivePreviewKey}={}) {
     if(![-1,1].includes(direction))throw new TypeError('换片方向须为上一条或下一条。');
     if(expectedVideoId!==undefined&&(typeof expectedVideoId!=='string'||!/^\d{1,64}$/.test(expectedVideoId)))throw new TypeError('预期作品ID须为纯数字字符串。');
+    const entry=await this.state({record:false});
+    if(expectedLivePreviewKey!==undefined&&entry.livePreview?.previewKey!==expectedLivePreviewKey)return{changed:false,staleObservation:true,reasonCode:'observed-live-preview-changed',state:entry};
+    if(entry.livePreview?.source==='active-feed-live-status'&&(expectedVideoId!==undefined||expectedLiveRoomId!==undefined))return{changed:false,staleObservation:true,reasonCode:'observed-video-changed',state:entry};
+    if(direction===1&&entry.pageKind==='image-post'&&/^https:\/\/www\.douyin\.com\/(?:note|video)\/\d+/.test(entry.url||'')){
+      if(expectedVideoId!==undefined&&entry.imagePost.id!==expectedVideoId)return{changed:false,staleObservation:true,reasonCode:'observed-video-changed',expectedVideoId,state:entry};
+      aborted(signal);await this.checkVideoLimits('douyin_next');const fresh=await this.state({record:false});if(fresh.imagePost?.id!==entry.imagePost.id||fresh.privateChatVisible||fresh.loginRequired||fresh.verificationRequired)return{changed:false,staleObservation:true,reasonCode:'observed-video-changed',expectedVideoId,state:fresh};
+      await this.navigate(RECOMMEND,signal);const state=await this.state({record:false}),after=state.video?.id||state.imagePost?.id||state.livePreview?.roomId;return{changed:Boolean(after&&after!==entry.imagePost.id),beforePageKind:'image-post',state,reasonCode:after?'image-detail-returned-to-feed':'image-detail-feed-not-ready'};
+    }
     const blocked=state=>state.loginRequired||state.verificationRequired||state.privateChatVisible||state.unsupportedPage;
     const inspectSwitchInput=({action,currentToken,expectedIdentity,selector})=>{
       const visible=element=>{const r=element.getBoundingClientRect(),s=getComputedStyle(element);return r.width>0&&r.height>0&&r.right>0&&r.bottom>0&&r.left<innerWidth&&r.top<innerHeight&&s.display!=='none'&&s.visibility!=='hidden';};
       const privateArea='[data-e2e="im-dialog"],[data-e2e="conversation-item"]';
-      const workId=value=>{try{const url=new URL(value,location.href);return /\/video\/(\d+)/.exec(url.pathname)?.[1]||url.searchParams.get('modal_id')||url.searchParams.get('aweme_id');}catch{return null;}};
+      const workId=value=>{try{const url=new URL(value,location.href);return /\/(?:video|note)\/(\d+)/.exec(url.pathname)?.[1]||url.searchParams.get('modal_id')||url.searchParams.get('aweme_id');}catch{return null;}};
       const protectedPage=()=>location.origin!=='https://www.douyin.com'||[...document.querySelectorAll('#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"],[data-e2e="im-dialog"]')].some(visible)||[...document.querySelectorAll('body *')].some(node=>!node.childElementCount&&visible(node)&&!node.closest(privateArea)&&/扫码登录|验证码登录|登录后即可|手机扫码登录|请完成下方验证|请完成验证|安全验证|拖动滑块/.test(node.textContent||''));
       const currentIdentity=()=>{
         if(protectedPage())return null;
-        const candidates=[...document.querySelectorAll('video')].filter(video=>{if(!visible(video)||video.closest(privateArea))return false;for(let node=video;node;node=node.parentElement)if(Number(getComputedStyle(node).opacity)===0)return false;return true;}).map(video=>{
+        const notes=[...document.querySelectorAll('[data-e2e="note-detail"],[data-e2e="image-detail"]')].filter(visible),note=notes.length===1&&/^\/(?:note|video)\/\d+/.test(location.pathname)?notes[0]:null,notePlayer=note?.querySelector('[data-e2e="player-container"].note-detail-container')||note;
+        const candidates=[...document.querySelectorAll('video')].filter(video=>{if(!visible(video)||video.closest(privateArea)||notePlayer&&!notePlayer.contains(video))return false;for(let node=video;node;node=node.parentElement)if(Number(getComputedStyle(node).opacity)===0)return false;return true;}).map(video=>{
           const active=video.closest('[data-e2e="feed-active-video"],[data-e2e="video-detail"]');let root=active;
           if(!root){root=video.parentElement;for(let i=0;root?.parentElement&&i<8;i++){if(root.querySelector('[class*="video-info-detail"]'))break;root=root.parentElement;}}
           const playerId=/(?:^|\s)video_(\d+)(?:\s|$)/.exec(video.closest('[data-e2e="player-container"]')?.className??'')?.[1],activeId=/(?:^|\s)video_(\d+)(?:\s|$)/.exec(active?.className??'')?.[1];
@@ -865,20 +970,40 @@ export class BrowserController {
           }
           if(candidates.length>1||candidates[0].id)return null;
         }
-        const route=new URL(location.href);if(!['/','/recommend','/recommend/'].includes(route.pathname)||workId(route.href))return null;
+        const photoCards=note?[note]:[...document.querySelectorAll('[data-e2e="feed-active-video"],[data-e2e="note-detail"],[data-e2e="image-detail"]')].filter(card=>visible(card)&&!card.closest(privateArea));
+        if(!candidates.length&&photoCards.length===1){
+          const card=photoCards[0],url=new URL(location.href);
+          const imageMarker=card.matches('[data-e2e="note-detail"],[data-e2e="image-detail"]')||/^\/note\//.test(url.pathname)||card.querySelector('.dySwiperSlide,[data-e2e="photo-image"],[data-e2e="note-image"],[class*="ImageSwiper"],[class*="image-post"],[class*="imagePost"],[class*="note-content"]');
+          const liveCard=card.getAttribute('data-live-status')==='live'&&/^\d{4,30}$/.test(card.getAttribute('data-room-id')||card.getAttribute('data-live-room-id')||'');
+          const ids=new Set([/(?:^|\s)video_(\d{10,30})(?:\s|$)/.exec(card.className??'')?.[1],card.getAttribute('data-aweme-id'),...[...card.querySelectorAll('a[href]')].filter(link=>visible(link)&&new URL(link.href).origin==='https://www.douyin.com'&&!/\/user\//.test(link.href)).map(link=>workId(link.href)),/^\/note\//.test(url.pathname)?workId(url.href):null].filter(id=>typeof id==='string'&&/^\d{10,30}$/.test(id)));
+          const images=[...(notePlayer||card).querySelectorAll('img')].filter(image=>{if(!visible(image)||!image.complete||image.naturalWidth<120||image.naturalHeight<120)return false;for(let node=image;node;node=node.parentElement)if(Number(getComputedStyle(node).opacity)===0||/blur\(/.test(getComputedStyle(node).filter))return false;const r=image.getBoundingClientRect();if(r.width<120||r.height<120)return false;const hit=document.elementFromPoint((Math.max(0,r.left)+Math.min(innerWidth,r.right))/2,(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2),slide=image.closest('.dySwiperSlide');return Boolean(hit&&(hit===image||image.contains(hit)||slide&&hit.closest('.dySwiperSlide')===slide||slide&&card.contains(hit)&&hit.closest('.xg-icon-play')));});
+          if(imageMarker&&!liveCard&&ids.size===1&&images.length===1)return`image:${[...ids][0]}`;
+        }
+        const route=new URL(location.href);if(!['/','/recommend','/recommend/','/jingxuan','/jingxuan/'].includes(route.pathname)||workId(route.href))return null;
         const cards=[...document.querySelectorAll('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"]')].filter(card=>visible(card)&&!card.closest(privateArea));if(cards.length!==1)return null;
-        const rooms=[...new Set([...cards[0].querySelectorAll('a[href]')].filter(visible).flatMap(link=>{try{const url=new URL(link.href);const id=url.origin==='https://live.douyin.com'?/^\/(\d{4,30})\/?$/.exec(url.pathname)?.[1]:null;return id?[id]:[];}catch{return[];}}))];
-        return rooms.length===1?`live:${rooms[0]}`:null;
+        const rooms=[...new Set([...(cards[0].matches('a[href]') ? [cards[0]] : []), ...cards[0].querySelectorAll('a[href]')].filter(visible).flatMap(link=>{try{const url=new URL(link.href);const id=url.origin==='https://live.douyin.com'?/^\/(\d{4,30})\/?$/.exec(url.pathname)?.[1]:null;return id?[id]:[];}catch{return[];}}))];
+        const declaredRoom=cards[0].getAttribute('data-room-id')||cards[0].getAttribute('data-live-room-id');
+        const declaredLive=cards[0].matches('[data-e2e="feed-live-card"],[data-e2e="feed-live"]')&&cards[0].getAttribute('data-live-status')==='live'&&/^\d{4,30}$/.test(declaredRoom||'');
+        if(rooms.length===1)return`live:${rooms[0]}`;
+        if(rooms.length===0&&declaredLive)return`live:${declaredRoom}`;
+        if(rooms.length===0&&candidates.length===1){
+          const video=candidates[0].video,card=cards[0],explicit=card.matches('[data-e2e="feed-live-card"],[data-e2e="feed-live"]');
+          const badges=[...card.querySelectorAll('span,div,button,a')].some(node=>!node.childElementCount&&visible(node)&&/^(直播中|进入直播间|点击进入直播间)$/.test((node.textContent||'').replace(/\s+/g,' ').trim()));
+          const marker=explicit||[...card.querySelectorAll('[data-e2e="live-avatar"],[data-e2e="live-enter-room"],[data-e2e="live-player"]')].some(visible);
+          const media=video.currentSrc||video.src||(explicit&&video.srcObject instanceof MediaStream&&video.srcObject.active?'stream:'+video.srcObject.id:'');
+          if(card.contains(video)&&video.readyState>=2&&!Number.isFinite(video.duration)&&video.videoWidth>=2&&video.videoHeight>=2&&marker&&badges&&media){let a=2166136261,b=2246822519;for(const char of media){a=Math.imul(a^char.charCodeAt(0),16777619);b=Math.imul(b^char.charCodeAt(0),3266489917);}return'live-unresolved:'+(a>>>0).toString(16).padStart(8,'0')+(b>>>0).toString(16).padStart(8,'0');}
+        }
+        return null;
       };
       if(action==='read')return currentIdentity();
       const entries=window.__deepseekVideoSwitchInputs??=Object.create(null),elements=selector?[...document.querySelectorAll(selector)].filter(visible):[],element=elements.length===1?elements[0]:null;
-      if(selector&&!element)throw new Error('换片控件已变化，未安装输入核对。');
+      if(selector&&!element)return false;
       const entry={armed:false,dispatched:false,blocked:false};if(element)element.setAttribute('data-deepseek-switch-token',currentToken);
       const types=element?['pointerdown','mousedown','mouseup','click']:['wheel'];
       const listener=event=>{
         if(!entry.armed||!event.isTrusted)return;
         if(entry.expired){entry.blocked=true;event.preventDefault();event.stopImmediatePropagation();if(event.type===(element?'click':'wheel')){entry.armed=false;entry.cleanup();delete entries[currentToken];}return;}
-        const target=event.target instanceof Element?event.target:null,targetMatches=element?target&&(target===element||element.contains(target)):target?.closest('[data-e2e="feed-active-video"],[data-e2e="video-detail"],[data-e2e="player-container"]');
+        const target=event.target instanceof Element?event.target:null,targetMatches=element?target&&(target===element||element.contains(target)):target?.closest('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"],[data-e2e="video-detail"],[data-e2e="player-container"]');
         if(!targetMatches||currentIdentity()!==expectedIdentity){entry.blocked=true;event.preventDefault();event.stopImmediatePropagation();return;}
         if(event.type===(element?'click':'wheel')){entry.dispatched=true;entry.armed=false;}
       };
@@ -889,8 +1014,10 @@ export class BrowserController {
     const identity=state=>{
       if(blocked(state)||state.videoSelection?.identityConflict||state.videoSelection?.ambiguous&&!(state.videoSelection?.candidateCount>1))return null;
       if(typeof state.video?.id==='string'&&/^\d{1,64}$/.test(state.video.id)&&state.video.readyState>=2)return `video:${state.video.id}`;
+      if(state.pageKind==='image-post'&&state.imagePost?.recognized===true&&state.imagePost.loaded===true&&/^\d{10,30}$/.test(state.imagePost.id||''))return `image:${state.imagePost.id}`;
       if(state.videoSelection?.candidateCount>1)return null;
       if(state.pageKind==='live-preview'&&state.livePreview?.recognized===true&&/^\d{4,30}$/.test(state.livePreview.roomId||''))return `live:${state.livePreview.roomId}`;
+      if(state.pageKind==='live-preview'&&state.livePreview?.recognized===true&&state.livePreview.source==='active-feed-live-status'&&/^[a-f0-9]{16}$/.test(state.livePreview.previewKey||''))return 'live-unresolved:'+state.livePreview.previewKey;
       return null;
     };
     const readIdentity=async state=>{
@@ -909,9 +1036,10 @@ export class BrowserController {
     }
     if(!beforeIdentity)return{changed:false,before:before?.video,after:before?.video,state:before,reasonCode:'video-identity-not-ready'};
     const beforeLive=beforeIdentity.startsWith('live:');
+    if(expectedLiveRoomId!==undefined&&before.livePreview?.roomId!==expectedLiveRoomId)return{changed:false,staleObservation:true,reasonCode:'observed-live-changed',state:before};
     if(expectedVideoId!==undefined){
       if(beforeLive)return{changed:false,before:before.video,after:before.video,state:before,expectedVideoId,reasonCode:'expected-video-unavailable'};
-      if(before.video.id!==expectedVideoId)return{changed:false,staleObservation:true,reasonCode:'observed-video-changed',expectedVideoId,before:before.video,after:before.video,state:before};
+      if((before.video?.id||before.imagePost?.id)!==expectedVideoId)return{changed:false,staleObservation:true,reasonCode:'observed-video-changed',expectedVideoId,before:before.video,after:before.video,state:before};
     }
     let skipEvidenceId=null;
     if(recordLearning && direction>0 && before.video?.id && this.lastObservationVideoId===before.video.id && this.lastObservationEvidenceId && this.lastObservationState?.video?.id===before.video.id) {
@@ -941,13 +1069,31 @@ export class BrowserController {
       before=current;return true;
     };
     if(!await checkPendingInput())return inputDenied;
-    const arrowCount=await arrow.count();
-    if(arrowCount>1)return denied(before,'switch-control-ambiguous');
-    const control=arrowCount===1?arrow.first():null,token=`video-switch-${randomUUID()}`;
+    const arrowCount=await arrow.count(),token=`video-switch-${randomUUID()}`;
+    let control, controlSelector=arrowCount?`[data-e2e="video-switch-${direction>0?'next':'prev'}-arrow"]`:null;
+    if (typeof arrow.evaluateAll === 'function') {
+      const candidates = await arrow.evaluateAll(nodes => {
+        const visible = node => { const r=node.getBoundingClientRect(),s=getComputedStyle(node);return r.width>1&&r.height>1&&r.right>0&&r.bottom>0&&r.left<innerWidth&&r.top<innerHeight&&s.visibility!=='hidden'&&s.display!=='none'&&Number(s.opacity)!==0&&!node.closest('[inert],[aria-hidden="true"]'); };
+        const videos=[...document.querySelectorAll('video')].filter(visible).sort((a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return y.width*y.height-x.width*x.height;});
+        const modal=videos[0]?.closest('[role="dialog"],[data-e2e="video-modal"]');
+        return nodes.flatMap((node,index)=>{
+          if(!visible(node)||node.closest('[data-e2e="im-dialog"]')||modal&&!modal.contains(node))return [];
+          const r=node.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
+          return x>=0&&y>=0&&x<innerWidth&&y<innerHeight&&hit&&(node===hit||node.contains(hit))?[index]:[];
+        });
+      });
+      if(candidates.length>1)return denied(before,'switch-control-ambiguous');
+      control=candidates.length?arrow.nth(candidates[0]):null;
+      if(control){await control.evaluate((node,value)=>node.setAttribute('data-deepseek-switch-token',value),token);controlSelector=`[data-deepseek-switch-token="${token}"]`;}
+      else controlSelector=null;
+    } else {
+      if(arrowCount>1)return denied(before,'switch-control-ambiguous');
+      control=arrowCount===1?arrow.first():null;
+    }
     const sameGeometry=(left,right)=>Boolean(left&&right&&['x','y','width','height'].every(key=>Math.abs(left[key]-right[key])<=0.5));
     const readPoint=async()=>{
       if(control){
-        if(await arrow.count()!==1||!await control.isVisible()||!await control.isEnabled())return null;
+        if(await this.page.locator(controlSelector).count()!==1||!await control.isVisible()||!await control.isEnabled())return null;
         return control.evaluate((element,currentToken)=>{
           if(element.getAttribute('data-deepseek-switch-token')!==currentToken||element.closest('[disabled],[aria-disabled="true"]'))return null;
           const r=element.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
@@ -955,16 +1101,17 @@ export class BrowserController {
           return{x:r.x,y:r.y,width:r.width,height:r.height,clickX:x,clickY:y};
         },token);
       }
-      const box=before.video?.viewport||before.livePreview?.viewport;
+      const box=before.video?.viewport||before.imagePost?.viewport||before.livePreview?.viewport;
       if(!box||box.width<2||box.height<2)return null;
       return this.page.evaluate(rect=>{
         const x=rect.x+rect.width/2,y=rect.y+rect.height/2,hit=document.elementFromPoint(x,y);
-        if(x<0||y<0||x>=innerWidth||y>=innerHeight||!hit||hit.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"],#captcha_container')||!hit.closest('[data-e2e="feed-active-video"],[data-e2e="video-detail"],[data-e2e="player-container"]'))return null;
+        if(x<0||y<0||x>=innerWidth||y>=innerHeight||!hit||hit.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"],#captcha_container')||!hit.closest('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"],[data-e2e="video-detail"],[data-e2e="player-container"]'))return null;
         return{...rect,clickX:x,clickY:y};
       },box);
     };
     try{
-      await this.page.evaluate(inspectSwitchInput,{currentToken:token,expectedIdentity:beforeIdentity,selector:control?`[data-e2e="video-switch-${direction>0?'next':'prev'}-arrow"]`:null});
+      const installed=await this.page.evaluate(inspectSwitchInput,{currentToken:token,expectedIdentity:beforeIdentity,selector:controlSelector});
+      if(installed===false)return denied(before,'switch-control-changed');
       let stablePoint,previousPoint,geometrySamples=0;
       const deadline=performance.now()+4000;
       while(performance.now()<deadline){
@@ -993,7 +1140,7 @@ export class BrowserController {
       if(receipt.blocked){if(!await checkPendingInput())return inputDenied;return denied(before,'switch-input-blocked');}
       if(!receipt.dispatched){if(!await checkPendingInput())return inputDenied;return denied(before,'switch-input-unconfirmed');}
     }finally{
-      await this.page.evaluate(currentToken=>{const entry=window.__deepseekVideoSwitchInputs?.[currentToken];entry?.cleanup();if(window.__deepseekVideoSwitchInputs)delete window.__deepseekVideoSwitchInputs[currentToken];},token).catch(()=>{});
+      await this.page.evaluate(currentToken=>{const entry=window.__deepseekVideoSwitchInputs?.[currentToken];entry?.cleanup();if(window.__deepseekVideoSwitchInputs)delete window.__deepseekVideoSwitchInputs[currentToken];for(const node of document.querySelectorAll('[data-deepseek-switch-token]'))if(node.getAttribute('data-deepseek-switch-token')===currentToken)node.removeAttribute('data-deepseek-switch-token');},token).catch(()=>{});
     }
     let after=before,afterIdentity=null,lastAfterIdentity=null,previousAfter=null,readySamples=0;
     // 一次输入后只回读，不在加载慢或身份暂缺时重复点击，避免连续跳过多条。
@@ -1102,6 +1249,119 @@ export class BrowserController {
       return result;
     } finally { try { await session?.detach(); } finally { await handle?.dispose(); } }
   }
+  async advanceImagePage(signal,{expectedVideoId,expectedImageKey}={}) {
+    aborted(signal);await this.checkVideoLimits('douyin_next');const before=await this.state({record:false}),initial=before.imagePost;
+    const failed=(reasonCode,state=before)=>({changed:false,pageChanged:false,reasonCode,state});
+    if(before.pageKind!=='image-post'||initial?.id!==expectedVideoId||initial.imageKey!==expectedImageKey)return{...failed('observed-image-changed'),staleObservation:true};
+    if(initial.album?.atEnd)return{...failed('image-album-end'),atEnd:true};
+    if(!initial.album?.hasNext)return failed('image-navigation-unavailable');
+    const clip=initial.viewport,token=randomUUID();let image,button,inputStarted=false,inputSettled=false;
+    try{
+      image=await this.page.evaluateHandle(clip=>{const images=[...document.querySelectorAll('[data-e2e="feed-active-video"] img,[data-e2e="note-detail"] img,[data-e2e="image-detail"] img')].filter(e=>{const r=e.getBoundingClientRect();return e.complete&&e.naturalWidth>=120&&e.naturalHeight>=120&&Math.abs(Math.max(0,r.left)-clip.x)<0.5&&Math.abs(Math.max(0,r.top)-clip.y)<0.5&&Math.abs(Math.min(innerWidth,r.right)-Math.max(0,r.left)-clip.width)<0.5&&Math.abs(Math.min(innerHeight,r.bottom)-Math.max(0,r.top)-clip.height)<0.5&&!/blur\(/.test(getComputedStyle(e).filter);});return images.length===1?images[0]:null;},clip);
+      button=await image.evaluateHandle(image=>{const root=image?.closest('[data-e2e="feed-active-video"],[data-e2e="note-detail"],[data-e2e="image-detail"]');if(!root)return null;const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>1&&r.height>1&&r.right>0&&r.bottom>0&&r.left<innerWidth&&r.top<innerHeight&&s.display!=='none'&&s.visibility!=='hidden'&&!e.matches(':disabled,[aria-disabled="true"],.swiper-button-disabled');};const candidates=[...root.querySelectorAll('[data-e2e="image-next"],[data-e2e="photo-next"],[data-e2e="note-next"],.swiper-button-next,[aria-label="下一张"]')].filter(visible),slide=image.closest('.dySwiperSlide');if(!candidates.length&&slide){const slides=[...slide.parentElement.children].filter(e=>e.matches('.dySwiperSlide')),index=slides.indexOf(slide)+1,total=slides.length;for(const group of root.querySelectorAll('div')){const count=/^\s*(\d{1,4})\s*\/\s*(\d{1,4})\s*$/.exec(group.textContent||'');if(!count||Number(count[1])!==index||Number(count[2])!==total)continue;const arrows=[...group.children].filter(e=>!e.textContent.trim()&&e.querySelectorAll('svg').length===1&&visible(e)).sort((a,b)=>a.getBoundingClientRect().left-b.getBoundingClientRect().left);if(arrows.length===2){const a=arrows[0].getBoundingClientRect(),b=arrows[1].getBoundingClientRect();if(a.width>=12&&a.width<=64&&b.width>=12&&b.width<=64&&Math.abs(a.top-b.top)<4&&b.left>a.right&&!candidates.includes(arrows[1]))candidates.push(arrows[1]);}}}return candidates.length===1?candidates[0]:null;});
+      let point,previous,stable=0;
+      for(let i=0;i<16;i++){aborted(signal);point=await button.evaluate(e=>{if(!e?.isConnected)return null;const r=e.getBoundingClientRect(),x=(Math.max(0,r.left)+Math.min(innerWidth,r.right))/2,y=(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2,hit=document.elementFromPoint(x,y);return hit&&(e===hit||e.contains(hit))?{x,y,left:r.left,top:r.top,width:r.width,height:r.height}:null;});stable=point&&previous&&Object.keys(point).every(k=>Math.abs(point[k]-previous[k])<=0.5)?stable+1:point?1:0;if(stable>=3)break;previous=point;await wait(75,signal);}
+      if(stable<3)return failed('image-navigation-not-ready');
+      const fresh=await this.state({record:false});if(fresh.imagePost?.id!==expectedVideoId||fresh.imagePost?.imageKey!==expectedImageKey||fresh.privateChatVisible||fresh.loginRequired||fresh.verificationRequired)return{...failed('observed-image-changed',fresh),staleObservation:true};
+      await this.checkVideoLimits('douyin_next');aborted(signal);
+      await button.evaluate((button,{image,point,token,id})=>{
+        const root=image.closest('[data-e2e="feed-active-video"],[data-e2e="note-detail"],[data-e2e="image-detail"]'),src=image.currentSrc||image.src,entries=window.__dafeiyuImageInputs??=Object.create(null),entry={blocked:false,clicked:false,expired:false},types=['pointerdown','mousedown','mouseup','click'];
+        const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'};
+        const listener=event=>{if(!event.isTrusted||entry.clicked)return;const rect=button.getBoundingClientRect(),r=image.getBoundingClientRect(),hit=document.elementFromPoint(event.clientX,event.clientY),picture=document.elementFromPoint((Math.max(0,r.left)+Math.min(innerWidth,r.right))/2,(Math.max(0,r.top)+Math.min(innerHeight,r.bottom))/2),bound=/(?:^|\s)video_(\d+)(?:\s|$)/.exec(root?.className||'')?.[1]||root?.getAttribute('data-aweme-id')||/^\/(?:note|video)\/(\d+)/.exec(location.pathname)?.[1];
+          const slide=image.closest('.dySwiperSlide'),pictureMatches=picture&&(picture===image||slide&&picture.closest('.dySwiperSlide')===slide||slide&&root.contains(picture)&&picture.closest('.xg-icon-play'));
+          const valid=!entry.expired&&!entry.blocked&&location.origin==='https://www.douyin.com'&&bound===id&&root?.isConnected&&button.isConnected&&image.isConnected&&(image.currentSrc||image.src)===src&&pictureMatches&&hit&&(hit===button||button.contains(hit))&&(event.target===button||button.contains(event.target))&&!button.matches(':disabled,[aria-disabled="true"],.swiper-button-disabled')&&['left','top','width','height'].every(k=>Math.abs(rect[k]-point[k])<=0.5)&&![...document.querySelectorAll('[data-e2e="im-dialog"],#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"]')].some(visible);
+          if(!valid){entry.blocked=true;event.preventDefault();event.stopImmediatePropagation();return;}if(event.type==='click')entry.clicked=true;
+        };
+        entry.cleanup=()=>{clearTimeout(entry.timer);for(const type of types)document.removeEventListener(type,listener,true);delete entries[token];};entry.timer=setTimeout(entry.cleanup,15000);entries[token]=entry;for(const type of types)document.addEventListener(type,listener,{capture:true,passive:false});
+      },{image,point,token,id:expectedVideoId});
+      aborted(signal);inputStarted=true;await this.page.mouse.click(point.x,point.y);inputSettled=true;aborted(signal);
+      const clicked=await this.page.evaluate(token=>{const e=window.__dafeiyuImageInputs?.[token];return Boolean(e?.clicked&&!e.blocked);},token);if(!clicked)return failed('image-input-rejected');
+      let current=before,previousKey,settled=0;
+      for(let i=0;i<24;i++){aborted(signal);await this.checkVideoLimits('douyin_next');current=await this.state({record:false});const image=current.imagePost;
+        if(current.privateChatVisible||current.loginRequired||current.verificationRequired||image?.id!==expectedVideoId)return{...failed('image-work-changed',current),staleObservation:true};
+        const advanced=image.loaded&&image.imageKey!==expectedImageKey&&(!initial.album?.index||!image.album?.index||image.album.index===initial.album.index+1);settled=advanced&&image.imageKey===previousKey?settled+1:advanced?1:0;previousKey=image.imageKey;
+        if(settled>=2)return{changed:true,pageChanged:true,fromIndex:initial.album?.index,toIndex:image.album?.index,state:current};await wait(125,signal);
+      }
+      return failed('image-page-not-confirmed',current);
+    }finally{
+      await this.page.evaluate(({token,retain})=>{const e=window.__dafeiyuImageInputs?.[token];if(!e)return;if(retain)e.expired=true;else e.cleanup();},{token,retain:inputStarted&&!inputSettled}).catch(()=>{});await button?.dispose();await image?.dispose();
+    }
+  }
+  async openLiveRoom(signal,{expectedLiveRoomId}={}) {
+    aborted(signal);await this.checkVideoLimits('douyin_next');const before=await this.state({record:false});
+    if(before.pageKind!=='live-preview'||before.livePreview?.roomId!==expectedLiveRoomId||before.privateChatVisible||before.loginRequired||before.verificationRequired)return{changed:false,staleObservation:true,state:before,reasonCode:'observed-live-changed'};
+    this.liveReturnUrl=RECOMMEND;this.liveReturnRoomId=expectedLiveRoomId;
+    await this.page.goto(`https://live.douyin.com/${expectedLiveRoomId}`,{waitUntil:'domcontentloaded',timeout:25000});aborted(signal);await this.evaluatePage(label=>{window.name=label;},browserPageLabel(this.source),signal);
+    for(let i=0;i<50;i++){aborted(signal);await this.checkVideoLimits('douyin_observe');const state=await this.state({record:false});if(state.loginRequired||state.verificationRequired||state.unsupportedPage||state.privateChatVisible)return{changed:false,state};if(state.liveRoom?.roomId===expectedLiveRoomId&&(state.liveRoom.ended||state.liveRoom.video?.readyState>=2))return{changed:true,enteredLive:true,state};await wait(200,signal);}
+    return{changed:false,state:await this.state({record:false}),reasonCode:'live-room-not-ready'};
+  }
+  async exitLiveRoom(signal,{expectedLiveRoomId}={}) {
+    aborted(signal);await this.checkVideoLimits('douyin_next');const before=await this.state({record:false});
+    if(before.liveRoom?.roomId!==expectedLiveRoomId||before.privateChatVisible||before.loginRequired||before.verificationRequired)return{changed:false,staleObservation:true,state:before,reasonCode:'observed-live-changed'};
+    await this.navigate(RECOMMEND,signal);const state=await this.state({record:false});this.liveReturnRoomId=null;
+    if(state.livePreview?.roomId===expectedLiveRoomId){const next=await this.switchVideo(1,signal,{recordLearning:false,expectedLiveRoomId});return{...next,exitedLive:true};}
+    return{changed:true,exitedLive:true,state};
+  }
+  async captureViewport(clip,signal) {
+    aborted(signal);
+    if(!clip||!['x','y','width','height'].every(key=>Number.isFinite(clip[key]))||clip.x<0||clip.y<0||clip.width<2||clip.height<2)throw new Error('画面采样区域无效。');
+    let session,timer,onAbort;
+    const bounded=pending=>Promise.race([pending,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('画面采样超时，未采用迟到截图。')),5000);if(signal){onAbort=()=>reject(signal.reason);signal.addEventListener('abort',onAbort,{once:true});}})]).finally(()=>{clearTimeout(timer);if(onAbort)signal.removeEventListener('abort',onAbort);});
+    const attaching=this.page.context().newCDPSession(this.page);
+    try{try{session=await bounded(attaching);}catch(error){void attaching.then(value=>value.detach()).catch(()=>{});throw error;}
+      const captured=await bounded(session.send('Page.captureScreenshot',{format:'jpeg',quality:65,clip:{...clip,scale:1},captureBeyondViewport:false,fromSurface:true}));aborted(signal);
+      if(typeof captured.data!=='string'||!captured.data.length||captured.data.length>2666670||!/^[A-Za-z0-9+/]+={0,2}$/.test(captured.data))throw new Error('画面采样未生成有界JPEG。');
+      return Buffer.from(captured.data,'base64');
+    }finally{await session?.detach().catch(()=>{});}
+  }
+  async captureLive(state,seconds,signal) {
+    const room=state.liveRoom||state.livePreview,workId=`live:${room.roomId}`,empty=(current,note)=>({state:current,frames:[],note});
+    if(room.ended||!room.video||room.video.readyState<2||room.video.width<2||room.video.height<2)return empty(state,'当前直播未提供已解码的实际视频，没有把封面当直播画面。');
+    aborted(signal);await this.checkVideoLimits('douyin_observe');let handle;
+    try{
+      handle=await this.page.evaluateHandle(clip=>{const hit=document.elementFromPoint(clip.x+clip.width/2,clip.y+clip.height/2);const videos=[...document.querySelectorAll('video')].filter(v=>{const r=v.getBoundingClientRect();return r.width>0&&r.height>0&&r.left<innerWidth&&r.right>0&&r.top<innerHeight&&r.bottom>0&&!v.closest('[data-e2e="im-dialog"]')});return videos.length===1?videos[0]:hit?.tagName==='VIDEO'?hit:null;},room.viewport);
+      const read=()=>handle.evaluate(v=>{if(!(v instanceof HTMLVideoElement)||!v.isConnected)return null;const r=v.getBoundingClientRect();return{src:v.currentSrc||v.src||'srcObject',time:v.currentTime,decoded:v.getVideoPlaybackQuality?.().totalVideoFrames??null,ready:v.readyState,paused:v.paused,width:v.videoWidth,height:v.videoHeight,viewport:{x:Math.max(0,r.left),y:Math.max(0,r.top),width:Math.min(innerWidth,r.right)-Math.max(0,r.left),height:Math.min(innerHeight,r.bottom)-Math.max(0,r.top)}};});
+      const first=await read();if(!first||first.ready<2||first.width<2||first.height<2)return empty(state,'直播视频尚未就绪。');
+      if(first.paused){await handle.evaluate(v=>v.play());aborted(signal);}
+      const frames=[];let last=first;
+      for(let i=0;i<2;i++){if(i)await wait(Math.max(200,Math.min(10000,seconds*1000||1000)),signal);await this.checkVideoLimits('douyin_observe');aborted(signal);const current=await this.state({record:false}),live=current.liveRoom||current.livePreview;last=await read();
+        if(live?.roomId!==room.roomId||live.ended||current.loginRequired||current.verificationRequired||current.privateChatVisible||current.unsupportedPage||!last||last.src!==first.src||last.ready<2||last.paused||['x','y','width','height'].some(k=>Math.abs(last.viewport[k]-first.viewport[k])>0.5))return empty(current,'直播采样期间房间、播放器或遮挡状态改变，未返回旧画面。');
+        const data=await this.captureViewport(last.viewport,signal);if(data.length>2000000)return empty(current,'直播画面超过预算，未提交。');
+        frames.push({mimeType:'image/jpeg',data:data.toString('base64'),videoId:workId,time:last.time,mediaKind:'live'});
+      }
+      const after=await this.state({record:false}),live=after.liveRoom||after.livePreview,final=await read();
+      if(live?.roomId!==room.roomId||after.privateChatVisible||after.loginRequired||after.verificationRequired||!final||final.src!==first.src||final.paused||final.time-first.time<0.1||!Number.isFinite(first.decoded)||final.decoded<=first.decoded)return empty(after,'没有核实直播时间与解码帧推进，没有把静态画面当实时直播。');
+      return{state:after,frames,observation:{videoId:workId,workKind:'live',roomId:room.roomId,seconds:Math.max(0,final.time-first.time),decodedFramesAdded:final.decoded-first.decoded,note:'仅观察当前直播的有限实时画面，没有音频、完播时长或未采样过程。'}};
+    }finally{await handle?.dispose();}
+  }
+  async captureImagePost(state,signal) {
+    const initial=state.imagePost,empty=(current,note)=>({state:current,frames:[],note});
+    if(state.pageKind!=='image-post'||initial?.recognized!==true||initial.loaded!==true||!/^\d{10,30}$/.test(initial.id||''))return empty(state,'图文作品尚未就绪。');
+    aborted(signal);await this.checkVideoLimits('douyin_observe');
+    await this.page.evaluate(({id})=>{const roots=[...document.querySelectorAll('[data-e2e="note-detail"],[data-e2e="image-detail"],[data-e2e="feed-active-video"]')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0&&r.right>0&&r.left<innerWidth});const root=roots.find(e=>e.matches('[data-e2e="note-detail"],[data-e2e="image-detail"]'))||roots.find(e=>(e.getAttribute('data-aweme-id')||/(?:^|\s)video_(\d+)(?:\s|$)/.exec(e.className||'')?.[1])===id);if(root)for(const media of (root.querySelector('[data-e2e="player-container"].note-detail-container')||root).querySelectorAll('video,audio'))if(!media.closest('[data-e2e="im-dialog"]'))HTMLMediaElement.prototype.pause.call(media);},{id:initial.id});
+    const clip=initial.viewport;
+    let handle;
+    try{
+      handle=await this.page.evaluateHandle(({x,y,width,height})=>{
+        const images=[...document.querySelectorAll('[data-e2e="feed-active-video"] img,[data-e2e="note-detail"] img,[data-e2e="image-detail"] img')].filter(e=>{const r=e.getBoundingClientRect();return e.complete&&e.naturalWidth>=120&&e.naturalHeight>=120&&!/blur\(/.test(getComputedStyle(e).filter)&&Math.abs(Math.max(0,r.left)-x)<0.5&&Math.abs(Math.max(0,r.top)-y)<0.5&&Math.abs(Math.min(innerWidth,r.right)-Math.max(0,r.left)-width)<0.5&&Math.abs(Math.min(innerHeight,r.bottom)-Math.max(0,r.top)-height)<0.5;});
+        return images.length===1?images[0]:null;
+      },clip);
+      const read=()=>handle.evaluate(image=>{
+        if(!image||image.tagName!=='IMG')return null;const r=image.getBoundingClientRect();
+        return{connected:image.isConnected,loaded:image.complete&&image.naturalWidth>=120&&image.naturalHeight>=120,src:image.currentSrc||image.src,width:image.naturalWidth,height:image.naturalHeight,viewport:{x:Math.max(0,r.left),y:Math.max(0,r.top),width:Math.min(innerWidth,r.right)-Math.max(0,r.left),height:Math.min(innerHeight,r.bottom)-Math.max(0,r.top)}};
+      });
+      const before=await read();
+      if(!before?.connected||!before.loaded||typeof before.src!=='string'||!before.src||before.src.length>8192||['x','y','width','height'].some(k=>!Number.isFinite(clip?.[k])||Math.abs(before.viewport[k]-clip[k])>0.5))return empty(state,'当前图片已变化，没有采集其他区域。');
+      const data=await this.captureViewport(clip,signal);
+      aborted(signal);await this.checkVideoLimits('douyin_observe');
+      const checked=await this.state(),after=await read();
+      if(checked.loginRequired||checked.verificationRequired||checked.privateChatVisible||checked.unsupportedPage||checked.imagePost?.id!==initial.id||!after?.connected||!after.loaded||after.src!==before.src||after.width!==before.width||after.height!==before.height||['x','y','width','height'].some(k=>Math.abs(after.viewport[k]-before.viewport[k])>0.5))return empty(checked,'截图期间作品、图片或遮挡状态改变，已丢弃本次图文画面。');
+      if(data.length>2_000_000)return empty(checked,'当前图文截图超过画面预算，未上传。');
+      this.lastObservationVideoId=null;this.lastObservationEvidenceId=null;this.lastObservationState=null;
+      if(checked.imagePost?.imageKey!==initial.imageKey)return empty(checked,'截图期间图文页改变，已丢弃旧页。');
+      return{state:checked,frames:[{mimeType:'image/jpeg',data:data.toString('base64'),videoId:initial.id,time:null,mediaKind:'image-post',imageKey:initial.imageKey}],observation:{videoId:initial.id,workKind:'image-post',imageKey:initial.imageKey,album:initial.album,seconds:0,note:'当前页实际图片；可按可见翻页控件继续阅读，未读页不能补写为事实，没有视频完播率。'}};
+    }finally{await handle?.dispose();}
+  }
   async capture(seconds,signal,{recordLearning=true,sharedCaptureMode}={}) {
     if (sharedCaptureMode !== undefined) {
       if (sharedCaptureMode !== SHARED_CAPTURE_MODE) throw new Error('共享画面采样不是宿主内部调用。');
@@ -1110,7 +1370,9 @@ export class BrowserController {
     const captureStarted=Date.now();
     let state=await this.state();
     if(state.loginRequired||state.verificationRequired||state.privateChatVisible) return {state,frames:[],note:'登录、验证或私信面板遮挡画面，本次没有采集图片。'};
-    if(state.livePreview?.recognized === true) return {state,frames:[],note:'当前是推荐流直播预览，不采集直播画面。'};
+    if(state.liveRoom?.recognized===true)return this.captureLive(state,seconds,signal);
+    if(state.livePreview?.recognized === true) return {state,frames:[],note:'不采集直播预览画面，进入已核对房间后才能观察实时画面。'};
+    if(state.pageKind==='image-post')return this.captureImagePost(state,signal);
     if(!state.video) return {state,frames:[],note:'没有可见视频画面，请先打开作品。'};
     const frames=[],samples=seconds?3:1;
     const before={...state.video}, firstState=structuredClone(state);

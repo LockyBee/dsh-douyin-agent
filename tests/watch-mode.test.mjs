@@ -62,6 +62,11 @@ test('临时真实Edge页面持续静音且有实际播放进度，不改变音�
   assert.equal(await page.evaluate(() => Boolean(window.__dafeiyuSilentVideoMode)), false);
 });
 
+test('已核对的直播间沿用作品页静默规则，离开数字房间或其他归属不接管',async t=>{
+ const f=fixture(t);f.mode.configure({silent:true},{explicit:true});const managed=await pageFixture(t,'deepseek-douyin-api','https://live.douyin.com/12345678');assert.equal((await f.mode.apply(managed.page)).applied,true);assert.equal(await managed.page.locator('video').evaluate(v=>v.muted),true);assert.equal(await managed.page.locator('video').evaluate(v=>v.paused),false);
+ for(const [label,url] of [['unrelated','https://live.douyin.com/12345678'],['deepseek-douyin-api','https://live.douyin.com/categorynew/4_101']]){const other=await pageFixture(t,label,url);assert.equal((await f.mode.apply(other.page)).applied,false);}
+});
+
 test('新增媒体与同源导航仍静音，关闭后未来导航不重装旧监听，保留原本静音媒体', async t => {
   const f = fixture(t), { page } = await pageFixture(t); f.mode.configure({ silent: true }, { explicit: true }); await f.mode.apply(page);
   await page.evaluate(() => { const second = document.createElement('video'); second.id = 'original-muted'; second.muted = true; second.volume = 0.24; document.body.append(second); const third = document.createElement('video'); third.id = 'new-video'; document.body.append(third); });

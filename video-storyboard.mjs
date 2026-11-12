@@ -57,7 +57,8 @@ export function prepareVideoFrames(frames,{signal,budget=480_000}={}){
   if(frames.length<2||frames.length>16)return original(frames,'single-or-too-many');
   if(!Number.isSafeInteger(budget)||budget<32_768||budget>640_000)throw Error('分镜像素预算须为32768至640000。');
   const id=frames[0]?.videoId;
-  if(!publicId(id)||frames.some(f=>f.videoId!==id||f.mimeType!=='image/jpeg'||!Number.isFinite(f.time)||f.time<0))return original(frames,'not-same-jpeg-video');
+  const sameLive=typeof id==='string'&&/^live:\d{4,30}$/.test(id)&&frames.every(f=>f.mediaKind==='live');
+  if(!publicId(id)&&!sameLive||frames.some(f=>f.videoId!==id||f.mimeType!=='image/jpeg'||!Number.isFinite(f.time)||f.time<0))return original(frames,'not-same-jpeg-video');
   try{
     let totalBytes=0,totalPixels=0;
     const sources=frames.map(frame=>{const bytes=frameBytes(frame),size=jpegDimensions(bytes);totalBytes+=bytes.length;totalPixels+=size.width*size.height;if(totalBytes>MAX_TOTAL_BYTES||totalPixels>MAX_PIXELS)throw Error('分镜输入总量超限。');return{bytes,...size};});

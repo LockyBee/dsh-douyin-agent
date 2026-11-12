@@ -69,6 +69,20 @@ async function assertClean(f){
   assert.equal(browser.isConnected(),true);
 }
 
+for (const mode of ['offscreen', 'modal']) test(`换片控件${mode}：仅使用当前可见播放器中的按钮`, async t => {
+  const f = await fixture(t);
+  await f.page.evaluate(mode => {
+    const original = document.querySelector('button'), other = original.cloneNode(true); other.id = 'outside-arrow';
+    if (mode === 'offscreen') other.style.top = '-300px';
+    else {
+      const modal = document.createElement('div'); modal.setAttribute('role', 'dialog'); modal.style.cssText = 'position:absolute;left:0;top:0;width:600px;height:700px';
+      document.body.append(modal); modal.append(document.querySelector('#current'), original); other.style.left = '900px';
+    }
+    document.body.append(other);
+  }, mode);
+  const result = await f.switch(); assert.equal(result.changed, true); assert.equal((await f.inputs()).length, 1); await assertClean(f);
+});
+
 for(const arrow of [true,false])test(`双候选预载：${arrow?'真实点击':'真实滚轮'}只输入一次，并连续确认新片`,async t=>{
   const f=await fixture(t,{arrow}),initial=await f.page.evaluate(readPageState);
   assert.equal(initial.videoSelection.candidateCount,2);assert.equal(initial.videoSelection.ambiguous,true);assert.equal(initial.video.id,A);

@@ -1,6 +1,6 @@
 # 版本与发布
 
-当前正式产品版本为 [1.4.6](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.6)，插件与独立软件共用版本号。实际发布和市场同步状态见 [publication.md](publication.md)，npm 与 GitHub 页面为各自可用状态的依据。
+当前正式产品版本为 [1.4.7](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.7)，插件与独立软件共用版本号。实际发布和市场同步状态见 [publication.md](publication.md)，npm 与 GitHub 页面为各自可用状态的依据。
 
 1.4.6-beta.1 至 beta.13 是本地验证构建，不是额外的社区正式版本。历史验证中的版本和构建摘要保留原值；不能将旧包的实测结果直接算作新包通过。后续未发布改动使用下一正式版本下的 beta 编号。
 

@@ -146,11 +146,18 @@ function headerNames(text) {
   ].map(match => match[1].trim()).filter(Boolean);
 }
 
-function anonymousCleaner(qqDb, tables, config, namespace) {
+function originalArchiveAvailable(db, tables) {
+  if (!tables.has('conversation_originals')) return false;
+  const columns = new Set(db.prepare('PRAGMA table_info(conversation_originals)').all().map(row => row.name));
+  return ['id','conversation_key','source_message_id','original_order','live_message_id','role','content_json','created_at','sender_id','sender_name','state'].every(column => columns.has(column));
+}
+
+function anonymousCleaner(qqDb, tables, config, namespace, hasOriginals = false) {
   let cache = identityCaches.get(namespace);
   const maxId = tables.has('messages') ? Number(qqDb.prepare('SELECT COALESCE(MAX(id),0) AS id FROM messages').get().id) : 0;
-  if (!cache || maxId < cache.watermark) {
-    cache = { identities: new Set(), watermark: 0 };
+  const archiveMax = hasOriginals ? Number(qqDb.prepare('SELECT COALESCE(MAX(id),0) AS id FROM conversation_originals').get().id) : 0;
+  if (!cache || maxId < cache.watermark || archiveMax < (cache.archiveWatermark || 0)) {
+    cache = { identities: new Set(), watermark: 0, archiveWatermark: 0 };
     if (identityCaches.size >= 100) identityCaches.delete(identityCaches.keys().next().value);
     identityCaches.set(namespace, cache);
   }
@@ -163,6 +170,13 @@ function anonymousCleaner(qqDb, tables, config, namespace) {
       add(row.sender_id); add(row.sender_name);
       for (const name of headerNames(itemText(row))) add(name);
       cache.watermark = Number(row.id);
+    }
+  }
+  if (hasOriginals) {
+    for (const row of qqDb.prepare("SELECT id,sender_id,sender_name,role,CASE WHEN role='user' AND instr(content_json,'发送者')>0 THEN content_json ELSE NULL END AS content_json FROM conversation_originals WHERE id>? ORDER BY id").all(cache.archiveWatermark || 0)) {
+      add(row.sender_id); add(row.sender_name);
+      for (const name of headerNames(itemText(row))) add(name);
+      cache.archiveWatermark = Number(row.id);
     }
   }
   const escaped = [...identities].sort((a, b) => b.length - a.length).map(value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -297,7 +311,8 @@ export function syncQQToCentral({ qqDb, qqPath, config, centralDb, centralPath, 
     const allowedKeys = new Set(source.prepare(keysSql).all().map(row => row.key).filter(key => shared && /^(group|private):/.test(key) && !denied.has(key)));
     const namespace = `qq-${hash(path.resolve(qqPath).toLowerCase()).slice(0, 20)}`;
     const policyHash = hash(JSON.stringify({ version: IMPORT_VERSION, shared, allowedKeys: [...allowedKeys].sort() }));
-    const clean = shared ? anonymousCleaner(source, tables, config, namespace) : value => scrubMemoryText(value);
+    const hasOriginals = originalArchiveAvailable(source, tables);
+    const clean = shared ? anonymousCleaner(source, tables, config, namespace, hasOriginals) : value => scrubMemoryText(value);
     let processed = 0, imported = 0, updated = 0, removed = 0, pending = false, watermark = 0, confirmed = 0, reconciled = 0, reconciliationPending = false;
     const existing = dest.prepare('SELECT * FROM memory_entries WHERE external_key=?');
     const sourceTime = dest.prepare('SELECT source_updated_at FROM memory_source_times WHERE entry_id=?');
@@ -327,19 +342,47 @@ export function syncQQToCentral({ qqDb, qqPath, config, centralDb, centralPath, 
       (SELECT MIN(id) FROM messages WHERE conversation_key=? AND role='user' AND id>?) AS end`) : null;
     const closedTurnRows = hasMessages ? source.prepare('SELECT id,role,content_json FROM messages WHERE conversation_key=? AND id>=? AND id<?') : null;
     const openTurnRows = hasMessages ? source.prepare('SELECT id,role,content_json FROM messages WHERE conversation_key=? AND id>=?') : null;
+    const archiveColumns = 'source_message_id AS id,conversation_key,sender_id,sender_name,role,content_json,created_at,original_order';
+    const archivedSource = hasOriginals ? source.prepare(`SELECT ${archiveColumns} FROM conversation_originals
+      WHERE source_message_id=? AND state='active' AND live_message_id IS NULL ORDER BY original_order DESC,id DESC LIMIT 2`) : null;
+    const linkedArchive = hasOriginals ? source.prepare(`SELECT ${archiveColumns} FROM conversation_originals
+      WHERE conversation_key=? AND live_message_id=? AND state='active' AND role=? AND content_json=? AND created_at=? ORDER BY original_order DESC,id DESC LIMIT 2`) : null;
+    const archiveBounds = hasOriginals ? source.prepare(`SELECT
+      COALESCE((SELECT MAX(original_order) FROM conversation_originals WHERE conversation_key=? AND role='user' AND original_order<=?),?) AS start,
+      (SELECT MIN(original_order) FROM conversation_originals WHERE conversation_key=? AND role='user' AND original_order>?) AS end`) : null;
+    const closedArchiveTurn = hasOriginals ? source.prepare(`SELECT ${archiveColumns} FROM conversation_originals WHERE conversation_key=? AND original_order>=? AND original_order<? ORDER BY original_order,id`) : null;
+    const openArchiveTurn = hasOriginals ? source.prepare(`SELECT ${archiveColumns} FROM conversation_originals WHERE conversation_key=? AND original_order>=? ORDER BY original_order,id`) : null;
+    const archiveForMissing = messageId => {
+      const matches = archivedSource?.all(messageId) || [];
+      if (matches.length !== 1 || !Number.isSafeInteger(matches[0].original_order) || matches[0].original_order < 1) return null;
+      return { ...matches[0], archivedOriginal: true };
+    };
+    const hasDetachedMirror = () => {
+      if (!hasOriginals) return false;
+      const rows = source.prepare("SELECT DISTINCT source_message_id FROM conversation_originals WHERE state='active' AND live_message_id IS NULL AND original_order>0 ORDER BY source_message_id DESC").all();
+      return rows.some(row => existing.get(`${namespace}:message:${row.source_message_id}`) && !sourceRow?.get(row.source_message_id) && archiveForMissing(row.source_message_id));
+    };
     const sensitiveCache = new Map();
+    const hasSensitiveTool = rows => rows.some(turn => {
+      if (!['tool', 'assistant'].includes(turn.role)) return false;
+      let item; try { item = JSON.parse(turn.content_json); } catch { return true; }
+      const names = [item?.name, item?.function_call?.name, ...(Array.isArray(item?.tool_calls) ? item.tool_calls.map(call => call?.function?.name || call?.name) : [])];
+      return names.some(name => LOCAL_TOOLS.includes(name));
+    });
     const getTurn = row => {
-      const bounds = turnBounds.get(row.conversation_key, row.id, row.id, row.conversation_key, row.id);
-      const key = `${row.conversation_key}:${bounds.start}:${bounds.end}`;
+      let archived = row.archivedOriginal ? row : null;
+      if (!archived && linkedArchive) {
+        const matches = linkedArchive.all(row.conversation_key, row.id, row.role, row.content_json, row.created_at);
+        if (matches.length === 1 && Number.isSafeInteger(matches[0].original_order) && matches[0].original_order > 0) archived = matches[0];
+      }
+      const live = row.archivedOriginal ? null : turnBounds.get(row.conversation_key, row.id, row.id, row.conversation_key, row.id);
+      const older = archived ? archiveBounds.get(row.conversation_key, archived.original_order, archived.original_order, row.conversation_key, archived.original_order) : null;
+      const key = JSON.stringify([row.conversation_key,live?.start,live?.end,older?.start,older?.end]);
       if (!sensitiveCache.has(key)) {
-        const rows = bounds.end == null ? openTurnRows.all(row.conversation_key, bounds.start) : closedTurnRows.all(row.conversation_key, bounds.start, bounds.end);
-        const sensitive = rows.some(turn => {
-          if (!['tool', 'assistant'].includes(turn.role)) return false;
-          let item; try { item = JSON.parse(turn.content_json); } catch { return true; }
-          const names = [item?.name, item?.function_call?.name, ...(Array.isArray(item?.tool_calls) ? item.tool_calls.map(call => call?.function?.name || call?.name) : [])];
-          return names.some(name => LOCAL_TOOLS.includes(name));
-        });
-        sensitiveCache.set(key, { rows, sensitive, purged: false });
+        const rows = live ? (live.end == null ? openTurnRows.all(row.conversation_key, live.start) : closedTurnRows.all(row.conversation_key, live.start, live.end)) : [];
+        // 档案的原始顺序包含已压缩工具；撤销或superseded工具仍证明该回合曾访问本机资料。
+        if (older) rows.push(...(older.end == null ? openArchiveTurn.all(row.conversation_key, older.start) : closedArchiveTurn.all(row.conversation_key, older.start, older.end)));
+        sensitiveCache.set(key, { rows, sensitive: hasSensitiveTool(rows), purged: false });
       }
       return sensitiveCache.get(key);
     };
@@ -364,7 +407,7 @@ export function syncQQToCentral({ qqDb, qqPath, config, centralDb, centralPath, 
       watermark = Number(state?.last_message_id || 0);
       let reconcileCursor = Number(state?.last_reconciled_id || 0);
       const maxId = hasMessages ? Number(source.prepare('SELECT COALESCE(MAX(id),0) AS id FROM messages').get().id) : 0;
-      if (state && (state.policy_hash !== policyHash || maxId < watermark)) {
+      if (state && (state.policy_hash !== policyHash || maxId < watermark && !hasDetachedMirror())) {
         removed += Number(dest.prepare('DELETE FROM memory_entries WHERE external_key LIKE ?').run(`${namespace}:%`).changes);
         watermark = 0;
         reconcileCursor = 0;
@@ -384,7 +427,9 @@ export function syncQQToCentral({ qqDb, qqPath, config, centralDb, centralPath, 
       const mirrored = dest.prepare('SELECT id,external_key FROM memory_entries WHERE id>? AND external_key LIKE ? ORDER BY id LIMIT ?').all(reconcileCursor, `${namespace}:message:%`, reconcileLimit);
       for (const row of mirrored) {
         reconciled += 1; reconcileCursor = Number(row.id);
-        const original = sourceRow?.get(Number(row.external_key.split(':').at(-1)));
+        const messageId = Number(row.external_key.split(':').at(-1));
+        // 只保留已有镜像；压缩档案不进入readBatch，不能借此新导出或恢复撤销记录。
+        const original = sourceRow?.get(messageId) || archiveForMissing(messageId);
         if (!original || !saveHistory(original)) removed += Number(remove.run(row.external_key).changes);
       }
       reconciliationPending = Boolean(dest.prepare('SELECT id FROM memory_entries WHERE id>? AND external_key LIKE ? LIMIT 1').get(reconcileCursor, `${namespace}:message:%`));

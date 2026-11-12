@@ -120,7 +120,10 @@ export class VideoLimits {
     if(!explicit)throw new Error('结束观看需要明确操作。');return this.control(()=>{const usage=this.accrue(this.usage(),this.policy(),this.now());usage.active=null;write(this.usageFile,usage);const sessions=read(this.sessionsFile);if(sessions.current?.status==='active'){sessions.current.status='ended';sessions.current.reason=reason;sessions.current.endedAt=this.now();write(this.sessionsFile,sessions);}return this.state();});
   }
   notePlayback(source,browserState,{ownerId=source}={}) {
-    sourceName(source);const state=browserState?.state||browserState,playing=state?.video?.paused===false&&state.video.readyState>=2&&!state.privateChatVisible&&!state.loginRequired&&!state.verificationRequired&&!state.unsupportedPage;
+    sourceName(source);const state=browserState?.state||browserState;
+    const image=state?.imagePost,imageVisible=state?.pageKind==='image-post'&&!state.video&&image?.recognized===true&&image.source==='active-image-element'&&image.loaded===true&&/^\d{10,30}$/.test(image.id||'')&&image.viewport&&['x','y','width','height'].every(key=>Number.isFinite(image.viewport[key]))&&image.viewport.width>=120&&image.viewport.height>=120;
+    const room=state?.liveRoom,livePlaying=state?.pageKind==='live-room'&&room?.recognized===true&&room.source==='direct-live-url-and-player'&&/^\d{4,30}$/.test(room.roomId||'')&&!room.ended&&room.video?.paused===false&&room.video.readyState>=2&&room.video.width>=2&&room.video.height>=2;
+    const playing=(state?.pageKind!=='live-room'&&state?.video?.paused===false&&state.video.readyState>=2||imageVisible||livePlaying)&&!state.privateChatVisible&&!state.loginRequired&&!state.verificationRequired&&!state.unsupportedPage;
     const now=this.now();
     try{return this.control(()=>{const policy=this.policy(),usage=this.accrue(this.usage(),policy,now);usage.active=null;const current=this.state(now);if(playing&&current.allowed)usage.active={source,ownerId:String(ownerId),pid:process.pid,fromAt:now,verifiedAt:now,expiresAt:now+2000};write(this.usageFile,usage);return this.state(now);});}
     catch(error){if(error.code!=='VIDEO_CONTROL_BUSY')throw error;return{...this.state(now),accountingDeferred:true};}

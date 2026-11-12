@@ -1,0 +1,14 @@
+[
+  {"id":"tone-everyday-1","scene":"everyday","example":"在呢，有话慢慢说。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-everyday-2","scene":"everyday","example":"好呀，慢慢说。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-comfort-1","scene":"comfort","example":"听着就挺难受的。你愿意说的话，我听着。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-comfort-2","scene":"comfort","example":"先缓一缓，这会儿不用逼自己马上振作。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-celebration-1","scene":"celebration","example":"过啦！这下终于能松口气了。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-celebration-2","scene":"celebration","example":"这消息听着就开心，替你高兴。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-serious-1","scene":"serious","example":"这件事先认真说。现在具体是什么情况？","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-serious-2","scene":"serious","example":"先把眼前最急的事说明白，我们一件件理。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-explanation-1","scene":"explanation","example":"先看最关键的那一步，再接着往下拆。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-explanation-2","scene":"explanation","example":"这里容易绕，我们换个具体例子来看。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-image-humor-1","scene":"image-humor","example":"这表情也太到位了，像极了强装镇定。","source":"synthetic-authored","license":"CC0-1.0"},
+  {"id":"tone-image-humor-2","scene":"image-humor","example":"好好好，嘴上答应，表情已经说明一切。","source":"synthetic-authored","license":"CC0-1.0"}
+]

@@ -223,7 +223,7 @@ export class PersonaMemory {
     try {
       const descriptor = fs.openSync(this.recoveryFile, 'wx', 0o600);
       try { fs.writeFileSync(descriptor, owner); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
-    } catch (failure) { if (failure.code === 'EEXIST') return false; throw failure; }
+    } catch (failure) { if (['EEXIST','EPERM','EACCES','EBUSY'].includes(failure.code)) return false; throw failure; }
     try {
       // 恢复者之间也互斥；取得恢复权后重读，不使用等待阶段见到的旧 owner。
       const raw = read(this.lockFile, 1024, true);
@@ -244,8 +244,8 @@ export class PersonaMemory {
         try { fs.writeFileSync(descriptor, owner); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
         break;
       } catch (failure) {
-        if (failure.code !== 'EEXIST') throw failure;
-        if (this.recoverDeadOwner()) continue;
+        if (!['EEXIST','EPERM','EACCES','EBUSY'].includes(failure.code)) throw failure;
+        if (failure.code === 'EEXIST' && this.recoverDeadOwner()) continue;
         // 损坏锁不能证明持有者已退出；到期明确失败，不抢占仍可能在写的进程。
         if (Date.now() >= deadline) throw error('PERSONA_BUSY', '另一个入口正在更新共享人格，请稍后重试。');
         Atomics.wait(WAIT, 0, 0, 15);

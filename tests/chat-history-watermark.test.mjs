@@ -13,6 +13,17 @@ const evidence = { chronology: 'oldest-first', latestEndVerified: true };
 const old = row('old'), middle = row('middle'), target = row('target', '大肥鱼你好', 'incoming', { eligibleForReply: true, arrivalClassification: 'new-tail' });
 const baseline = [old, middle, target];
 
+test('已确证且内容不变的旧未知前缀可以核对，新未知、改动和缺证据仍拒绝', () => {
+  const placeholder = row('placeholder', '', 'unknown', { kind: 'unknown', arrivalClassification: 'baseline' });
+  const rows = [placeholder, ...baseline], expected = messageWatermark(rows, evidence);
+  assert.equal(compareMessageWatermark(expected, rows, evidence).matches, true);
+  assert.equal(compareMessageWatermark(expected, baseline, evidence).matches, true);
+  for (const current of [[{ ...placeholder, text: '发生变化' }, ...baseline], [row('new-unknown', '', 'unknown'), ...rows], [...rows, row('new-tail-unknown', '', 'unknown')], [placeholder, old, target]]) assert.equal(compareMessageWatermark(expected, current, evidence).matches, false);
+  assert.equal(compareMessageWatermark({ ...expected, unknownPrefix: undefined }, rows, evidence).matches, false);
+  assert.equal(compareMessageWatermark(expected, rows, {}).matches, false);
+  assert.equal(compareMessageWatermark(messageWatermark([{ ...placeholder, eligibleForReply: true }, ...baseline], evidence), [{ ...placeholder, eligibleForReply: true }, ...baseline], evidence).matches, false);
+});
+
 test('共享水位允许确证旧前缀补载、移除和重编号，保持完整原尾后缀', () => {
   const expected = messageWatermark(baseline, evidence);
   for (const current of [baseline, [middle, target], [target], [row('older', '历史'), ...baseline], [row('rotating-old-1'), row('rotating-old-2'), middle, target]]) assert.equal(compareMessageWatermark(expected, current, evidence).matches, true);

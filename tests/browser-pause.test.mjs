@@ -34,6 +34,10 @@ test('暂停检查只执行一次原子入口核对，不建立隔离环境或�
   f.assertReleased();
 });
 
+test('额度用完时包含数字房间直播，目录及外站仍不进入暂停范围',async()=>{
+ const f=fixture('ok',[target('managed','https://live.douyin.com/12345678'),target('directory','https://live.douyin.com/'),target('category','https://live.douyin.com/categorynew/4_101'),target('foreign','https://example.invalid/12345678')]);assert.deepEqual(await pauseExistingVideoPages(f.options),{paused:1,existingPage:true});assert.equal(f.calls.length,1);assert.match(f.calls[0].params.expression,/live\.douyin\.com/);f.assertReleased();
+});
+
 test('来源、回环端口及所有目标地址在打开连接前核对', async () => {
   for (const patch of [{ source: 'api-chat' }, { endpoint: 'https://127.0.0.1:19227' }, { endpoint: 'http://example.test:19227' }, { endpoint: 'http://user:pass@127.0.0.1:19227' }]) {
     const f = fixture(); await assert.rejects(pauseExistingVideoPages({ ...f.options, ...patch })); assert.equal(f.sockets.length, 0);

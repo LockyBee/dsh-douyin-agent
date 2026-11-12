@@ -72,12 +72,12 @@ export async function pauseExistingVideoPages({ endpoint, source, signal, timeou
     if (!response.ok) throw fail('专用浏览器页面列表不可用。');
     const targets = await response.json();
     if (!Array.isArray(targets)) throw fail('专用浏览器页面列表格式无效。');
-    const pages = targets.filter(target => { try { return target.type === 'page' && new URL(target.url).origin === 'https://www.douyin.com'; } catch { return false; } });
+    const pages = targets.filter(target => { try { return target.type === 'page' && (new URL(target.url).origin === 'https://www.douyin.com'||/^https:\/\/live\.douyin\.com\/\d{4,30}\/?(?:[?#]|$)/.test(target.url)); } catch { return false; } });
     if (pages.length > 32) throw fail('专用浏览器页面过多，暂停范围需要核对。');
     const sockets = pages.map(target => pageSocket(target.webSocketDebuggerUrl, address));
     if (new Set(sockets).size !== sockets.length) throw fail('专用浏览器页面身份重复。');
     const labels = JSON.stringify(browserPageAliases(source));
-    const expression = `(()=>{if(location.origin!=='https://www.douyin.com'||!${labels}.includes(window.name))return{matched:false,paused:0};let paused=0;for(const video of document.querySelectorAll('video')){if(!video.paused)paused++;HTMLMediaElement.prototype.pause.call(video);}return{matched:true,paused};})()`;
+    const expression = `(()=>{if((location.origin!=='https://www.douyin.com'&&!(location.origin==='https://live.douyin.com'&&/^\\/\\d{4,30}\\/?$/.test(location.pathname)))||!${labels}.includes(window.name))return{matched:false,paused:0};let paused=0;for(const video of document.querySelectorAll('video')){if(!video.paused)paused++;HTMLMediaElement.prototype.pause.call(video);}return{matched:true,paused};})()`;
     const results = await Promise.allSettled(sockets.map(url => evaluatePause(url, expression, { signal: abort.signal, WebSocketImpl })));
     const failure = results.find(result => result.status === 'rejected');
     if (failure) throw failure.reason;

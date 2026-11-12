@@ -15,11 +15,11 @@ function write(file, value) {
 function pageIdentity() {
   const visible = element => { const box = element.getBoundingClientRect(), style = getComputedStyle(element); return box.width > 0 && box.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'; };
   const text = [...document.querySelectorAll('body *')].filter(element => !element.childElementCount && visible(element) && !element.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]')).map(element => element.textContent || '').join('\n').slice(-9000);
-  return { origin: location.origin, name: window.name, loginRequired: /扫码登录|验证码登录|登录后即可|手机扫码登录/.test(text), verificationRequired: /请完成下方验证|请完成验证|安全验证|拖动滑块/.test(text) };
+  return { origin: location.origin, pathname:location.pathname, name: window.name, loginRequired: /扫码登录|验证码登录|登录后即可|手机扫码登录/.test(text), verificationRequired: /请完成下方验证|请完成验证|安全验证|拖动滑块/.test(text) };
 }
 // 不改播放、音量、visibility 或计时；只管理本专用视频页的静音属性。
 function installSilentMode({ key, label }) {
-  if (location.origin !== 'https://www.douyin.com' || window.name !== label) return { applied: false, reason: '页面不属于指定抖音入口。' };
+  if (location.origin !== 'https://www.douyin.com' && !(location.origin==='https://live.douyin.com'&&/^\/\d{4,30}\/?$/.test(location.pathname)) || window.name !== label) return { applied: false, reason: '页面不属于指定抖音入口。' };
   let enabled = false;
   try { enabled = sessionStorage.getItem(key) === 'true'; } catch { return { applied: false, reason: '专用页无法保存可回收的静默状态。' }; }
   const property = '__dafeiyuSilentVideoMode';
@@ -80,7 +80,7 @@ export class WatchMode {
   async identity(page, anyManaged = false) {
     if (!page || page.isClosed()) return { managed: false, blocked: true, reason: '专用页已关闭。' };
     const identity = await page.evaluate(pageIdentity);
-    const managed = identity.origin === 'https://www.douyin.com' && (anyManaged ? names.has(identity.name) : identity.name === browserPageLabel(this.source));
+    const managed = (identity.origin === 'https://www.douyin.com'||identity.origin==='https://live.douyin.com'&&/^\/\d{4,30}\/?$/.test(identity.pathname||'')) && (anyManaged ? names.has(identity.name) : identity.name === browserPageLabel(this.source));
     return { ...identity, managed, blocked: !managed || identity.loginRequired || identity.verificationRequired };
   }
   async apply(page, { anyVideoSource = false } = {}) {

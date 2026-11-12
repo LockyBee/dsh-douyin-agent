@@ -15,7 +15,7 @@ test('后台读取联系人不允许启动浏览器或新建标签，且在前�
   assert.equal(options[0].create, false);
 });
 
-test('默认只核对一次关注关系，后续读取复用结果，不重复触发导航', async () => {
+test('默认读取不核对关注，显式核对后继续读取也不重复触发导航', async () => {
   let verified = 0;
   const chat = new ChatBrowser({ controller: controller([]) });
   chat.verifyFollowing = async () => { verified += 1; chat.following = []; };
@@ -24,6 +24,9 @@ test('默认只核对一次关注关系，后续读取复用结果，不重复�
   chat.contactList = async () => ({ contacts: [] });
   await chat.listContacts();
   await chat.listContacts();
+  await chat.listContacts();
+  assert.equal(verified, 0);
+  await chat.listContacts({ verifyFollowing: true });
   await chat.listContacts();
   assert.equal(verified, 1);
 });

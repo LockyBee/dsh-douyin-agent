@@ -39,6 +39,27 @@ function fixture(t) {
   return { root, watch, options, controller, videoLimits, personaMemory, memory, calls, events, state, paused: () => paused, now: () => clock, advance: ms => { clock += ms; }, provider: value => { provider = value; }, other: source => { const instance = new AutonomousWatch({ ...options, source }); instances.push(instance); return instance; } };
 }
 
+test('冷启动从空白加载页有界等待到就绪，再观察和请求模型', async t => {
+  const f = fixture(t), original = f.controller.execute; let statuses = 0, observations = 0;
+  f.controller.execute = async (...args) => {
+    if (args[0] === 'douyin_status' && ++statuses < 5) return { url: 'about:blank', unsupportedPage: true };
+    if (args[0] === 'douyin_open') return { url: 'https://www.douyin.com/jingxuan', video: null };
+    if (args[0] === 'douyin_observe') observations++;
+    return original(...args);
+  };
+  const before = f.now(); f.watch.start({ startSession: true, maxRequests: 1 }, { explicit: true }); await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped'); assert.equal(observations, 1); assert.equal(f.watch.state().counts.requests, 1); assert.ok(f.now() - before >= 2000);
+});
+test('冷启动持续加载最多30秒且不调用模型，验证码与外站立即停止', async t => {
+  for (const mode of ['loading', 'verification', 'foreign']) {
+    const f = fixture(t), before = f.now(); let calls = 0;
+    f.controller.execute = async () => { calls++; return { url: mode === 'foreign' ? 'https://example.invalid/' : 'https://www.douyin.com/jingxuan', video: null, verificationRequired: mode === 'verification' }; };
+    f.watch.start({ startSession: true, maxRequests: 1 }, { explicit: true }); await f.watch.completion;
+    assert.equal(f.watch.state().status, 'needs_user'); assert.equal(f.watch.state().counts.requests, 0);
+    if (mode === 'loading') { assert.equal(f.now() - before, 30_000); assert.ok(calls <= 63); } else assert.ok(calls <= 2);
+  }
+});
+
 test('跨上海午夜结束的一轮分别保留开始日与结束日的事实日报', async t => {
   const f = fixture(t);
   f.advance(Date.parse('2026-10-15T15:59:58Z') - f.now());
@@ -188,7 +209,39 @@ test('skip通过内部controls绑定观察作品，等待后读到新片才继�
 
 const liveState = (roomId = '12345678') => ({ url: 'https://www.douyin.com/?recommend=1', video: null, pageKind: 'live-preview', livePreview: { recognized: true, source: 'active-feed-live-link', scope: 'recommend-feed', roomId } });
 
-test('推荐流遇到已核实直播预览时有限跳过，只采后续作品且不增加模型次数', async t => {
+test('无地址的明确直播预览先核对标识跳过，不请求模型或记作兴趣',async t=>{
+  const f=fixture(t),execute=f.controller.execute;let preview=true,modelCalls=0;
+  f.controller.execute=async(name,args,controls)=>{if(preview){if(name==='douyin_next'){assert.deepEqual(args,{});assert.equal(controls.expectedLivePreviewKey,'1234567890abcdef');assert.equal(controls.enterLive,undefined);preview=false;return execute(name,args,controls);}assert.equal(name,'douyin_status');return{...liveState(),livePreview:{recognized:true,source:'active-feed-live-status',scope:'recommend-feed',roomId:null,previewKey:'1234567890abcdef'}};}return execute(name,args,controls);};
+  f.provider(async()=>{modelCalls++;return{text:JSON.stringify(choice('stop'))};});
+  f.watch.start({startSession:true},{explicit:true});await f.watch.completion;
+  assert.equal(f.watch.state().status,'stopped');assert.equal(modelCalls,1);assert.equal(f.events.filter(e=>e.type==='watch.live-preview-skipped').length,1);assert.equal(f.events.find(e=>e.type==='watch.live-preview-skipped').learned,false);
+});
+
+test('图文由模型选择停留和换作品，不启动视频播放或伪造偏好学习',async t=>{
+  const f=fixture(t),execute=f.controller.execute;let image=true,requests=0,photoPlay=0;const recorded=[];
+  const photo=()=>({url:'https://www.douyin.com/?recommend=1',pageKind:'image-post',video:null,imagePost:{id:'7579432563794584937',source:'active-image-element',recognized:true,loaded:true,title:'合成图文',viewport:{x:0,y:0,width:320,height:420}}});
+  const record=f.personaMemory.recordObservation.bind(f.personaMemory);f.personaMemory.recordObservation=(observation,...args)=>{recorded.push(observation.state?.pageKind||'video');return record(observation,...args);};
+  f.controller.execute=async(name,...args)=>{if(image){if(name==='douyin_play')photoPlay++;if(name==='douyin_next'){image=false;return execute(name,...args);}if(name==='douyin_observe')return{state:photo(),frames:[{mimeType:'image/png',data:PNG,videoId:photo().imagePost.id,time:null,mediaKind:'image-post'}],observation:{videoId:photo().imagePost.id,workKind:'image-post'}};return photo();}return execute(name,...args);};
+  f.provider(async()=>({text:JSON.stringify(++requests===1?choice('stay',{seconds:2}):requests===2?choice('skip'):choice('stop'))}));
+  f.watch.start({startSession:true,maxRequests:4},{explicit:true});await f.watch.completion;
+  assert.equal(f.watch.state().status,'stopped');assert.equal(requests,3);assert.equal(photoPlay,0);assert.equal(recorded.includes('image-post'),false);assert.equal(f.events.filter(e=>e.type==='watch.image-post').length,2);
+});
+
+test('视频后切入图文仍继续观察，不因没有video.id结束整轮',async t=>{
+  const f=fixture(t),execute=f.controller.execute;let image=false,requests=0;
+  const photo=()=>({url:'https://www.douyin.com/?recommend=1',pageKind:'image-post',video:null,imagePost:{id:'7579432563794584937',source:'active-image-element',recognized:true,loaded:true,title:'合成图文',viewport:{x:0,y:0,width:320,height:420}}});
+  f.controller.execute=async(name,...args)=>{if(name==='douyin_next'){image=true;return{changed:true,state:photo()};}if(image){if(name==='douyin_observe')return{state:photo(),frames:[{mimeType:'image/png',data:PNG,videoId:photo().imagePost.id,time:null,mediaKind:'image-post'}],observation:{videoId:photo().imagePost.id,workKind:'image-post'}};return photo();}return execute(name,...args);};
+  f.provider(async()=>({text:JSON.stringify(++requests===1?choice('skip'):choice('stop'))}));
+  f.watch.start({startSession:true,maxRequests:3},{explicit:true});await f.watch.completion;assert.equal(f.watch.state().status,'stopped');assert.equal(requests,2);
+});
+
+test('连续四个不同且已核实的直播预览后仍能继续看作品',async t=>{
+  const f=fixture(t),execute=f.controller.execute;let skipped=0;
+  f.controller.execute=async(name,...args)=>{if(skipped<4&&name==='douyin_status')return liveState(String(12345678+skipped));if(skipped<4&&name==='douyin_next'){skipped++;return skipped<4?{changed:true,state:liveState(String(12345678+skipped))}:execute(name,...args);}return execute(name,...args);};
+  f.watch.start({startSession:true,maxRequests:1},{explicit:true});await f.watch.completion;assert.equal(f.watch.state().status,'stopped');assert.equal(skipped,4);assert.equal(f.watch.state().counts.requests,1);
+});
+
+test('推荐流直播入口在平台回到普通作品时继续观察，不在无实际直播画面时调用模型', async t => {
   const f = fixture(t), execute = f.controller.execute;
   let showingLive = true;
   f.controller.execute = async (name, ...rest) => {
@@ -203,21 +256,32 @@ test('推荐流遇到已核实直播预览时有限跳过，只采后续作品�
   assert.equal(f.calls.filter(call => call.name === 'douyin_next').length, 1);
   assert.equal(f.calls.filter(call => call.name === 'douyin_observe').length, 1);
   assert.equal(f.calls.some(call => call.name === 'douyin_open'), false);
-  assert.equal(f.events.filter(event => event.type === 'watch.live_skip').length, 1);
+  assert.equal(f.calls.filter(call=>call.name==='douyin_next'&&call.options.enterLive===true).length,1);
 });
 
-test('连续直播、验证码或缺少明确直播证据时不无限换片或调用模型', async t => {
+test('图文由模型连续翻完三页，也可主动提前停止，页数不写成视频完播率',async t=>{
+ for(const stopEarly of [false,true]){const f=fixture(t);let page=1;const choices=stopEarly?['stop']:['next_image','next_image','stop'];const image=()=>({url:'https://www.douyin.com/note/7579432563794584933',pageKind:'image-post',video:null,imagePost:{id:'7579432563794584933',recognized:true,source:'active-image-element',loaded:true,imageKey:'page'+page,album:{index:page,total:3,hasNext:page<3,atEnd:page===3}}});
+ f.controller.execute=async(name,args,options)=>{f.calls.push({name,args,options});if(name==='douyin_next'){assert.equal(options.advanceImage,true);assert.equal(options.expectedImageKey,'page'+page);page++;return{changed:true,pageChanged:true,state:image()};}if(name==='douyin_observe')return{state:image(),frames:[{mimeType:'image/png',data:PNG,videoId:image().imagePost.id,time:null,mediaKind:'image-post',imageKey:'page'+page}],observation:{videoId:image().imagePost.id,workKind:'image-post',imageKey:'page'+page}};return image();};let decisions=0;f.provider(async()=>({text:JSON.stringify(choice(choices[decisions++]))}));f.watch.start({}, {explicit:true});await f.watch.completion;assert.equal(f.watch.state().status,'stopped');assert.equal(page,stopEarly?1:3);assert.equal(decisions,stopEarly?1:3);assert.equal(f.personaMemory.snapshot().recentObservations.length,0);assert.equal(f.calls.some(c=>c.name==='douyin_play'),false);}
+});
+
+test('直播进入后模型选择停留再退出，同一观看预算内接着看普通作品且不外发',async t=>{
+ const f=fixture(t),original=f.controller.execute;let mode='preview',liveTime=0,decision=0;const roomId='12345678',room=()=>({url:'https://live.douyin.com/'+roomId,pageKind:'live-room',video:{id:null,paused:false,readyState:4,time:liveTime,duration:null},liveRoom:{recognized:true,source:'direct-live-url-and-player',roomId,ended:false,video:{readyState:4,paused:false,time:liveTime,width:320,height:420}}});
+ f.controller.execute=async(name,args,options)=>{if(mode==='video')return original(name,args,options);f.calls.push({name,args,options});if(name==='douyin_next'){if(options.enterLive){mode='room';return{changed:true,enteredLive:true,state:room()};}assert.equal(options.exitLive,true);mode='video';return{changed:true,exitedLive:true,state:f.state()};}if(name==='douyin_observe'){assert.equal(mode,'room');liveTime+=3;const id='live:'+roomId;return{state:room(),frames:[{mimeType:'image/png',data:PNG,videoId:id,time:liveTime-2,mediaKind:'live'},{mimeType:'image/png',data:PNG,videoId:id,time:liveTime,mediaKind:'live'}],observation:{videoId:id,workKind:'live',roomId,decodedFramesAdded:3}};}return mode==='preview'?liveState():room();};
+ f.provider(async()=>({text:JSON.stringify([choice('stay',{seconds:2}),choice('skip'),choice('stop')][decision++])}));f.watch.start({}, {explicit:true});await f.watch.completion;assert.equal(f.watch.state().status,'stopped');assert.equal(decision,3);assert.equal(f.watch.state().counts.requests,3);assert.equal(f.calls.filter(c=>c.options.enterLive).length,1);assert.equal(f.calls.filter(c=>c.options.exitLive).length,1);assert.equal(f.events.filter(e=>e.type==='watch.live-room').length,2);assert.equal(f.personaMemory.snapshot().recentObservations.length,1);
+});
+
+test('直播换片未变化、验证码或缺少明确直播证据时不重复输入或调用模型', async t => {
   for (const mode of ['endless', 'verification', 'unknown']) {
     const f = fixture(t); let nexts = 0, requests = 0;
     f.provider(async () => { requests++; return { text: JSON.stringify(choice()) }; });
     f.controller.execute = async name => {
       if (name === 'douyin_next') nexts++;
       return mode === 'unknown' ? { video: null, pageKind: 'unknown', url: 'https://www.douyin.com/?recommend=1' }
-        : { ...liveState(String(12345678 + nexts)), ...(mode === 'verification' ? { verificationRequired: true } : {}) };
+        : { ...liveState('12345678'), ...(mode === 'verification' ? { verificationRequired: true } : {}) };
     };
     f.watch.start({ startSession: true, maxRequests: 1 }, { explicit: true }); await f.watch.completion;
-    assert.equal(f.watch.state().status, mode === 'unknown' ? 'failed' : 'needs_user');
-    assert.equal(nexts, mode === 'endless' ? 3 : 0);
+    assert.equal(f.watch.state().status, 'needs_user');
+    assert.equal(nexts, mode === 'endless' ? 1 : 0);
     assert.equal(requests, 0);
     assert.equal(f.watch.state().counts.requests, 0);
   }
@@ -310,14 +374,14 @@ test('无法识别的帧、登录页和模型任意动作都失败关闭，不�
   assert.equal(f.calls.some(call => /chat|forward|like/.test(call.name)), false);
 });
 
-test('每日上限独立于新视频轮次，已死进程残留只能明确停止后清理', async t => {
+test('每日上限独立于新视频轮次，已退出运行可恢复后再取得手动锁', async t => {
   const f = fixture(t); fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: {}, days: { '2026-10-15': 20000 } }));
   assert.throws(() => f.watch.start({ startSession: true }, { explicit: true }), /次数已用完/); assert.equal(f.calls.length, 0);
   assert.equal(f.videoLimits.state().session, null);
   fs.writeFileSync(f.watch.files.budget, JSON.stringify({ version: 1, sessions: {}, days: {} }));
   f.videoLimits.markSession('api', { explicit: true });
   fs.writeFileSync(f.watch.files.lock, JSON.stringify({ version: 1, pid: 2147483647, runId: 'dead-synthetic', sessionId: f.videoLimits.state().session.id, source: 'dsh' }));
-  assert.throws(() => f.watch.start({}, { explicit: true }), /残留/); await f.watch.stop({ explicit: true }); assert.equal(fs.existsSync(f.watch.files.lock), false); assert.equal(f.calls.length, 0);
+  const release= f.watch.claimManual('合成退出恢复'); assert.equal(fs.existsSync(f.watch.files.lock), false); assert.equal(f.calls.length, 0); await release(); await f.watch.stop({ explicit: true }); assert.equal(f.videoLimits.state().daily.requests,0);
 });
 
 test('无活 worker 时失败 A 的状态、计数和剩余不混入后来手动 B', async t => {
@@ -381,4 +445,30 @@ test('API自主决策只发一次含真实采样的受限请求，按接口用�
     return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(choice('stop', { reason: '合成 synthetic-key 说明' })) } }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } }));
   } });
   const result = await agent.decideWatch({ observation, context: '共同人格：简洁' }); assert.equal(attempts, 1); assert.equal(result.decision.action, 'stop'); assert.equal(JSON.stringify(result).includes('synthetic-key'), false); assert.equal(result.usage.totalTokens, 5);
+});
+
+
+test('观察排队超过30秒不把不可信时长写入偏好，也不中断后续决策', async t => {
+  const f=fixture(t),execute=f.controller.execute;
+  f.controller.execute=async (...args)=>{if(args[0]==='douyin_observe')f.advance(31_000);return execute(...args);};
+  f.watch.start({startSession:true},{explicit:true});await f.watch.completion;
+  assert.equal(f.watch.state().status,'stopped');assert.equal(f.watch.state().counts.requests,1);assert.equal(f.watch.state().lastError,'');
+  const state=JSON.parse(fs.readFileSync(f.personaMemory.stateFile,'utf8'));assert.equal((state.behavior?.viewings || []).length,0);
+  assert.equal(f.events.filter(x=>x.type==='watch.viewing-uncredited').length,1);
+});
+
+test('停留后读取状态超过30秒只跳过本次学习，后续观察继续',async t=>{
+  const f=fixture(t),q=[choice('stay',{seconds:2}),choice('stop')],delay=f.watch.delayImpl;
+  f.provider(async()=>({text:JSON.stringify(q.shift()),usage:{total_tokens:5}}));
+  f.watch.delayImpl=async(ms,signal)=>{await delay(ms,signal);f.advance(31_000);};
+  f.watch.start({startSession:true},{explicit:true});await f.watch.completion;
+  assert.equal(f.watch.state().status,'stopped');assert.equal(f.watch.state().counts.requests,2);assert.equal(f.watch.state().lastError,'');
+  const state=JSON.parse(fs.readFileSync(f.personaMemory.stateFile,'utf8'));assert.equal(state.behavior.actions.filter(x=>x.action==='stay').length,0);
+  assert.ok(state.behavior.viewings.every(x=>x.wallSeconds<=30));assert.equal(f.events.filter(x=>x.type==='watch.viewing-uncredited').length,1);
+});
+
+test('倒退或非有限的学习间隔不伪造观看时长且不吞掉其他证据错误',t=>{
+  const f=fixture(t);let writes=0;const record=f.personaMemory.recordViewing.bind(f.personaMemory);f.personaMemory.recordViewing=(...args)=>{writes++;return record(...args);};
+  for(const start of [f.now()+1,Number.NaN,Number.NEGATIVE_INFINITY])assert.equal(f.watch.viewing('synthetic-evidence',f.state(),f.state(),start,'synthetic-sample'),null);
+  assert.equal(writes,0);assert.throws(()=>f.watch.viewing('synthetic-evidence',f.state(),f.state(),f.now(),'synthetic-sample'));
 });

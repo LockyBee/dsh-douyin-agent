@@ -17,7 +17,7 @@ function policyOf(value){if(!value||Array.isArray(value)||Object.keys(value).som
 
 // 总允许开关保持开启时，在允许时段和每日额度内自动继续；异常保留到人工处理。
 export class ScheduledWatch {
-  constructor({stateDir=resolveRuntimePaths().stateDir,getVideoLimits,getWatchState,startRound,source='api',now=Date.now,intervalMs=5000}={}){Object.assign(this,{stateDir,getVideoLimits,getWatchState,startRound,source,now,intervalMs});this.policyFile=path.join(stateDir,'watch-schedule-policy.json');this.ledgerFile=path.join(stateDir,'watch-schedule-runs.json');this.guardFile=path.join(stateDir,'watch-schedule.guard');this.closed=false;}
+  constructor({stateDir=resolveRuntimePaths().stateDir,getVideoLimits,getWatchState,recoverRound,startRound,source='api',now=Date.now,intervalMs=5000}={}){Object.assign(this,{stateDir,getVideoLimits,getWatchState,recoverRound,startRound,source,now,intervalMs});this.policyFile=path.join(stateDir,'watch-schedule-policy.json');this.ledgerFile=path.join(stateDir,'watch-schedule-runs.json');this.guardFile=path.join(stateDir,'watch-schedule.guard');this.closed=false;}
   policy(){return policyOf(load(this.policyFile,{...defaultPolicy}));}
   ledger(){const value=load(this.ledgerFile,{version:1,runs:[]});if(value?.version!==1||!Array.isArray(value.runs)||value.runs.some(item=>!item?.key||!['starting','started','failed','occupied','acknowledged'].includes(item.status)))throw new Error('自动观看回执损坏，未覆盖或重试。');return value;}
   state(){const policy=this.policy(),ledger=this.ledger(),last=ledger.runs.at(-1)||null,lastError=Object.hasOwn(ledger,'lastError')?ledger.lastError:last?.status==='failed'?last.error||this.error||'自主观看异常停止，请检查后重新开启允许观看。':this.error||'';return{protocol:'scheduled-watch-v2',policy,last,busy:Boolean(this.pending),lastError,note:'允许观看后，在设置时段和每日时长、模型次数范围内自动观看；登录、验证或运行异常需要处理后重新开启允许观看。'};}
@@ -28,8 +28,10 @@ export class ScheduledWatch {
     write(this.policyFile,policy);if(policy.enabled){const ledger=this.ledger();for(const item of ledger.runs)if(item.status==='failed')item.status='acknowledged';ledger.lastError='';write(this.ledgerFile,ledger);this.error='';}
   });if(!policy.enabled)this.abort?.abort(new Error('已关闭允许观看。'));return this.state();}
   start(){if(!this.timer){this.timer=setInterval(()=>{void this.tick();},this.intervalMs);this.timer.unref?.();void this.tick();}return this;}
-  tick(){if(this.closed||this.pending)return this.pending||Promise.resolve(this.state());this.pending=this.perform().catch(error=>{if(error.code!=='SCHEDULE_BUSY'){this.error=explain(error);try{this.control(()=>{const ledger=this.ledger();ledger.lastError=this.error;write(this.ledgerFile,ledger);});}catch{}}}).finally(()=>{this.pending=null;});return this.pending;}
+  tick(){if(this.closed||this.pending)return this.pending||Promise.resolve(this.state());this.pending=this.perform().catch(error=>{if(!['SCHEDULE_BUSY','WATCH_CONTROL_BUSY'].includes(error.code)){this.error=explain(error);try{this.control(()=>{const ledger=this.ledger();ledger.lastError=this.error;write(this.ledgerFile,ledger);});}catch{}}}).finally(()=>{this.pending=null;});return this.pending;}
   async perform(){const limits=await this.getVideoLimits();if(!this.policy().enabled){this.abort?.abort(new Error('已关闭允许观看。'));limits.settleWatching?.();return;}
+    const recovered=await this.recoverRound?.();
+    if(recovered?.recovered)this.control(()=>{const ledger=this.ledger(),stale='上次自主观看留下运行锁，请先点击停止清理残留。';let changed=false;for(const run of ledger.runs)if(run.status==='failed'&&run.error===stale){run.status='acknowledged';run.recovery={code:recovered.reasonCode,recoveryId:recovered.recoveryId,at:new Date(this.now()).toISOString()};changed=true;}if(changed){if(ledger.lastError===stale)ledger.lastError='';write(this.ledgerFile,ledger);if(this.error===stale)this.error='';}});
     const time=limits.state(),slot=scheduledSlot(time.policy,this.now());if(!slot||!time.allowed)return;
     const manual=load(path.join(this.stateDir,'watch-manual.lock'),null);
     if(manual){if(!Number.isSafeInteger(manual.pid)||manual.pid<1||typeof manual.token!=='string')throw new Error('手动视频操作锁无法核对，未启动自主观看。');try{process.kill(manual.pid,0);return;}catch(error){if(error.code==='EPERM')return;if(error.code!=='ESRCH')throw error;}}
@@ -41,7 +43,7 @@ export class ScheduledWatch {
       operation={...slot,id:randomUUID(),source:this.source,pid:process.pid,startedAt:new Date(this.now()).toISOString(),status:'starting'};ledger.runs.push(operation);write(this.ledgerFile,ledger);
     });if(!operation)return;this.abort=new AbortController();
     try{if(!this.policy().enabled)throw new Error('允许观看已关闭');const result=await this.startRound({signal:this.abort.signal});this.finish(operation.id,'started',result?.sessionId||null);this.error='';}
-    catch(error){if(error.code==='WATCH_MANUAL_OCCUPIED'){this.finish(operation.id,'occupied',null);return;}this.finish(operation.id,'failed',null,explain(error));throw error;}finally{this.abort=null;}
+    catch(error){if(['WATCH_MANUAL_OCCUPIED','WATCH_CONTROL_BUSY'].includes(error.code)){this.finish(operation.id,'occupied',null);return;}this.finish(operation.id,'failed',null,explain(error));throw error;}finally{this.abort=null;}
   }
   finish(id,status,sessionId,error=''){this.control(()=>{const ledger=this.ledger(),entry=ledger.runs.find(item=>item.id===id);if(!entry)throw new Error('自动观看回执丢失');Object.assign(entry,{status,sessionId,completedAt:new Date(this.now()).toISOString(),...(error?{error}:{})});ledger.lastError=status==='failed'?error:'';write(this.ledgerFile,ledger);});}
   async close(){this.closed=true;clearInterval(this.timer);this.abort?.abort(new Error('自动观看入口已关闭。'));await this.pending;}

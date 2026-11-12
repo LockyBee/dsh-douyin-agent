@@ -34,15 +34,26 @@ export function messageFingerprint(message) {
 }
 
 export const messageContent = messages => messages.map(message => ({ id: message.id, fingerprint: messageFingerprint(message) }));
+const invalidDirection = message => !['incoming', 'outgoing'].includes(message?.sender || message?.direction) || message?.sender && message?.direction && message.sender !== message.direction;
+function historicalUnknownPrefix(messages) {
+  const prefix = [];
+  for (const message of messages) {
+    if (!invalidDirection(message)) break;
+    if ((message.sender || message.direction) !== 'unknown' || message.sender && message.direction && message.sender !== message.direction || message.eligibleForReply === true || !['baseline', 'known-old-window', 'old-history'].includes(message.arrivalClassification)) return [];
+    prefix.push({ id: message.id, fingerprint: messageFingerprint(message) });
+  }
+  return prefix.length < messages.length ? prefix : [];
+}
 export function messageWatermark(messages, evidence = {}) {
   const source = evidence.dayEvidence ?? evidence;
-  return { content: messageContent(messages), chronology: source.chronology ?? 'unknown', latestEndVerified: messages.length > 0 && messages.every(message => message.latestEndVerified === true) && source.latestEndVerified !== false };
+  const latestEndVerified = messages.length > 0 && messages.every(message => message.latestEndVerified === true) && source.latestEndVerified !== false;
+  const unknownPrefix = source.chronology === 'oldest-first' && latestEndVerified ? historicalUnknownPrefix(messages) : [];
+  return { content: messageContent(messages), chronology: source.chronology ?? 'unknown', latestEndVerified, ...(unknownPrefix.length ? { unknownPrefix } : {}) };
 }
 
 // 虚拟列表可以补载或移除旧前缀；最新锚点和全部连续重叠内容必须保留。
 export function compareMessageWatermark(expected, messages, evidence = {}) {
   const source = evidence.dayEvidence ?? evidence, expectedContent = expected?.content;
-  const invalidDirection = message => !['incoming', 'outgoing'].includes(message?.sender || message?.direction) || message?.sender && message?.direction && message.sender !== message.direction;
   const validContent = content => Array.isArray(content) && content.every(item => item && typeof item.id === 'string' && item.id.length > 0 && /^[a-f0-9]{64}$/.test(item.fingerprint ?? '')) && new Set(content.map(item => item.id)).size === content.length;
   if (!validContent(expectedContent) || !Array.isArray(messages) || messages.some(message => !message || typeof message.id !== 'string' || !message.id) || new Set(messages.map(message => message.id)).size !== messages.length) return { matches: false, diagnostic: { invalidWatermark: true } };
   const expectedIds = expectedContent.map(item => item.id), known = new Map(expectedContent.map(item => [item.id, item.fingerprint]));
@@ -51,7 +62,14 @@ export function compareMessageWatermark(expected, messages, evidence = {}) {
   const diagnostic = { expectedCount: expectedIds.length, currentCount: messages.length, expectedLatestEndVerified: expected.latestEndVerified === true, currentLatestEndVerified, chronology: source.chronology ?? 'unknown', suffixOffset: messages.length <= expectedIds.length ? expectedIds.length - messages.length : null,
     latestAnchorPresent: anchorIndex >= 0, latestAnchorAtEnd: anchorIndex >= 0 && anchorIndex === messages.length - 1, latestAnchorFingerprintMatches: anchorIndex >= 0 && actual[anchorIndex].fingerprint === known.get(anchor), allOverlapContentMatches: actual.filter(item => known.has(item.id)).every(item => item.fingerprint === known.get(item.id)), unknownDirectionCount: messages.filter(invalidDirection).length,
     additionalCount: messages.filter(item => !known.has(item.id)).length, additionalClassifications: Object.fromEntries(['old-history', 'known-old-window', 'new-tail', 'ambiguous-new', 'baseline'].map(kind => [kind, messages.filter(item => !known.has(item.id) && item.arrivalClassification === kind).length])) };
-  if (diagnostic.unknownDirectionCount) return { matches: false, diagnostic };
+  if (diagnostic.unknownDirectionCount) {
+    const prefix = historicalUnknownPrefix(messages), saved = expected.unknownPrefix;
+    const proven = expected.chronology === 'oldest-first' && source.chronology === 'oldest-first' && expected.latestEndVerified === true && currentLatestEndVerified && validContent(saved) && saved.length > 0 && saved.length < expectedContent.length && saved.every((item,index) => item.id === expectedContent[index]?.id && item.fingerprint === expectedContent[index]?.fingerprint);
+    const stable = proven ? prefix.filter(item => saved.some(previous => previous.id === item.id && previous.fingerprint === item.fingerprint)) : [];
+    diagnostic.historicalUnknownPrefixCount = stable.length;
+    diagnostic.unknownDirectionCount -= stable.length;
+    if (diagnostic.unknownDirectionCount) return { matches: false, diagnostic };
+  }
   if (JSON.stringify(actual) === JSON.stringify(expectedContent)) return { matches: true, diagnostic };
   if (!messages.length || expected.chronology !== 'oldest-first' || source.chronology !== 'oldest-first' || expected.latestEndVerified !== true || !currentLatestEndVerified || !diagnostic.latestAnchorAtEnd || !diagnostic.latestAnchorFingerprintMatches || !diagnostic.allOverlapContentMatches) return { matches: false, diagnostic };
   const firstOverlap = messages.findIndex(item => known.has(item.id)), expectedOffset = expectedIds.indexOf(messages[firstOverlap]?.id);

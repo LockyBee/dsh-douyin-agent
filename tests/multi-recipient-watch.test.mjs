@@ -79,7 +79,7 @@ test('批次处理中关闭好友互动不发送剩余对象，原观看预算�
 
 test('处理首位对象后停止观看，不继续分享给剩余对象，保留已确认收据',async t=>{
   const f=fixture(t,{decisions:[decision('share',{recipientIds:ids}),decision('skip')],afterSend:({watch})=>watch.cancel()});
-  assert.equal((await f.run()).status,'stopped');assert.deepEqual(f.sent,[ids[0]]);assert.deepEqual(f.share.ledger().operations.map(x=>x.status),['confirmed']);assert.equal(f.actions.includes('douyin_next'),false);
+  const stopped=await f.run();assert.equal(stopped.status,'stopped',stopped.lastError);assert.deepEqual(f.sent,[ids[0]]);assert.deepEqual(f.share.ledger().operations.map(x=>x.status),['confirmed']);assert.equal(f.actions.includes('douyin_next'),false);
 });
 
 test('一次坏决策丢弃后重新观察，连续三次坏决策停止且每次记入原请求预算',async t=>{

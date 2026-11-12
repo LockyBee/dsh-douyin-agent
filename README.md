@@ -1,6 +1,6 @@
 # DSH 抖音助手
 
-1.4.6 使用说明。插件与独立软件共用人格、兴趣、观看用量和许可名单；独立软件另外提供任务对话。本文的固定安装入口对应 1.4.6，包是否已可下载以 GitHub 和 npm 页面为准。
+1.4.7 使用说明。插件与独立软件共用人格、兴趣、观看用量和许可名单；独立软件另外提供任务对话。本文的固定安装入口对应 1.4.7，包是否已可下载以 GitHub 和 npm 页面为准。
 
 在本机专用 Microsoft Edge 中浏览抖音电脑版，采样真实画面交给模型，按人格和实际观看行为更新兴趣。这是第三方适配，不是 DeepSeek 官方发行版。
 
@@ -39,19 +39,19 @@
 
 同一时刻只运行一条自主观看。两版共享每日账本，暂停、重启或改设置不会清空当天用量。
 
-## 安装 1.4.6
+## 安装 1.4.7
 
-DSH Desktop：打开“应用 → 桌面插件”，填写 `dsh-douyin-browser-local@1.4.6` 安装或更新。Desktop profile 由 Electron 管理，不要用普通 CLI 另改一份。更新后完全退出并重新打开同一份 DSH。
+DSH Desktop：打开“应用 → 桌面插件”，填写 `dsh-douyin-browser-local@1.4.7` 安装或更新。Desktop profile 由 Electron 管理，不要用普通 CLI 另改一份。更新后完全退出并重新打开同一份 DSH。
 
 Web profile 在终端执行：
 
 ```powershell
-dsh plugin --profile web add dsh-douyin-browser-local@1.4.6
+dsh plugin --profile web add dsh-douyin-browser-local@1.4.7
 ```
 
 插件需要 Windows、Microsoft Edge 和兼容 DSH。已检查 0.2.0-rc.2、0.2.1-rc.2 两代 SDK；完整允许版本以 `package.json` 的 `engines.dsh` 为准，不笼统保证任意 0.2.x 预发布宿主。设置通信适配常用 WebServer、Connection 与宿主 RPC 入口，第三方宿主仍以实际自检和加载结果为准。npm、GitHub Release 和插件市场分别同步；市场未更新时可核对固定 npm 版本。
 
-独立软件及校验文件见 [1.4.6 下载页](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.6)，文件名为 `Dafeiyu-Douyin-API-1.4.6-win-x64.exe`。正常退出旧版后打开新版，保留共享记忆、登录目录和本机设置。便携包未签名，要求及更新说明见 [desktop/README.md](desktop/README.md)。
+独立软件及校验文件见 [1.4.7 下载页](https://github.com/LockyBee/dsh-douyin-agent/releases/tag/v1.4.7)，文件名为 `Dafeiyu-Douyin-API-1.4.7-win-x64.exe`。正常退出旧版后打开新版，保留共享记忆、登录目录和本机设置。便携包未签名，要求及更新说明见 [desktop/README.md](desktop/README.md)。
 
 从源码安装插件需要 Node.js 22.13+、pnpm 和已核对路径的 DSH：
 
@@ -84,7 +84,7 @@ $dshInstallDirectory = 'C:\Apps\DSH Desktop' # 替换为实际安装目录
 
 遇到问题先运行“自检与用量 → 一键自检”，按报告处理限定修复项。登录、验证码、无效 Key、损坏记录和宿主适配不能靠删除锁、记忆或登录目录解决。发送结果不确定时保留收据并尝试回读核对；无法确认时不自动重发。
 
-本机已核对许可个人私信的一次真实补答和平台确认、稳定身份与视频播放推进；本次修复另有隔离回归和打包检查。推荐流仍可能换片失败，当前正式包的连续两小时播放及始终低于 2 GB 尚未验收；DSH rc.3 正文显示反馈未定位，真实公开评论发布确认和长视频多批观察仍待验。历史结果保留各自版本，详见[本次验证范围](docs/verification/local-1.4.6-20261030.md)。
+本机已核对许可个人私信的一次真实补答和平台确认、稳定身份与视频播放推进；本次修复另有隔离回归和打包检查。推荐流仍可能换片失败，当前正式包的连续两小时播放及始终低于 2 GB 尚未验收；DSH rc.3 正文显示反馈未定位，真实公开评论发布确认和长视频多批观察仍待验。历史结果保留各自版本，详见[本次验证范围](docs/verification/local-1.4.7-20261112.md)。
 
 ## 开发与来源
 

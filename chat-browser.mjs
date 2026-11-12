@@ -61,7 +61,7 @@ const sameWeakConversation = (current, contact) => hasStableConversationIdentity
   && typeof current.displayName === 'string' && current.displayName
   && (() => {
     const actual = normalizeDisplayName(current.displayName), expected = normalizeDisplayName(contact.displayName || contact.name);
-    return Boolean(expected) && (actual === expected || current.isGroup === true && actual.startsWith(expected) && /^\s*\(\d{1,6}\)$/.test(actual.slice(expected.length)));
+    return Boolean(expected) && (actual === expected || current.isGroup === true && actual.startsWith(expected) && /^\s*\(\s*\d{1,6}\s*\)(?:\s*\|\s*\d{1,8})?$/.test(actual.slice(expected.length)));
   })());
 const contactOpaqueId = row => `conv:${hash(contactIdentityKey(row) ?? `${row.displayName}\0${row.avatar}`)}`;
 const contactIdentityBinding = row => !row.identityConflict && contactIdentityKey(row) && ['direct', 'group'].includes(row.conversationType)
@@ -109,13 +109,14 @@ export async function readContactDom() {
     const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
     const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
     const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
-    for (const key of ['id', 'shortId']) {
-      const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+    for (const [key, aliases] of [['id', ['id', 'conversationId']], ['shortId', ['shortId', 'conversationShortId']]]) for (const alias of aliases) {
+      const ownDescriptor = Object.getOwnPropertyDescriptor(value, alias), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, alias);
       signatures.push(shape(descriptor));
       if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
       if (!descriptor) continue;
       if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
       if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+      if (result[key] && result[key] !== descriptor.value) result.conflict = true;
       result[key] = descriptor.value;
     }
     result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
@@ -156,6 +157,7 @@ export async function readContactDom() {
       for (const [family, fields] of [['conversation', ['conversationId', ...(conversation ? ['id'] : [])]], ['conversation-short', ['conversationShortId', ...(conversation ? ['shortId'] : [])]], ['group', ['groupId']], ['user', ['secUid', ...(conversation ? ['_toParticipantSecUserId'] : [])]], ['user-id', ['userId']]]) {
         for (const field of fields) { const id = own(value, field); if (typeof id !== 'string' && !Number.isSafeInteger(id)) continue; const normalized = String(id).trim(); if (normalized && normalized.length <= 512) { const set = identities.get(family) ?? new Set(); set.add(normalized); identities.set(family, set); } }
       }
+      if (typeof own(value, 'groupId') === 'string' && /^\d{1,64}$/.test(own(value, 'groupId'))) types.add('group');
       for (const field of ['conversationType', 'type']) { const type = own(value, field); if (typeof type === 'string' && ['direct', 'single', 'personal', 'group'].includes(type.toLowerCase())) types.add(type.toLowerCase() === 'group' ? 'group' : 'direct'); }
     };
     const visit = (props, depth) => {
@@ -285,13 +287,14 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
     const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
     const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
     const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
-    for (const key of ['id', 'shortId']) {
-      const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+    for (const [key, aliases] of [['id', ['id', 'conversationId']], ['shortId', ['shortId', 'conversationShortId']]]) for (const alias of aliases) {
+      const ownDescriptor = Object.getOwnPropertyDescriptor(value, alias), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, alias);
       signatures.push(shape(descriptor));
       if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
       if (!descriptor) continue;
       if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
       if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+      if (result[key] && result[key] !== descriptor.value) result.conflict = true;
       result[key] = descriptor.value;
     }
     result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
@@ -314,15 +317,15 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
     try { const url = new URL(link.getAttribute('href'), location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) { if (profileUrl && profileUrl !== url.origin + url.pathname) types.add('conflict'); profileUrl = url.origin + url.pathname; } } catch {}
   }
   for (const declared of [header?.getAttribute('data-conversation-type'), root?.getAttribute('data-conversation-type')]) if (declared && ['direct', 'single', 'personal', 'group'].includes(declared)) types.add(declared === 'group' ? 'group' : 'direct');
-  if (declaredGroup) types.add('group');
+  if (declaredGroup || identities.has('group')) types.add('group');
   else if (profileUrl || identities.has('user') || identities.has('user-id') || header?.getAttribute('data-is-group') === 'false') types.add('direct');
   const looksLikeGroup = /[,，、]/.test(displayName);
   const conversationType = types.size === 1 ? [...types][0] : (declaredGroup || looksLikeGroup || !profileUrl) ? 'group' : 'direct';
   const groupPrototype = conversationType === 'group' ? groupPrototypeIdentity(conversation) : null;
   const groupPrototypeOwner = groupPrototype && conversation ? Object.getPrototypeOf(conversation) : null;
   if (groupPrototype) { add('conversation', groupPrototype.id); add('conversation-short', groupPrototype.shortId); }
-  const conflictingNativeIds = new Set([header?.getAttribute('data-conversation-id'), root?.getAttribute('data-conversation-id'), header?.getAttribute('data-conversation-short-id'), root?.getAttribute('data-conversation-short-id')].filter(Boolean));
-  let identityConflict = Boolean(groupPrototype?.conflict) || keys.length > 1 || types.size > 1 || conflictingNativeIds.size > 1 || [...identities.values()].some(values => values.size !== 1);
+  const conflictingNativeIds = ['data-conversation-id', 'data-conversation-short-id'].some(attribute => new Set([header?.getAttribute(attribute), root?.getAttribute(attribute)].filter(Boolean)).size > 1);
+  let identityConflict = Boolean(groupPrototype?.conflict) || keys.length > 1 || types.size > 1 || conflictingNativeIds || [...identities.values()].some(values => values.size !== 1);
   const selected = [...identities].find(([family]) => ['conversation', 'conversation-short', 'group'].includes(family)) ?? [...identities].find(([family]) => family === 'user') ?? [...identities][0];
   const metadataSignature = () => JSON.stringify([['conversationId', 'id', 'conversationShortId', 'shortId', 'groupId', 'secUid', '_toParticipantSecUserId', 'userId', 'conversationType', 'type'].map(key => { const value = own(conversation, key); return typeof value === 'string' || Number.isSafeInteger(value) ? String(value) : null; }), conversationType === 'group' ? groupPrototypeIdentity(conversation).signature : null, ['conversationId','id'].map(key=>{const d=conversation&&Object.getPrototypeOf(conversation)&&Object.getOwnPropertyDescriptor(Object.getPrototypeOf(conversation),key);return !d?null:!Object.hasOwn(d,'value')?['accessor']:['data',typeof d.value,typeof d.value==='string'?d.value:null];})]);
   const domMetadataSignature = () => JSON.stringify([header, root].map(element => element ? ['data-e2e', 'data-conversation-id', 'data-conversation-short-id', 'data-conversation-type', 'data-is-group'].map(key => element.getAttribute(key)) : null).concat(Boolean(header?.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]'))));
@@ -333,7 +336,7 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
   const currentHeaders = [...document.querySelectorAll('[data-e2e="im-dialog"] [class*="StackLayoutStackChatHeaderuser"],[data-e2e="im-dialog"] [data-e2e="chat-header"],[data-e2e="im-dialog"] [data-e2e="group-chat-header"]')].filter(visible);
   if (!header?.isConnected || currentHeaders.length !== 1 || currentHeaders[0] !== header || currentProps !== props || currentConversation !== conversation || groupPrototype && conversation && Object.getPrototypeOf(conversation) !== groupPrototypeOwner || metadataSignature() !== initialMetadata || domMetadataSignature() !== initialDomMetadata) identityConflict = true;
   const identityKey = fingerprint && (conversationType !== 'group' || ['conversation', 'conversation-short', 'group'].includes(selected[0])) ? `${selected[0]}:${fingerprint}` : null;
-  const identity = { displayName, avatar, nativeId: conversationNativeId, identityKey, profileUrl, identityConflict, ...(groupPrototype?.id || groupPrototype?.shortId ? { groupPrototypeIdentity: true } : {}), isGroup: conversationType === 'group', conversationType };
+  const identity = { displayName, avatar, nativeId: conversationNativeId, identityKey, profileUrl, identityConflict, headerCount: headers.length, ...(groupPrototype?.id || groupPrototype?.shortId ? { groupPrototypeIdentity: true } : {}), isGroup: conversationType === 'group', conversationType };
   const stableKey = conversationNativeId ? `native:${conversationNativeId}` : identityKey ? `rendered:${identityKey}` : conversationType === 'direct' && profileUrl ? `user:${profileUrl}` : null;
   if (!header || identityConflict || (!stableKey && !allowWeak) || expectedKey && (stableKey !== expectedKey || conversationType !== expectedType || expectedRenderedKey && identityKey && identityKey !== expectedRenderedKey)) return { ...identity, messages: [], identityUnavailable: true, loading: false };
   let timestamp = null;
@@ -537,6 +540,8 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
     let modelTimestamp = null;
     if (modelBound) { try { const time = Date.prototype.getTime.call(dataField(model, 'createdAt')); if (Number.isFinite(time) && time >= Date.UTC(2000, 0, 1) && time <= Date.now() + 60_000) modelTimestamp = new Date(time).toISOString(); } catch {} }
     const nativeServerMessageBound = modelBound && typeof serverId === 'string' && /^[1-9]\d{0,63}$/.test(serverId) && nativeId === serverId;
+    const separator = '[role=separator],[data-e2e=message-time-divider],[data-e2e=message-loading],[data-e2e=history-start]';
+    if (direction === 'unknown' && !text && !reference && media?.type === 'unknown' && !nativeId && !nativeServerMessageBound && order === null && (node.matches(separator) || box.matches(separator)) && !node.querySelector('img,video,audio,a[href],[contenteditable]')) continue;
     const ownTimestamp = box.getAttribute('data-sent-at') || box.getAttribute('data-timestamp') || node.getAttribute('data-sent-at') || modelTimestamp;
     const ownTimeNode = box.querySelector('[class*="MessageBoxTimetimeLayout"],time');
     const ownTime = ownTimeNode?.getAttribute('datetime') || clean(ownTimeNode?.textContent);
@@ -601,13 +606,14 @@ export async function readChatIdentityDom() {
     const prototype = Object.getPrototypeOf(value), result = { id: null, shortId: null, conflict: false };
     const shape = descriptor => !descriptor ? ['absent'] : !Object.hasOwn(descriptor, 'value') ? ['accessor'] : ['data', typeof descriptor.value, typeof descriptor.value === 'string' || Number.isSafeInteger(descriptor.value) ? String(descriptor.value) : null];
     const signatures = ['conversationId', 'conversationShortId', 'groupId', 'id', 'shortId', 'conversationType', 'type'].map(key => shape(Object.getOwnPropertyDescriptor(value, key)));
-    for (const key of ['id', 'shortId']) {
-      const ownDescriptor = Object.getOwnPropertyDescriptor(value, key), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, key);
+    for (const [key, aliases] of [['id', ['id', 'conversationId']], ['shortId', ['shortId', 'conversationShortId']]]) for (const alias of aliases) {
+      const ownDescriptor = Object.getOwnPropertyDescriptor(value, alias), descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, alias);
       signatures.push(shape(descriptor));
       if (ownDescriptor && !Object.hasOwn(ownDescriptor, 'value')) result.conflict = true;
       if (!descriptor) continue;
       if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
       if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
+      if (result[key] && result[key] !== descriptor.value) result.conflict = true;
       result[key] = descriptor.value;
     }
     result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
@@ -630,7 +636,7 @@ export async function readChatIdentityDom() {
     try { const url = new URL(link.getAttribute('href'), location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) { if (profileUrl && profileUrl !== url.origin + url.pathname) types.add('conflict'); profileUrl = url.origin + url.pathname; } } catch {}
   }
   for (const declared of [header?.getAttribute('data-conversation-type'), root?.getAttribute('data-conversation-type')]) if (declared && ['direct', 'single', 'personal', 'group'].includes(declared)) types.add(declared === 'group' ? 'group' : 'direct');
-  if (isGroup) types.add('group');
+  if (isGroup || identities.has('group')) types.add('group');
   else if (profileUrl || identities.has('user') || identities.has('user-id') || header?.getAttribute('data-is-group') === 'false') types.add('direct');
   const displayName = header?.querySelector('[class*="StackLayoutStackChatHeadertitle"],[data-e2e="chat-title"],[data-e2e="group-chat-title"]')?.textContent.replace(/\s+/g, ' ').trim();
   const looksLikeGroup = /[,，、]/.test(displayName || '');
@@ -638,8 +644,8 @@ export async function readChatIdentityDom() {
   const groupPrototype = conversationType === 'group' ? groupPrototypeIdentity(conversation) : null;
   const groupPrototypeOwner = groupPrototype && conversation ? Object.getPrototypeOf(conversation) : null;
   if (groupPrototype) { add('conversation', groupPrototype.id); add('conversation-short', groupPrototype.shortId); }
-  const conflictingNativeIds = new Set([header?.getAttribute('data-conversation-id'), root?.getAttribute('data-conversation-id'), header?.getAttribute('data-conversation-short-id'), root?.getAttribute('data-conversation-short-id')].filter(Boolean));
-  let identityConflict = Boolean(groupPrototype?.conflict) || keys.length > 1 || types.size > 1 || conflictingNativeIds.size > 1 || [...identities.values()].some(values => values.size !== 1);
+  const conflictingNativeIds = ['data-conversation-id', 'data-conversation-short-id'].some(attribute => new Set([header?.getAttribute(attribute), root?.getAttribute(attribute)].filter(Boolean)).size > 1);
+  let identityConflict = Boolean(groupPrototype?.conflict) || keys.length > 1 || types.size > 1 || conflictingNativeIds || [...identities.values()].some(values => values.size !== 1);
   const selected = [...identities].find(([family]) => ['conversation', 'conversation-short', 'group'].includes(family)) ?? [...identities].find(([family]) => family === 'user') ?? [...identities][0];
   const metadataSignature = () => JSON.stringify([['conversationId', 'id', 'conversationShortId', 'shortId', 'groupId', 'secUid', '_toParticipantSecUserId', 'userId', 'conversationType', 'type'].map(key => { const value = own(conversation, key); return typeof value === 'string' || Number.isSafeInteger(value) ? String(value) : null; }), conversationType === 'group' ? groupPrototypeIdentity(conversation).signature : null]);
   const domMetadataSignature = () => JSON.stringify([header, root].map(element => element ? ['data-e2e', 'data-conversation-id', 'data-conversation-short-id', 'data-conversation-type', 'data-is-group'].map(key => element.getAttribute(key)) : null).concat(Boolean(header?.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]'))));
@@ -870,19 +876,20 @@ export class ChatBrowser {
     try {
       if (origin && (enumerate || locateId && !found)) {
         if (origin.scrollTop > 0) await scroll(0);
-        let stableEnd = 0, previousEnd = '';
-        while (Date.now() - started < 12_000) {
+        let stableEnd = 0, previousEnd = '', stableEndSince = 0;
+        while (Date.now() - started < 30_000) {
           await capture(); if (locateId && found) break;
           const metrics = await page.evaluate(readConversationListDom);
           if (!metrics) throw new Error('读取期间会话列表容器已消失。');
           const maximum = Math.max(0, metrics.scrollHeight - metrics.clientHeight), atEnd = metrics.scrollTop >= maximum - 1;
           if (atEnd && !metrics.loading) {
             const signature = JSON.stringify([metrics.scrollHeight, ...visibleRows.map(contactOpaqueId)]);
+            if (previousEnd !== signature) stableEndSince = Date.now();
             stableEnd = previousEnd === signature ? stableEnd + 1 : 0; previousEnd = signature;
-            if (stableEnd >= 2) { scannedToEnd = true; break; }
-            await page.waitForTimeout(150); continue;
+            if (stableEnd >= 3 && Date.now() - stableEndSince >= 1500) { scannedToEnd = true; break; }
+            await page.waitForTimeout(500); continue;
           }
-          stableEnd = 0; previousEnd = '';
+          stableEnd = 0; previousEnd = ''; stableEndSince = 0;
           if (metrics.loading && atEnd) { await page.waitForTimeout(150); continue; }
           const next = Math.min(maximum, metrics.scrollTop + Math.max(1, Math.floor(metrics.clientHeight * 0.8)));
           if (next <= metrics.scrollTop && !atEnd) { reason = '列表无法继续滚动，只返回已核对的当前会话。'; break; }
@@ -971,7 +978,7 @@ export class ChatBrowser {
       return { prepared: true, count: Array.isArray(list.contacts) ? list.contacts.length : 0 };
     }, { signal, launch: !automatic, create: true, ...(automatic ? { authorizePrepare } : {}) });
   }
-  listContacts({ signal, verifyFollowing = this.following === null, backgroundOnly = false } = {}) {
+  listContacts({ signal, verifyFollowing = false, backgroundOnly = false } = {}) {
     return this.withPage(async page => {
       if (backgroundOnly && await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，暂不切换私信页。'), { code: 'CHAT_FOREGROUND' });
       const initial = await this.dialog(page, signal, { open: !backgroundOnly });
@@ -1020,14 +1027,78 @@ export class ChatBrowser {
       }, recipientIds);
     }, { signal });
   }
-  async returnToConversationList(page) {
-    const back = page.locator('[data-stack-layer="chat"] .StackLayoutStackTitleBarbackBtn');
-    if (await back.count() === 1 && await back.isVisible().catch(() => false)) {
-      await back.click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(100);
+  async receivesPointer(locator) {
+    if (await locator.count() !== 1) return false;
+    return locator.evaluate(element => {
+      const r=element.getBoundingClientRect(),s=getComputedStyle(element);
+      const left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);
+      if(!element.isConnected||right-left<2||bottom-top<2||s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0)return false;
+      const hit=document.elementFromPoint((left+right)/2,(top+bottom)/2);
+      return Boolean(hit&&(hit===element||element.contains(hit)));
+    }).catch(()=>false);
+  }
+  async clickNavigation(page,locator,signal) {
+    stop(signal);
+    let element;
+    try{element=await locator.elementHandle({timeout:1500});}
+    catch(error){stop(signal);if(error.name==='TimeoutError')throw Object.assign(new Error('会话导航节点正在重绘。'),{code:'CHAT_SNAPSHOT_CHANGED',beforeInput:true});throw error;}
+    if(!element)throw Object.assign(new Error('会话导航节点正在重绘。'),{code:'CHAT_SNAPSHOT_CHANGED',beforeInput:true});
+    const token=randomUUID();let inputStarted=false,inputSettled=false;
+    const changed=()=>Object.assign(new Error('会话导航位置或节点已变化，等待下一次检查。'),{code:'CHAT_SNAPSHOT_CHANGED',beforeInput:!inputStarted});
+    try{
+      await element.evaluate(node=>node.scrollIntoView({block:'nearest',inline:'nearest',behavior:'instant'}));
+      let previous,point,stable=0;
+      for(let attempt=0;attempt<15;attempt++){
+        stop(signal);
+        point=await element.evaluate(node=>{const r=node.getBoundingClientRect(),s=getComputedStyle(node),left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);if(!node.isConnected||right-left<2||bottom-top<2||s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0||node.matches(':disabled,[aria-disabled="true"]'))return null;const x=(left+right)/2,y=(top+bottom)/2,hit=document.elementFromPoint(x,y);return hit&&(node===hit||node.contains(hit))?{x,y,left:r.left,top:r.top,width:r.width,height:r.height,origin:location.origin,marker:node.getAttribute('data-deepseek-chat-id')}:null;});
+        stable=point&&previous&&['x','y','left','top','width','height'].every(k=>Math.abs(point[k]-previous[k])<=0.5)&&point.marker===previous.marker?stable+1:point?1:0;
+        if(stable>=3)break;previous=point;await page.waitForTimeout(75);
+      }
+      if(stable<3)throw changed();
+      const blockers=await page.evaluate(readChatBlockers);if(blockers.loginRequired||blockers.verificationRequired)throw changed();
+      stop(signal);
+      await element.evaluate((node,{token,point})=>{
+        const entries=window.__dafeiyuChatNavigation??=Object.create(null),entry={blocked:false,dispatched:false,expired:false};
+        const types=['pointerdown','mousedown','mouseup','click'];
+        const listener=event=>{if(!event.isTrusted||entry.dispatched)return;const r=node.getBoundingClientRect(),hit=document.elementFromPoint(event.clientX,event.clientY),target=event.target instanceof Element?event.target:null;
+          const valid=!entry.expired&&!entry.blocked&&node.isConnected&&location.origin===point.origin&&node.getAttribute('data-deepseek-chat-id')===point.marker&&target&&(target===node||node.contains(target))&&hit&&(hit===node||node.contains(hit))&&['left','top','width','height'].every(k=>Math.abs(r[k]-point[k])<=0.5);
+          if(!valid){entry.blocked=true;event.preventDefault();event.stopImmediatePropagation();if(entry.expired&&event.type==='click')entry.cleanup();return;}
+          if(event.type==='click')entry.dispatched=true;
+        };
+        entry.cleanup=()=>{clearTimeout(entry.timer);for(const type of types)document.removeEventListener(type,listener,true);if(entries[token]===entry)delete entries[token];};
+        entry.timer=setTimeout(entry.cleanup,15000);entries[token]=entry;for(const type of types)document.addEventListener(type,listener,{capture:true,passive:false});
+      },{token,point});
+      stop(signal);inputStarted=true;await page.mouse.click(point.x,point.y);inputSettled=true;stop(signal);
+      const witness=await page.evaluate(token=>{const e=window.__dafeiyuChatNavigation?.[token];return e?{blocked:e.blocked,dispatched:e.dispatched}:null;},token);
+      if(!witness?.dispatched||witness.blocked)throw changed();
+    }catch(error){
+      stop(signal);
+      if(error.code==='CHAT_SNAPSHOT_CHANGED')throw error;
+      if(inputStarted||/not attached|detached|Execution context was destroyed/i.test(error.message||''))throw changed();
+      throw error;
+    }finally{
+      await page.evaluate(({token,retain})=>{const entry=window.__dafeiyuChatNavigation?.[token];if(!entry)return;if(retain)entry.expired=true;else entry.cleanup();},{token,retain:inputStarted&&!inputSettled}).catch(()=>{});
+      await element.dispose().catch(()=>{});
     }
   }
-  async select(page, recipientId, signal, { refresh = false, weak = false } = {}) {
+  async returnToConversationList(page, signal) {
+    stop(signal);
+    const blockers=await page.evaluate(readChatBlockers);
+    if(blockers.loginRequired||blockers.verificationRequired)return false;
+    const back=page.locator('[data-e2e="im-dialog"] [data-stack-layer="chat"] .StackLayoutStackTitleBarbackBtn');
+    const candidates=[];
+    for(let index=0;index<await back.count();index++)if(await this.receivesPointer(back.nth(index)))candidates.push(index);
+    if(candidates.length!==1)return false;
+    stop(signal);await this.clickNavigation(page,back.nth(candidates[0]),signal);
+    const rows=page.locator('[data-e2e="im-dialog"] [data-e2e="conversation-item"]');
+    for(let attempt=0;attempt<25;attempt++){
+      stop(signal);
+      for(let index=0;index<await rows.count();index++)if(await this.receivesPointer(rows.nth(index)))return true;
+      await page.waitForTimeout(100);
+    }
+    throw Object.assign(new Error('会话列表仍在切换，等待下一次可靠检查。'),{code:'CHAT_SNAPSHOT_CHANGED'});
+  }
+  async select(page, recipientId, signal, { refresh = false, weak = false, selectionAttempt = 0 } = {}) {
     if (typeof recipientId !== 'string' || !/^conv:[a-f0-9]{64}$/.test(recipientId)) throw new TypeError('需要已发现的精确联系人 ID。');
     const flags = await this.contactList(page, signal, { locateId: recipientId });
     if (flags.blocked) return { flags };
@@ -1038,22 +1109,38 @@ export class ChatBrowser {
     if (await row.count() !== 1) throw new Error('指定会话不是唯一匹配，已停止操作。');
     const current = await page.evaluate(readChatIdentityDom);
     if (refresh || !matches(current)) {
-      try { await row.click({ timeout: 5000 }); }
-      catch {
-        await this.returnToConversationList(page);
+      if(!await this.receivesPointer(row)){
+        if(await this.returnToConversationList(page,signal)){
+          const refreshed=await this.contactList(page,signal,{locateId:recipientId});
+          if(refreshed.blocked)return{flags:refreshed};
+          row=page.locator(`[data-e2e="conversation-item"][data-deepseek-chat-id="${recipientId}"]`);
+          if(await row.count()!==1)throw Object.assign(new Error('会话列表正在重绘，等待下一次可靠检查。'),{code:'CHAT_SNAPSHOT_CHANGED'});
+        }else if(await row.evaluate(element=>{const r=element.getBoundingClientRect(),hit=document.elementFromPoint(Math.max(0,Math.min(innerWidth-1,r.x+r.width/2)),Math.max(0,Math.min(innerHeight-1,r.y+r.height/2)));return Boolean(hit?.closest('[data-e2e="im-dialog"] [data-stack-layer="chat"]'));}).catch(()=>false)){
+          throw Object.assign(new Error('会话列表暂时被聊天层遮挡，等待下一次可靠检查。'),{code:'CHAT_SNAPSHOT_CHANGED'});
+        }
+      }
+      try { await this.clickNavigation(page,row,signal); }
+      catch (error) {
+        stop(signal);if(error.code==='CHAT_SNAPSHOT_CHANGED'&&error.beforeInput!==true)throw error;
+        await this.returnToConversationList(page,signal);
         await this.contactList(page, signal, { locateId: recipientId });
         row = page.locator(`[data-e2e="conversation-item"][data-deepseek-chat-id="${recipientId}"]`);
         if (await row.count() !== 1) throw new Error('指定会话不是唯一匹配，已停止操作。');
-        try { await row.click({ timeout: 5000 }); }
-        catch { throw new Error('指定会话未成功打开，未读取正文或点击发送。'); }
+        try { await this.clickNavigation(page,row,signal); }
+        catch (error) { stop(signal);if(error.code==='CHAT_SNAPSHOT_CHANGED')throw error;throw new Error('指定会话未成功打开，未读取正文或点击发送。'); }
       }
     }
-    let identity, previous, stableSamples = 0;
+    let identity, previous, stableSamples = 0, wrongKey = null, wrongSamples = 0;
     for (let attempt = 0; attempt < 50; attempt += 1) {
       stop(signal);
       const blockers = await page.evaluate(readChatBlockers);
       if (blockers.loginRequired || blockers.verificationRequired) return { flags: { ...flags, ...blockers, blocked: true } };
       identity = await page.evaluate(readChatIdentityDom);
+      const observedKey = !identity.identityConflict && contactIdentityKey(identity);
+      if (!matches(identity) && observedKey && selectionAttempt === 0) {
+        wrongSamples = observedKey === wrongKey ? wrongSamples + 1 : 1; wrongKey = observedKey;
+        if (wrongSamples >= 3) return this.select(page, recipientId, signal, { refresh: true, weak, selectionAttempt: 1 });
+      } else { wrongKey = null; wrongSamples = 0; }
       const geometryStable = previous && identity.geometry && ['x', 'y', 'width', 'height'].every(key => Math.abs(identity.geometry[key] - previous.geometry[key]) <= 0.5);
       stableSamples = matches(identity) ? geometryStable ? stableSamples + 1 : 1 : 0;
       if (stableSamples >= 3) break;
@@ -1069,7 +1156,14 @@ export class ChatBrowser {
     for (let attempt = 0; attempt < 12; attempt += 1) {
       stop(signal);
       const current = await page.evaluate(readConversationDom, { ...expectedDomIdentity(contact), allowWeak: weak });
-      if (!(weak ? sameWeakConversation(current, contact) : sameConversationIdentity(current, contact))) throw new Error('读取前会话身份发生变化。');
+      if (!(weak ? sameWeakConversation(current, contact) : sameConversationIdentity(current, contact))) {
+        if(current.identityUnavailable&&current.headerCount!==1&&Array.isArray(current.messages)&&current.messages.length===0){
+          previous=undefined;
+          if(attempt===11)throw Object.assign(new Error('会话头部仍在重绘，等待下一次可靠检查。'),{code:'CHAT_SNAPSHOT_CHANGED'});
+          await page.waitForTimeout(150);continue;
+        }
+        throw new Error('读取前会话身份发生变化。');
+      }
       const signature = JSON.stringify(current.messages);
       if (!current.loading && previous === signature) return current;
       previous = current.loading ? undefined : signature;
@@ -1337,7 +1431,8 @@ export class ChatBrowser {
         };
         const initial = await read(), expected = expectedMessageContent ?? messageContent(initial.messages), ids = expectedMessageIds ?? initial.messages.map(item => item.id);
         if (JSON.stringify(expected.map(item => item.id)) !== JSON.stringify(ids)) return unsent('CHAT_WATERMARK_CHANGED');
-        const watermark = { content: expected, chronology: expectedMessageEvidence?.chronology ?? initial.raw.chronology, latestEndVerified: expectedMessageEvidence?.latestEndVerified ?? messageWatermark(initial.messages, initial.raw).latestEndVerified };
+        const initialWatermark = messageWatermark(initial.messages, initial.raw);
+        const watermark = { content: expected, chronology: expectedMessageEvidence?.chronology ?? initial.raw.chronology, latestEndVerified: expectedMessageEvidence?.latestEndVerified ?? initialWatermark.latestEndVerified, unknownPrefix: expectedMessageEvidence?.unknownPrefix ?? (expectedMessageEvidence === undefined ? initialWatermark.unknownPrefix : undefined) };
         const currentContext = async () => { await authorized('monitor'); await this.verifyContactBinding(page, contact, expectedContact, weak); const value = await read(); if (!compareMessageWatermark(watermark, value.messages, value.raw).matches) throw new Error('图片准备期间消息已变化。'); return value; };
         if (!compareMessageWatermark(watermark, initial.messages, initial.raw).matches) return unsent('CHAT_WATERMARK_CHANGED');
         const editor = page.locator('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable=true]');
@@ -1424,7 +1519,7 @@ export class ChatBrowser {
       const expectedContent = expectedMessageContent ?? messageContent(initialMessages);
       const exactInitial = JSON.stringify(initialMessages.map(item => item.id)) === JSON.stringify(expected) && JSON.stringify(messageContent(initialMessages)) === JSON.stringify(expectedContent);
       const initialEvidence = messageWatermark(initialMessages, before);
-      const expectedWatermark = { content: expectedContent, chronology: expectedMessageEvidence?.chronology ?? (exactInitial ? initialEvidence.chronology : 'unknown'), latestEndVerified: expectedMessageEvidence?.latestEndVerified === true || expectedMessageEvidence === undefined && exactInitial && initialEvidence.latestEndVerified };
+      const expectedWatermark = { content: expectedContent, chronology: expectedMessageEvidence?.chronology ?? (exactInitial ? initialEvidence.chronology : 'unknown'), latestEndVerified: expectedMessageEvidence?.latestEndVerified === true || expectedMessageEvidence === undefined && exactInitial && initialEvidence.latestEndVerified, unknownPrefix: expectedMessageEvidence?.unknownPrefix ?? (expectedMessageEvidence === undefined && exactInitial ? initialEvidence.unknownPrefix : undefined) };
       let guardDiagnostic;
       const sameWatermark = (messages, raw) => { const result = compareMessageWatermark(expectedWatermark, messages, raw); guardDiagnostic = result.diagnostic; return result.matches; };
       if (!Array.isArray(expected) || expected.some(id => typeof id !== 'string') || !Array.isArray(expectedContent) || JSON.stringify(expectedContent.map(item => item?.id)) !== JSON.stringify(expected) || !sameWatermark(initialMessages, before)) return { confirmed: false, deliveryUncertain: false, reason: '私信水位或内容已变化，未填写或发送回复。' };
@@ -1482,7 +1577,8 @@ export class ChatBrowser {
                 if (!descriptor) continue;
                 if (!Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'string' || !/^\d{1,64}$/.test(descriptor.value)) { result.conflict = true; continue; }
                 if (ownDescriptor && (!Object.hasOwn(ownDescriptor, 'value') || ownDescriptor.value !== descriptor.value)) { result.conflict = true; continue; }
-                result[key] = descriptor.value;
+                if (result[key] && result[key] !== descriptor.value) result.conflict = true;
+      result[key] = descriptor.value;
               }
               result.signature = JSON.stringify([result.id, result.shortId, result.conflict, signatures]);
               return result;

@@ -43,6 +43,10 @@ test('软件和插件按用途共用标签与跨进程锁，用量来源仍分�
   assert.equal(f.context.pages().length, 2); assert.equal(api.source, 'api'); assert.equal(dsh.source, 'dsh');
 });
 
+test('正在直播间的受管作品页继续供两入口复用，不新开第三页，聊天页保留草稿',async t=>{
+ const f=await fixture(t),live=await f.page('deepseek-douyin-api','https://live.douyin.com/12345678'),chat=await f.page('deepseek-douyin-api-chat');await chat.locator('textarea').fill('合成草稿');assert.equal(await findSharedPage(f.scoped,'api'),live);assert.equal(await findSharedPage(f.scoped,'dsh'),live);assert.equal(await f.controller('api').connect(),live);assert.equal(f.context.pages().length,2);assert.equal(await chat.locator('textarea').inputValue(),'合成草稿');
+});
+
 test('仅有旧插件页时原地接管，保留地址和草稿，不增加页面', async t => {
   const f = await fixture(t), page = await f.page('deepseek-douyin-dsh-chat'); await page.locator('textarea').fill('旧页草稿');
   const controller = f.controller('dsh-chat'); assert.equal(await controller.connect(), page);
