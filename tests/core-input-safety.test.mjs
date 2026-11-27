@@ -2,7 +2,7 @@ import test,{before,after}from'node:test';
 import assert from'node:assert/strict';
 import{chromium}from'../playwright-runtime.mjs';
 import{BrowserController,readPageState}from'../core.mjs';
-import{readChatBlockers}from'../chat-browser.mjs';
+import{ChatBrowser,readChatBlockers}from'../chat-browser.mjs';
 let browser;before(async()=>{browser=await chromium.launch({channel:'msedge',headless:true})});after(()=>browser?.close());
 const A='7579432563794584933',B='7579432563794584934',C='7579432563794584935';
 async function pageFixture(t){
@@ -27,6 +27,39 @@ test('无文字验证码与聊天检测一致，并阻止视频截图和换片',
  assert.equal(state.verificationRequired,true);assert.equal(chatBlockers.verificationRequired,true);assert.equal(blocked,true);assert.equal(state.video.id,A);
  const controller=new BrowserController({source:'verification',memory:{recordVideo(){},close(){}}});controller.page=page;page.screenshot=async()=>{throw new Error('验证码不应进入截图');};const capture=await controller.capture(0);assert.deepEqual(capture.frames,[]);const result=await controller.switchVideo(1,undefined,{recordLearning:false,expectedVideoId:A});assert.equal(result.changed,false);assert.equal(result.reasonCode,'switch-blocked');
  console.log(JSON.stringify({verified:'nontext-captcha-blocks-video-observation',coreVerificationRequired:state.verificationRequired,chatVerificationRequired:chatBlockers.verificationRequired,actualPointerBlocked:blocked}));
+});
+
+test('验证码中间页没有正文时，观看与聊天都识别为待验证', async t => {
+  const page = await pageFixture(t);
+  await page.setContent('<title>验证码中间页</title><main></main>');
+  assert.equal((await page.evaluate(readPageState)).verificationRequired, true);
+  const chat = new ChatBrowser();
+  const flags = await chat.dialog(page, AbortSignal.timeout(2000), { open: true });
+  assert.deepEqual(flags, { blocked: true, loginRequired: false, verificationRequired: true });
+  await page.setContent('<title>抖音</title><button data-e2e="im-entry">消息</button><section data-e2e="im-dialog" hidden>合成会话</section>');
+  await page.locator('[data-e2e="im-entry"]').evaluate(entry => {
+    entry.onclick = () => { document.querySelector('[data-e2e="im-dialog"]').hidden = false; };
+  });
+  assert.deepEqual(await chat.dialog(page, AbortSignal.timeout(3000), { open: true }), {
+    blocked: false, loginRequired: false, verificationRequired: false,
+  });
+});
+
+test('等待消息入口时转到验证中间页，返回验证状态且保持零点击', async t => {
+  const page = await pageFixture(t);
+  const locator = page.locator.bind(page);
+  let clicks = 0;
+  page.locator = selector => selector === '[data-e2e="im-entry"]' ? {
+    waitFor: async () => {
+      await page.setContent('<title>验证码中间页</title><main></main>');
+      throw new Error('合成消息入口超时');
+    },
+    click: async () => { clicks++; },
+  } : locator(selector);
+  assert.deepEqual(await new ChatBrowser().dialog(page, AbortSignal.timeout(3000), { open: true }), {
+    blocked: true, loginRequired: false, verificationRequired: true,
+  });
+  assert.equal(clicks, 0);
 });
 
 test('控件稳定后只有一次可信mouse输入，低RAF等待不调用locator.click',async t=>{
@@ -77,4 +110,28 @@ test('无箭头时滚轮只在原作品几何与中心命中核实后输入一�
  const page=await pageFixture(t),controller=new BrowserController({source:'verification',memory:{recordVideo(){},close(){}}});controller.page=page;
  await page.evaluate(C=>{document.querySelector('button').remove();window.wheels=[];document.addEventListener('wheel',event=>{window.wheels.push({trusted:event.isTrusted,deltaY:event.deltaY});document.querySelector('section').className=`video_${C}`},{passive:true})},C);
  const result=await controller.switchVideo(1,undefined,{recordLearning:false,expectedVideoId:A});assert.equal(result.changed,true);assert.deepEqual(await page.evaluate(()=>window.wheels),[{trusted:true,deltaY:700}]);
+});
+
+test('推荐流箭头不可用且播放器中心被遮挡时，只滚动一次命中已核对作品的位置', async t => {
+  const page = await pageFixture(t);
+  const controller = new BrowserController({ source: 'verification', memory: { recordVideo() {}, close() {} } });
+  controller.page = page;
+  await page.evaluate(C => {
+    const button = document.querySelector('button');
+    button.disabled = true;
+    const layer = document.createElement('div');
+    layer.style.cssText = 'position:absolute;left:100px;top:140px;width:40px;height:40px;z-index:10';
+    document.body.append(layer);
+    window.switches = [];
+    document.addEventListener('click', () => window.switches.push('click'));
+    document.addEventListener('wheel', event => {
+      window.switches.push(event.isTrusted && Boolean(event.target.closest('[data-e2e="feed-active-video"]')) ? 'wheel' : 'outside');
+      document.querySelector('section').className = 'video_' + C;
+    });
+  }, C);
+  const result = await controller.switchVideo(1, undefined, { recordLearning: false, expectedVideoId: A });
+  assert.equal(result.changed, true);
+  assert.equal(result.after.id, C);
+  assert.deepEqual(await page.evaluate(() => window.switches), ['wheel']);
+  assert.equal(await page.locator('[data-deepseek-switch-token]').count(), 0);
 });

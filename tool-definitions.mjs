@@ -28,6 +28,7 @@ export const TOOL_DEFINITIONS = [
     description: '观察当前视频一小段时间，采集画面和播放状态。只有支持图像输入的模型才能理解画面。',
     parameters: { type: 'object', properties: { seconds: { type: 'number', minimum: 1, maximum: 10, description: '观察秒数，默认 3 秒，范围 1 到 10 秒。' } }, additionalProperties: false },
   },
+  { name: 'douyin_read_comments', description: '按需读取当前抖音视频的公开热评、点赞数和可核对的作者回复。只读取当前作品，不发表、点赞或回复。', parameters: { type: 'object', properties: { limit: { type: 'integer', minimum: 1, maximum: 10, description: '热评条数，默认 5 条。' } }, additionalProperties: false } },
   { name: 'douyin_screenshot', description: '获取当前抖音可见画面，供支持图像输入的模型查看。', parameters: empty() },
   {name:'douyin_video_zoom',description:'按格查看本入口最近一分钟分镜的原始采样画面，用于看清小字或细节；必须仍是同一作品，不会增加观看进度或音轨证据。',parameters:{type:'object',properties:{sampleId:{type:'string',pattern:'^[a-f0-9-]{36}$'},cell:{type:'integer',minimum:1,maximum:16},videoId:{type:'string',pattern:'^\\d{1,64}$'}},required:['sampleId','cell','videoId'],additionalProperties:false}},
   { name: 'douyin_pause', description: '暂停当前抖音视频。', parameters: empty() },
@@ -66,8 +67,8 @@ export const TOOL_DEFINITIONS = [
     parameters:{type:'object',properties:{recipientId:{type:'string',minLength:1,maxLength:500,description:'由douyin_chat_contacts返回的精确本机联系人ID。'}},required:['recipientId'],additionalProperties:false},
   },
   {
-    name:'douyin_chat_observe',description:'读取许可名单内指定表情或分享卡片的实际画面；分享视频只在允许的刷视频时间内采样，不能把封面当成看完整条作品。',
-    parameters:{type:'object',properties:{recipientId:{type:'string',minLength:1,maxLength:500},messageId:{type:'string',minLength:1,maxLength:80}},required:['recipientId','messageId'],additionalProperties:false},
+    name:'douyin_chat_observe',description:'读取许可会话中指定消息的画面、语音转写或可读取的附件正文。后台支持带可读地址的文字文件和视频附件。许可个人私信收到的分享视频按所选时段采样正片，默认为全天。可按需读取公开热评与作者回复。',
+    parameters:{type:'object',properties:{recipientId:{type:'string',minLength:1,maxLength:500},messageId:{type:'string',minLength:1,maxLength:80},includeComments:{type:'boolean',description:'用户要看这张视频卡片的评论区时设为 true。'}},required:['recipientId','messageId'],additionalProperties:false},
   },
   {name:'douyin_video_limits_status',description:'读取允许观看开关、自定义时间段、当天已用观看时间和模型请求额度。',parameters:empty()},
   {name:'douyin_media_status',description:'读取可选音频能力的开关、后端及依赖状态；默认关闭，不返回任何密钥。',parameters:empty()},

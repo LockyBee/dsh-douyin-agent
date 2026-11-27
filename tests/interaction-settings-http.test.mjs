@@ -8,8 +8,11 @@ import { createApiServer } from '../app.mjs';
 import { AutonomousComments } from '../autonomous-comments.mjs';
 import { DailyReport } from '../daily-report.mjs';
 import { WatchMode } from '../watch-mode.mjs';
+import { BrowserMode } from '../browser-mode.mjs';
+import { BrowserController } from '../core.mjs';
 import { PersonaMemory } from '../persona-memory.mjs';
 import { VideoLimits } from '../video-limits.mjs';
+import { VideoReactions } from '../video-reactions.mjs';
 
 const videoId = '7579432563794584933';
 const videoState = () => ({ url: `https://www.douyin.com/video/${videoId}`, loginRequired: false, verificationRequired: false, privateChatVisible: false, video: { id: videoId, url: `https://www.douyin.com/video/${videoId}`, title: '合成公开视频', author: '合成作者', time: 2, duration: 30, readyState: 4, paused: false } });
@@ -20,19 +23,37 @@ async function fixture(t, options = {}) {
   const videoLimits = new VideoLimits({ stateDir, now }); videoLimits.savePolicy({ windows: ['00:00-24:00'], sessionMinutes: 10 }, { explicit: true }); videoLimits.markSession('api', { explicit: true });
   const runId = 'synthetic-http-watch'; fs.writeFileSync(path.join(stateDir, 'watch-loop.lock'), JSON.stringify({ version: 1, pid: process.pid, runId, source: 'api', status: 'running', sessionId: videoLimits.state().session.id }));
   const evidenceId = personaMemory.recordObservation(videoState(), { source: 'api' }).evidenceId;
-  let browserCalls = 0, closed = 0; const applied = [];
+  let browserCalls = 0, closed = 0; const applied = [], shown = [];
   const controller = { source: 'api', execute: async () => { browserCalls++; throw new Error('设置接口不能操作浏览器'); }, close: async () => { closed++; }, ...(options.apply ? { applyWatchMode: async input => { applied.push(input); return { applied: false, pendingNextVideoAction: true, focusRequested: false }; } } : {}) };
   const commentService = new AutonomousComments({ personaMemory, videoLimits, stateDir, now, post: options.post || (async () => assert.fail('设置接口不能发布评论')) });
+  const reactions = new VideoReactions({ personaMemory, videoLimits, stateDir, now, react: async () => assert.fail('设置接口不能点赞收藏') });
+  controller.getReactions = async () => reactions;
+  t.after(() => reactions.close());
   const reportService = new DailyReport({ personaMemory, now }), modeService = new WatchMode({ stateDir, now });
+  if (options.backgroundMode) {
+    const controlDirectory = path.join(root, 'browser-control');
+    const browserMode = new BrowserMode({ controlDir: controlDirectory });
+    Object.assign(controller, {
+      controlDirectory,
+      getBrowserMode: () => browserMode,
+      configureBrowserMode: BrowserController.prototype.configureBrowserMode,
+      openBrowser: async ({ modeChange, exchange }) => {
+        shown.push({ modeChange, exchange });
+        browserMode.configure({ mode: modeChange }, { explicit: true });
+        fs.writeFileSync(path.join(controlDirectory, 'browser.json'), JSON.stringify({ pid: process.pid, ready: true, mode: modeChange }));
+        return { opened: modeChange === 'visible' };
+      },
+    });
+  }
   const config = { apiKey: 'synthetic-http-secret', model: 'synthetic', baseUrl: 'https://synthetic.example' };
   const agent = { config, runTask: async () => assert.fail('设置接口不能调用模型') };
-  const watchService = { config, agent: { config }, commentAgent: { config }, state: () => ({ running: false, owned: false }), cancel() {}, close: async () => {} };
+  const watchService = { config, agent: { config }, commentAgent: { config }, state: () => ({ running: false, owned: false }), claimManual: () => () => {}, cancel() {}, close: async () => {} };
   const server = createApiServer({ controller, config, agent, personaMemory, videoLimits, watchService, ...(options.unavailable ? {} : { commentService, reportService, modeService }), pauseVideoSources: async () => {}, port: 0 });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`, bootstrap = await (await fetch(origin + '/api/bootstrap')).json();
   const request = async (route, body, headers = {}) => { const response = await fetch(origin + route, { headers: { 'x-session-token': bootstrap.token, ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...headers }, ...(body !== undefined ? { method: 'POST', body: JSON.stringify(body) } : {}) }); return { status: response.status, body: await response.json() }; };
   t.after(async () => { await server.stop(); await commentService.close(); assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir())); assert.match(path.basename(root), /^douyin-interaction-http-/); fs.rmSync(root, { recursive: true, force: true }); });
-  return { root, stateDir, now, personaMemory, videoLimits, runId, input: { evidenceId, videoId, text: '这个配色很舒服。' }, controller, config, agent, watchService, commentService, reportService, modeService, server, origin, bootstrap, request, applied, stats: () => ({ browserCalls, closed }) };
+  return { root, stateDir, now, personaMemory, videoLimits, runId, input: { evidenceId, videoId, text: '这个配色很舒服。' }, controller, config, agent, watchService, commentService, reportService, modeService, server, origin, bootstrap, request, applied, shown, stats: () => ({ browserCalls, closed }) };
 }
 
 test('评论、日报和静默设置均受本机token与同源限制，未注入服务明确不可用', async t => {
@@ -97,6 +118,35 @@ test('静默设置仅保存开关并声明待应用，不开启浏览器、不�
   const connected = await fixture(t, { apply: true }); await connected.request('/api/mode/configure', { silent: true }); await connected.request('/api/mode/configure', { silent: false }); assert.deepEqual(connected.applied, [{ minimize: true }, { minimize: false }]);
 });
 
+test('本机接口立即切换专用浏览器的两种运行方式，静默设置和用量不变', async t => {
+  const f = await fixture(t, { backgroundMode: true });
+  assert.equal(f.bootstrap.browserMode.available, true);
+  assert.equal((await fetch(f.origin + '/api/browser/mode')).status, 403);
+  const { body: initial } = await f.request('/api/browser/mode');
+  assert.equal(initial.mode, 'visible');
+  const started = await f.request('/api/browser/mode', { mode: 'background' });
+  assert.equal(started.status, 200);
+  assert.equal(started.body.mode, 'background');
+  assert.equal(started.body.recordedMode, 'background');
+  assert.equal(started.body.opened, false);
+  assert.equal((await f.request('/api/browser/mode', { mode: 'background' })).status, 200);
+  assert.deepEqual(f.shown, [{ modeChange: 'background', exchange: true }]);
+  assert.equal((await f.request('/api/mode/state')).body.silent, false);
+  assert.equal((await f.request('/api/mode/configure', { silent: true })).body.silent, true);
+  assert.equal((await f.request('/api/browser/mode')).body.mode, 'background');
+  const sessions = fs.readFileSync(f.videoLimits.sessionsFile, 'utf8');
+  const switched = await f.request('/api/browser/mode', { mode: 'visible' });
+  assert.equal(switched.status, 200);
+  assert.equal(switched.body.mode, 'visible');
+  assert.equal(switched.body.recordedMode, 'visible');
+  assert.equal(switched.body.opened, true);
+  await f.request('/api/browser/mode', { mode: 'background' });
+  assert.deepEqual(f.shown, [{ modeChange: 'background', exchange: true }, { modeChange: 'visible', exchange: true }, { modeChange: 'background', exchange: true }]);
+  assert.equal(fs.readFileSync(f.videoLimits.sessionsFile, 'utf8'), sessions);
+  assert.equal((await f.request('/api/mode/state')).body.silent, true);
+  assert.equal(f.stats().browserCalls, 0);
+});
+
 test('进程内更换API同步专用评论模型，活动发布期间禁止切换凭据', async t => {
   const f = await fixture(t), original = f.config;
   f.server.configureApi({ apiKey: 'synthetic-replacement-key', baseUrl: 'https://synthetic.example/v1', model: 'new-synthetic-model' });
@@ -110,4 +160,15 @@ test('关闭HTTP会取消自身未发布评论并等待锁释放，不遗留发�
   const f = await fixture(t, { post: async (input, { signal, authorize }) => { authorize({ phase: 'prepare', videoId: input.expectedVideoId }); entered.resolve(); await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); } });
   await f.request('/api/comments/configure', { enabled: true }); const pending = f.commentService.comment(f.input, { watchRunId: f.runId }); const rejected = assert.rejects(pending, /关闭/); await entered.promise;
   await f.server.stop(); await rejected; assert.equal(f.commentService.active, null); assert.equal(fs.existsSync(f.commentService.files.send), false); assert.equal(f.commentService.state().daily.attempts, 1); assert.equal(f.stats().closed, 1);
+});
+
+
+test('点赞收藏设置经过真实 HTTP 会话校验，两开关持久回读且不操作浏览器', async t => {
+  const f = await fixture(t);
+  const unauthorized = await f.request('/api/reactions/configure', { like: true, favorite: true }, { 'x-session-token': 'wrong' }); assert.equal(unauthorized.status, 403);
+  const crossOrigin = await f.request('/api/reactions/configure', { like: true, favorite: true }, { origin: 'https://other.invalid' }); assert.equal(crossOrigin.status, 403);
+  const invalid = await f.request('/api/reactions/configure', { like: true }); assert.equal(invalid.status, 400);
+  const saved = await f.request('/api/reactions/configure', { like: true, favorite: false }); assert.equal(saved.status, 200);
+  const read = await f.request('/api/reactions/state'); assert.equal(read.status, 200); assert.deepEqual(read.body.policy, { like: true, favorite: false });
+  assert.equal(f.stats().browserCalls, 0); assert.equal(JSON.stringify(read.body).includes(f.config.apiKey), false);
 });

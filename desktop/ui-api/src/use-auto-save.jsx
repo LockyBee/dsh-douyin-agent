@@ -42,5 +42,5 @@ export function useAutoSave({ value, initial, read, encode, write, canonical = (
 }
 
 export function AutoSaveStatus({ status }) {
-  return status?.message ? <p className={status.kind === 'error' ? 'notice error' : 'notice'} role={status.kind === 'error' ? 'alert' : 'status'}>{status.message}</p> : null;
+  return status?.message && status.kind !== 'editing' ? <p className={status.kind === 'error' ? 'notice error' : 'notice'} role={status.kind === 'error' ? 'alert' : 'status'}>{status.message}</p> : null;
 }

@@ -70,6 +70,11 @@ test('新建空锁超过本次等待预算返回busy，既不发送也不删除�
   await assert.rejects(f.api.run({ recipientId: '合成短预算联系人', purpose: 'reply' }, async () => { called = true; }), error => error.code === 'OUTBOUND_BUSY' && error.beforeDelivery === true);
   assert.equal(called, false); assert.equal(fs.readFileSync(f.api.guardFile, 'utf8'), '');
 });
+test('文件时间略快于墙钟的空锁仍只等待，超出发送预算不进入回调',async t=>{
+  const f=fixture(t,{waitMs:10});fs.writeFileSync(f.api.guardFile,'');const future=new Date(Date.now()+200);fs.utimesSync(f.api.guardFile,future,future);let sent=false;
+  await assert.rejects(f.api.run({recipientId:'合成时间偏差联系人',purpose:'reply'},async()=>{sent=true}),error=>error.code==='OUTBOUND_BUSY'&&error.beforeDelivery===true);
+  assert.equal(sent,false);assert.equal(fs.readFileSync(f.api.guardFile,'utf8'),'');
+});
 test('新空锁一直未写完时仅等短宽限后要求核对，不耗完五秒发送预算', { timeout: 1500 }, async t => {
   const f = fixture(t); fs.writeFileSync(f.api.guardFile, ''); let called = false;
   await assert.rejects(f.api.run({ recipientId: '合成未写完锁联系人', purpose: 'reply' }, async () => { called = true; }), error => error.code === 'OUTBOUND_RECOVERY_REQUIRED');

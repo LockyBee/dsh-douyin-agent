@@ -15,9 +15,17 @@ export function hasStableConversationIdentity(value) {
     && /^[a-f0-9]{64}$/.test(value.identityHash || '') && value.identityHash === value.id.slice(5));
 }
 
-// 网页没有提供关注关系时，只有本人核对后才能授权现有会话；群聊始终单独核对。
 export function canAuthorizeConversation(value) {
-  return Boolean(hasVerifiedConversationIdentity(value) && (value.identityVersion === undefined || hasStableConversationIdentity(value)) && (value.isGroup === true || value.relationshipStatus === 'unavailable' && value.followed !== true));
+  const stable = hasStableConversationIdentity(value);
+  if (!hasVerifiedConversationIdentity(value) || value.identityVersion !== undefined && !stable) return false;
+  if (value.isGroup === true) return true;
+  if (value.relationshipStatus === 'unavailable') return value.followed !== true;
+  return value.relationshipStatus === 'unverified' && value.followed == null && stable;
+}
+
+export function canSelectManualAuthorization(value) {
+  return typeof value?.isGroup === 'boolean' &&
+    (value.isGroup || value.relationshipStatus !== 'unverified' || canAuthorizeConversation(value));
 }
 
 export function isStoredContactAuthorized(value) {

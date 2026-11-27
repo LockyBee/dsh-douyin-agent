@@ -6,6 +6,23 @@ import {composeSheet, layoutCanvas} from './storyboard/vendor/sheet.mjs';
 const MAX_BYTES=2_000_000, MAX_TOTAL_BYTES=8_000_000, MAX_PIXELS=8_000_000;
 const publicId=value=>typeof value==='string'&&/^\d{1,64}$/.test(value);
 const original=(frames,reason)=>({frames,summary:'',manifest:{status:'original',inputImages:frames.length,outputImages:frames.length,reason}});
+export function timedVideoFrameCount(observation) {
+  const id = observation?.sharedWork?.videoId;
+  if (!publicId(id) || !Array.isArray(observation.frames)) return 0;
+  const frames = observation.frames.filter(frame => frame.videoId === id);
+  const packing = observation.visualPacking, sample = observation.sharedWork.observation;
+  if (packing?.status === 'storyboard') {
+    if (observation.sharedWork.state?.playbackBackend !== 'local-decoder' || sample?.source !== 'ffmpeg-realtime-local-media' ||
+        frames.length !== 1 || frames[0].storyboard !== true || packing.videoId !== id ||
+        packing.outputImages !== 1 || !Array.isArray(packing.cells) || packing.cells.length !== packing.inputImages ||
+        packing.cells.length < 2 || packing.cells.length > 12 || !Number.isFinite(sample.beforeTime) || !Number.isFinite(sample.afterTime)) return 0;
+    const valid = packing.cells.every((cell, index) => cell?.videoId === id && cell.cell === index + 1 &&
+      Number.isFinite(cell.time) && cell.time >= sample.beforeTime - 0.25 && cell.time <= sample.afterTime + 0.25 &&
+      (index === 0 || cell.time > packing.cells[index - 1].time));
+    return valid && packing.cells.at(-1).time - packing.cells[0].time > 0.1 ? packing.cells.length : 0;
+  }
+  return frames.filter(frame => Number.isFinite(frame.time)).length;
+}
 function frameBytes(frame){
   if(typeof frame?.data!=='string'||!/^[A-Za-z0-9+/]+={0,2}$/.test(frame.data)||frame.data.length%4)throw Error('视频帧编码无效。');
   const bytes=Buffer.from(frame.data,'base64');

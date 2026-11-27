@@ -179,10 +179,15 @@ export async function apply(ctx, config = {}) {
   };
   const getController = () => {
     if (disposed) throw new Error('抖音插件已卸载。');
-    // 调度器复用延迟创建的控制器；只有实际观看或已许可回复需要浏览器。
-    controllerPromise ??= import('./core.mjs?v=18')
-      .then(({ BrowserController }) => new BrowserController({ ...config, source: 'dsh', personaMemory: sharedPersona }))
-      .catch((error) => { controllerPromise = undefined; throw error; });
+    controllerPromise ??= (async () => {
+      const options = { ...config, source: 'dsh', personaMemory: sharedPersona };
+      if (process.env.DOUYIN_BACKGROUND_MCP_FILE) {
+        const { YunsurBackgroundController } = await import('./yunsur-background.mjs');
+        return new YunsurBackgroundController({ ...options, connectionFile: process.env.DOUYIN_BACKGROUND_MCP_FILE });
+      }
+      const { BrowserController } = await import('./core.mjs?v=18');
+      return new BrowserController(options);
+    })().catch(error => { controllerPromise = undefined; throw error; });
     return controllerPromise;
   };
   const {PersonaMemory}=await import('./persona-memory.mjs?v=10');
@@ -195,7 +200,10 @@ export async function apply(ctx, config = {}) {
     if (!watchPromise) watchPromise=Promise.all([getController(),import('./autonomous-watch.mjs?v=18')]).then(async ([controller,{AutonomousWatch}])=>{
       if(starting) sharedPersona.initialize({importLegacy:false});
       const route=exec.agent?.session?.requestHeader?.()?.config ?? exec.agent?.options ?? {};
-      return new AutonomousWatch({controller,videoLimits:controller.limits(),personaMemory:sharedPersona,commentService:await controller.getComments(),reportService:await controller.getReport(),source:'dsh',config:{apiKey:'',baseUrl:'https://api.deepseek.com',model:route.model||'deepseek-flash'},...(starting?{decisionProvider:createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:exec.agent})}:{})});
+      const options = { controller, videoLimits: controller.limits(), personaMemory: sharedPersona, commentService: await controller.getComments(),
+        reportService: await controller.getReport(), source: 'dsh', config: { apiKey: '', baseUrl: 'https://api.deepseek.com', model: route.model || 'deepseek-flash' },
+        ...(starting ? { decisionProvider: createNativeWatchDecision({ llm: optionalService(ctx, 'llm'), attachments: optionalService(ctx, 'attachments'), agent: exec.agent }) } : {}) };
+      return controller.createWatchService?.(options) || new AutonomousWatch(options);
     }).catch(error=>{watchPromise=undefined;throw error;});
     const watch=await watchPromise;
     if(starting) {
@@ -215,9 +223,25 @@ export async function apply(ctx, config = {}) {
     if (starting && !spark.running && !spark.starting && !spark.busy) spark.setGreetingProvider(createNativeSparkGreeting({ llm: optionalService(ctx, 'llm'), agent: exec.agent }));
     return spark;
   };
-  const watchSchedule = new ScheduledWatch({ source:'dsh', getVideoLimits: async () => (await getController()).limits(), getWatchState: async () => (await getWatch(settingsExec(),false)).state(), recoverRound: async () => (await getWatch(settingsExec(),false)).recoverExitedRun(), stopWatch:async()=> (await getWatch(settingsExec(),false)).stop({explicit:true}), startRound: async ({signal}) => { const watch=await getWatch(settingsExec(true),true); signal.throwIfAborted(); return watch.start({startSession:true},{explicit:true}); } });
+  const watchSchedule = new ScheduledWatch({
+    source: 'dsh',
+    getVideoLimits: async () => (await getController()).limits(),
+    getWatchState: async () => (await getWatch(settingsExec(), false)).state(),
+    recoverRound: async () => (await getWatch(settingsExec(), false)).recoverExitedRun(),
+    stopWatch: async () => (await getWatch(settingsExec(), false)).stop({ explicit: true }),
+    checkWatchVerification: async () => modelSettings.state().configured && (await getVerification()).isWatchReady(),
+    startRound: async ({ signal }) => {
+      const watch = await getWatch(settingsExec(true), true);
+      signal.throwIfAborted();
+      return watch.start({ startSession: true }, { explicit: true });
+    },
+  });
   const friendInteractions=new FriendInteractions({getChat:async()=>(await getController()).getChatService(),getShare:async()=>(await getWatch(settingsExec(),false)).getShareService(),getSpark:async()=>(await getController()).getSparkService(),modelReady:()=>modelSettings.state().configured,startChat:async(chat,{signal})=>{chat.agent.config.model=modelSettings.state().model;chat.setReplyProvider(request=>{chat.agent.config.model=modelSettings.state().model;return createNativeWatchDecision({llm:optionalService(ctx,'llm'),attachments:optionalService(ctx,'attachments'),agent:settingsExec(true).agent,maxTokens:512,purpose:'chat'})(request);});return chat.start({schedule:true,signal});}});
   let diagnostics;
+  let verification;
+  const getVerification = () => verification ??= Promise.all([import('./native-verification.mjs'), getController()])
+    .then(([{ NativeBrowserVerification }, controller]) => new NativeBrowserVerification(controller))
+    .catch(error => { verification = undefined; throw error; });
   const getDiagnostics = async () => {
     if (diagnostics) return diagnostics;
     const controller = await getController(), stateDir = controller.limits().stateDir;
@@ -236,6 +260,7 @@ export async function apply(ctx, config = {}) {
   let commandFiber, settingsFiber, cleanupPromise;
   const teardown = () => cleanupPromise ??= (async () => {
     disposed = true;
+    await verification?.then(service => service.dispose()).catch(() => {});
     await friendInteractions.close();
     await watchSchedule.close();
     launchLifetime.abort(new Error('抖音打开命令已卸载。'));
@@ -258,7 +283,7 @@ export async function apply(ctx, config = {}) {
       });
       if (optionalService(ctx, 'commands')) await commandFiber.await();
       settingsFiber = bindNativeSettingsRoutes(ctx, () => createNativeSettingsRoute({
-          getController, modelSettings, watchSchedule, getDiagnostics, getFriends:async()=>friendInteractions,
+          getController, modelSettings, watchSchedule, getDiagnostics, getVerification, getFriends:async()=>friendInteractions,
           getComments: async () => (await getController()).getComments(),
           getReport: async () => (await getController()).getReport(),
           getSpark: async () => (await getController()).getSparkService(),

@@ -114,6 +114,14 @@ export function openCentralDatabase(file = sharedMemoryPath()) {
       DELETE FROM memory_entries WHERE id IN (SELECT entry_id FROM memory_dependencies WHERE parent_id=OLD.id);
       DELETE FROM memory_dependencies WHERE entry_id=OLD.id OR parent_id=OLD.id;
       DELETE FROM memory_source_times WHERE entry_id=OLD.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS qq_private_backfill_insert AFTER INSERT ON memory_entries
+      WHEN NEW.kind='qq-history' AND instr(NEW.content,'【离线补读的私聊历史，')>0 BEGIN
+      UPDATE memory_entries SET content='[离线私聊内容仅保存在原会话]' WHERE id=NEW.id;
+    END;
+    CREATE TRIGGER IF NOT EXISTS qq_private_backfill_update AFTER UPDATE OF content ON memory_entries
+      WHEN NEW.kind='qq-history' AND instr(NEW.content,'【离线补读的私聊历史，')>0 BEGIN
+      UPDATE memory_entries SET content='[离线私聊内容仅保存在原会话]' WHERE id=NEW.id;
     END;`);
     return db;
   } catch (error) { db.close(); throw error; }
@@ -394,6 +402,10 @@ export function syncQQToCentral({ qqDb, qqPath, config, centralDb, centralPath, 
     const saveHistory = row => {
       const key = `${namespace}:message:${row.id}`;
       if (!allowedKeys.has(row.conversation_key) || !['user', 'assistant'].includes(row.role)) return false;
+      if (row.role === 'user' && row.conversation_key.startsWith('private:') && itemText(row).startsWith('【离线补读的私聊历史，')) {
+        removed += Number(remove.run(key).changes);
+        return false;
+      }
       const turn = getTurn(row);
       if (turn.sensitive) { purgeTurn(turn); return false; }
       const content = clean(itemText(row)).slice(0, 1_200);

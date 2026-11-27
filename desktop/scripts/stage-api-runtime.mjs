@@ -17,7 +17,9 @@ const NODE_LICENSE_SHA256 = '8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b
 const NODE_ARCHIVE_SHA256 = 'f2aa33b35b75aca5f3f7b85675a6f6423201053e9381911e64961f3bda2528ab';
 const DEPENDENCIES = { 'playwright-core': '1.64.0-alpha-1790635538000', yaml: '2.9.0' };
 export const DOMAIN_FILES = Object.freeze([
+  'yunsur-mcp.mjs', 'yunsur-video.mjs', 'yunsur-chat.mjs', 'yunsur-background.mjs', 'yunsur-media.mjs', 'yunsur-share.mjs', 'yunsur-interactions.mjs', 'yunsur-live.mjs', 'yunsur-hls.mjs', 'yunsur-attachments.mjs', 'atomic-file.mjs',
   'conversation-memory.mjs',
+  'memory-budget.mjs',
   'memory-history.mjs',
   'memory-policy.mjs',
   'memory-retrieval.mjs',
@@ -31,13 +33,14 @@ export const DOMAIN_FILES = Object.freeze([
   'group-video-inbox.mjs',
   'browser-pages.mjs', 'video-storyboard.mjs', 'contact-authorization.mjs', 'friend-interactions.mjs', 'friend-interactions-guard.mjs',
   'group-reply-trigger.mjs',
-  'scheduled-watch.mjs', 'interaction-status.mjs', 'settings-sections.mjs', 'usage-ledger.mjs', 'watch-options.mjs', 'diagnostics.mjs', 'api-agent.mjs', 'app.mjs', 'browser-host.mjs', 'chat-agent.mjs', 'chat-browser.mjs',
+  'scheduled-watch.mjs', 'interaction-status.mjs', 'settings-sections.mjs', 'usage-ledger.mjs', 'watch-options.mjs', 'diagnostics.mjs', 'api-agent.mjs', 'app.mjs', 'browser-mode.mjs', 'browser-host.mjs', 'chat-agent.mjs', 'chat-browser.mjs',
   'chat-message.mjs', 'chat-service.mjs', 'core.mjs', 'message-tracker.mjs', 'memory.mjs',
   'qq-sync.mjs', 'runtime-paths.mjs', 'tool-definitions.mjs', 'video-forward.mjs',
   'video-limits.mjs', 'playwright-runtime.mjs', 'receipt-baseline.mjs',
-  'persona-memory.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'browser-pause.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-agent.mjs', 'spark-service.mjs', 'daily-report.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'watch-mode.mjs',
+  'persona-memory.mjs', 'persona-evidence-journal.mjs', 'autonomous-watch.mjs', 'browser-launcher.mjs', 'browser-pause.mjs', 'autonomous-share.mjs', 'task-limits.mjs', 'outbound-send.mjs', 'spark-agent.mjs', 'spark-service.mjs', 'daily-report.mjs', 'comment-novelty.mjs', 'video-reactions.mjs', 'reaction-browser.mjs', 'autonomous-comments.mjs', 'comment-browser.mjs', 'public-comment-agent.mjs', 'watch-mode.mjs',
 ]);
-const MEDIA_FILES = ['index.mjs', 'key-store.mjs', 'local_whisper.py', 'mimo_bridge.py', 'requirements.txt', 'setup_local.py', 'README.md', 'PROVENANCE.json'];
+const MEDIA_FILES = ['index.mjs', 'key-store.mjs', 'local_whisper.py', 'mimo_bridge.py', 'requirements.txt', 'setup_local.py', 'README.md', 'PROVENANCE.json',
+  'pdf-text-worker.mjs', 'vendor/pdf/pdfjs.mjs', 'vendor/pdf/LICENSE-PDFJS', 'vendor/pdf/LICENSE-unpdf', 'vendor/pdf/PROVENANCE.json'];
 const STORYBOARD_FILES=['PROVENANCE.json','vendor/sheet.mjs','vendor/plan.mjs','vendor/LICENSE','vendor/NOTICE','vendor/jpeg-js/package.json','vendor/jpeg-js/index.js','vendor/jpeg-js/lib/encoder.js','vendor/jpeg-js/lib/decoder.js','vendor/jpeg-js/LICENSE','vendor/jpeg-js/LICENSE-APACHE-2.0.txt'];
 const VENDOR_FILES = [
   'vendor/mimo/driver/mimo_driver.py', 'vendor/mimo/LICENSE', 'vendor/voice/lib/providers.js',

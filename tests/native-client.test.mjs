@@ -7,6 +7,7 @@ import vm from 'node:vm';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import jpeg from '../storyboard/vendor/jpeg-js/index.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const source = await fs.readFile(path.join(root, 'client.js'), 'utf8');
@@ -96,6 +97,11 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   const allowed = [stable('a', '合成许可好友甲'), stable('b', '合成群聊乙', { followed: null, isGroup: true, identityKind: 'rendered-group', relationshipStatus: 'unavailable', authorizationKind: 'existing-group' }), { id: 'conv:' + 'c'.repeat(64), name: '合成未知类型', followed: null, isGroup: null, identityVerified: false, relationshipStatus: 'unavailable' }, { id: 'conv:' + 'e'.repeat(64), name: '合成缺少稳定身份', followed: true, isGroup: false, identityVerified: true, identityBinding: 'binding:' + 'e'.repeat(64) }];
   const state = { token: 'synthetic-native-settings', persona: { manualText: '合成人格初始正文。', revision: 'synthetic-v1', personaFolder: 'C:/合成记忆/persona' }, model: { configured: true, providers: [{ id: 'synthetic', name: '合成已配置提供商' }], models: [{provider:'synthetic',id:'synthetic-vision',name:'合成视觉模型'},{provider:'synthetic',id:'synthetic-other',name:'合成另一模型'}], provider: 'synthetic', model: 'synthetic-vision' }, video: { allowed: false, reason: '请先开始新一轮。', policy: { windows: ['00:00-24:00'], sessionMinutes: 10 }, session: null }, watch: { running: false, counts: { maxRequests: 30 } }, mode: { silent: false }, spark: { enabled: false, running: false, policy: { windows: ['09:00-22:00'], dailyLimit: 2 }, recipients: [allowed[0]], needsReview: [] }, comments: { enabled: false, policy: { dailyLimit: 3, perSessionLimit: 1 }, daily: { attempts: 0 }, session: { attempts: 0 }, needsReview: [] }, share: { enabled: false, dailyLimit: 3, needsReview: [], unavailableRecipients: [{ id: 'conv:' + 'c'.repeat(64), name: '合成人工群', reason: '缺少稳定会话身份，不能发送原生作品卡片；仍保留在许可名单，不影响观看或回复。' }] }, chat: { running: false, policy: { allowlist: [{ ...allowed[0] }], dailyReplyLimit: 40 }, contacts: [] }, media: { enabled: false, backend: 'local-whisper', backends: { mimo: { credential: { configured:false } }, minimax: { credential: { configured:false } } } }, reports: { date: '2026-10-15', folder: 'C:/合成记忆/reports/videos', reports: [] } };
   state.video.policy = { windows: ['00:00-24:00'], dailyMinutes: 10, dailyRequests: 30 }; state.video.daily = { usedSeconds: 12, requests: 2 };
+  state.video.privateVideoSchedule = { mode: 'all-day', allowed: true, reason: '' };
+  state.browserMode = { mode: 'visible', recordedMode: 'visible', running: true, restartRequired: false };
+  const verificationFrame = jpeg.encode({ width: 64, height: 36, data: Buffer.alloc(64 * 36 * 4, 255) }, 65).data.toString('base64');
+  let verificationRequired = true;
+  const verificationState = () => ({ status: verificationRequired ? 'required' : 'ready', mode: 'background', required: verificationRequired });
   state.schedule = { policy: { enabled: false } }; state.interactions = { policy: { enabled: true }, friend: { replyRunning: false, shareEnabled: true, message: '合成好友互动等待就绪。', waitReason: '合成聊天标签页已离开抖音；请准备回复通道。', lastErrorCode: 'CHAT_PAGE_LEFT_DOUYIN', nextRetryAt: '2026-10-27T23:10:00.000Z', canPrepare: true }, rows: [] };
   state.interactions.presence = { status: 'online', online: true, label: '在线 · 等待消息', reason: '合成后端确认许可会话全部就绪', checkedAt: new Date().toISOString() };
   state.watchOptions = { policy: { mode:'recommend', topics:[], exclude:[] } };
@@ -125,10 +131,33 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
       if (route === '/diagnostics/repair') { assert.deepEqual(input,{reportId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',action:'reapply_silent'}); return reply({message:'合成修复已回读',after:{reportId:'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',checks:[{id:'window',code:'SILENT_WINDOW_MINIMIZED',status:'pass',label:'静默窗口实际状态',message:'合成已最小化'}],repairableActions:[]}}); }
       if (route === '/watch/options') state.watchOptions.policy = input;
       if (route === '/video/configure') { state.video.policy = { ...input, windows: [...new Set(input.windows)] }; if (videoSaveGate) { const gate = videoSaveGate; videoSaveGate = null; gate.received(); await gate.wait; } return reply(state.video); }
+      if (route === '/video/private-schedule') {
+        state.video.privateVideoSchedule = { ...state.video.privateVideoSchedule, mode: input.mode };
+        return reply(state.video.privateVideoSchedule);
+      }
+      if (route === '/browser/mode') {
+        state.browserMode = { ...state.browserMode, mode: input.mode, recordedMode: input.mode };
+        return reply(state.browserMode);
+      }
+      if (route === '/browser/verification') {
+        if (input.action === 'open' && verificationRequired) return reply({ ...verificationState(), status: 'opened', session: 'synthetic-verification' });
+        if (input.action === 'close') return reply({ status: 'closed' });
+        return reply(verificationState());
+      }
+      if (route === '/browser/verification/frame') {
+        assert.equal(input.session, 'synthetic-verification');
+        return reply(verificationRequired ? { ...verificationState(), status: 'opened', frame: { data: verificationFrame, view: 'synthetic-view' } } : verificationState());
+      }
+      if (route === '/browser/verification/input') {
+        assert.equal(input.session, 'synthetic-verification');
+        assert.equal(input.view, 'synthetic-view');
+        if (input.event.type === 'release') verificationRequired = false;
+        return reply({ status: 'opened' });
+      }
       if (route === '/watch/schedule') { state.schedule.policy = { enabled: input.enabled }; if (!input.enabled) state.watch.running = false; else if (startOnConfigure) state.watch.running = true; }
       if (route === '/media/configure') { state.media.enabled = input.enabled; state.media.backend = input.backend; return reply(state.media); }
       if (route === '/interactions/configure') { if (failInteractions) return reply({ error: '合成好友互动设置失败。' }, 409); state.interactions.policy.enabled = input.enabled; state.interactions.friend.replyRunning = input.enabled; state.share.enabled = input.enabled; state.chat.running = input.enabled; return reply(state.interactions); }
-      if (route === '/chat/configure') { state.chat.policy = { ...state.chat.policy, allowlist: input.recipientIds.map(id => { const contact = allowed.find(item => item.id === id); return { ...contact, authorizationKind: contact.isGroup ? 'existing-group' : 'following' }; }), groupMentionNames: input.groupMentionNames, dailyReplyLimit: null }; if (chatSaveGate) { const gate = chatSaveGate; chatSaveGate = null; gate.received(); await gate.wait; } return reply(state.chat); }
+      if (route === '/chat/configure') { state.chat.policy = { ...state.chat.policy, allowlist: input.recipientIds.map(id => { const contact = allowed.find(item => item.id === id); return { ...contact, authorizationKind: contact.isGroup ? 'existing-group' : contact.followed === true ? 'following' : 'existing-conversation' }; }), groupMentionNames: input.groupMentionNames, dailyReplyLimit: null }; if (chatSaveGate) { const gate = chatSaveGate; chatSaveGate = null; gate.received(); await gate.wait; } return reply(state.chat); }
       if (route === '/chat/resolve') { if (resolveGate) { const gate = resolveGate; resolveGate = null; gate.received(); await gate.wait; } state.chat.contacts = state.chat.contacts.map(item => item.id === input.recipientId ? { ...item, status: 'ready', reason: '' } : item); return reply(state.chat); }
       if (route === '/mode/configure') state.mode.silent = input.silent;
       if (route === '/chat/contacts') return reply({ contacts: listOverride || allowed, listDiscovery: { source: 'current-conversation-list', scannedToEnd: false, count: (listOverride || allowed).length, reason: '合成读取预算已到，只返回当前网页会话。' } });
@@ -152,6 +181,14 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   assert.equal(await persona.inputValue(), '合成人格初始正文。'); assert.equal(calls.some(item => item.method === 'POST'), false);
   assert.match(await page.getByLabel('好友互动状态', { exact: true }).innerText(), /○ 回复已关闭/);
   assert.match(await page.getByLabel('自主观看状态').innerText(), /◉ 正在挑选视频/);
+  const statusLayout = await page.getByLabel('好友互动状态', { exact: true }).evaluate(element => {
+    const group = element.closest('[aria-live="polite"]');
+    return {
+      position: getComputedStyle(group).position,
+      noticeBelow: group.querySelector('p').getBoundingClientRect().top >= element.getBoundingClientRect().bottom,
+    };
+  });
+  assert.deepEqual(statusLayout, { position: 'static', noticeBelow: true });
   assert.equal(await page.getByLabel('待核对事项').count(), 0);
   assert.equal(await page.getByRole('button', { name: '查看遗留待处理消息', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '查看好友互动状态', exact: true }).count(), 0);
@@ -171,6 +208,44 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   for (let count = 0; count < 40 && state.persona.revision !== 'synthetic-v3'; count++) await page.waitForTimeout(50);
   assert.equal(state.persona.manualText, '合成人格明确保存的新正文。');
   await page.getByRole('tab', { name: '视频观看', exact: true }).click();
+  state.verificationAvailable = true;
+  const verify = page.getByRole('button', { name: '辅助验证', exact: true });
+  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button =>
+    button.textContent === '辅助验证' && button.title === '抖音需要安全验证' && !button.disabled));
+  await verify.click();
+  const challengeImage = page.getByRole('img', { name: '当前抖音验证画面' });
+  await challengeImage.waitFor();
+  await page.waitForFunction(() => document.querySelector('img[alt="当前抖音验证画面"]')?.naturalWidth === 64);
+  await challengeImage.click({ position: { x: 35, y: 30 } });
+  await challengeImage.waitFor({ state: 'detached' });
+  await page.getByText('当前抖音页面已就绪。', { exact: true }).waitFor();
+  assert.equal(await verify.getAttribute('title'), null);
+  assert.deepEqual(calls.filter(item => item.route === '/browser/verification/input').map(item => item.body.event.type), ['press', 'release']);
+  const privateVideo = page.getByRole('combobox', { name: '私信分享视频时段', exact: true });
+  assert.equal(await privateVideo.inputValue(), 'all-day');
+  const savedPrivateVideo = page.waitForResponse(response => response.url().endsWith('/video/private-schedule') && response.request().method() === 'POST');
+  await privateVideo.selectOption('follow-watch-hours');
+  assert.equal((await savedPrivateVideo).status(), 200);
+  assert.equal(state.video.privateVideoSchedule.mode, 'follow-watch-hours');
+  assert.equal(state.schedule.policy.enabled, false);
+  assert.equal(calls.filter(item => item.route === '/video/configure').length, 0);
+  const background = page.getByRole('checkbox', { name: '后台观看（无窗口）', exact: true });
+  const silent = page.getByRole('checkbox', { name: '静默观看', exact: true });
+  assert.equal(await background.isChecked(), false);
+  await background.click();
+  await page.waitForFunction(() => {
+    const option = document.querySelector('[aria-label="后台观看（无窗口）"]');
+    return option.checked && !option.disabled;
+  });
+  assert.equal(state.browserMode.recordedMode, 'background');
+  assert.equal(await silent.isChecked(), false);
+  await background.click();
+  await page.waitForFunction(() => {
+    const option = document.querySelector('[aria-label="后台观看（无窗口）"]');
+    return !option.checked && !option.disabled;
+  });
+  assert.deepEqual(calls.filter(item => item.route === '/browser/mode').map(item => item.body), [{ mode: 'background' }, { mode: 'visible' }]);
+  assert.equal(calls.some(item => item.route === '/mode/configure'), false);
   await page.getByText('高级选项', { exact: true }).click();
   const minutes = page.getByRole('spinbutton', { name: '每日观看上限（分钟）', exact: true });
   await minutes.fill(''); const invalidCount = calls.filter(item => item.route === '/video/configure').length;
@@ -195,6 +270,17 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent === '开始自主观看' && button.disabled));
   await pauseViewing.click(); await page.waitForFunction(() => !document.querySelector('[aria-label="允许自动观看"]').checked);
   assert.equal(state.watch.running, false); assert.deepEqual(state.video.daily, dailyBeforeViewing, '开始/暂停不重置每日时长或请求次数'); startOnConfigure = false;
+  const initialWatch = state.watch, initialAllowed = state.video.allowed, initialEnabled = state.schedule.policy.enabled;
+  state.video.allowed = true;
+  state.watch = { ...initialWatch, status: 'needs_user', lastError: '播放已暂停。', recovery: { action: 'resume', message: '播放已暂停。' } };
+  await page.getByRole('button', { name: '刷新插件状态', exact: true }).click();
+  const recovery = page.getByRole('group', { name: '恢复自主观看', exact: true });
+  await recovery.getByText('播放已暂停。', { exact: true }).waitFor();
+  await recovery.getByRole('button', { name: '继续观看', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('[aria-label="允许自动观看"]').checked);
+  assert.equal(state.schedule.policy.enabled, true);
+  state.watch = initialWatch; state.video.allowed = initialAllowed; state.schedule.policy.enabled = initialEnabled;
+  await page.getByRole('button', { name: '刷新插件状态', exact: true }).click();
   await page.getByRole('button', { name: '谷时段（DeepSeek）', exact: true }).click(); await page.waitForTimeout(250); assert.deepEqual(state.video.policy.windows, ['00:00-09:00', '12:00-14:00', '18:00-24:00']);
   await page.getByRole('combobox', { name: '观看方式', exact: true }).selectOption('topic'); await page.getByRole('textbox', { name: '想看的主题，每行一个', exact: true }).fill('合成天文'); await page.waitForTimeout(850);
   assert.deepEqual(state.watchOptions.policy.topics, ['合成天文']);
@@ -281,5 +367,26 @@ test('原生设置自动保存有效输入，保留并发草稿，好友共用�
   const prepare = page.getByRole('button', { name: '准备回复通道/重新连接并重试', exact: true }); await prepare.waitFor(); await prepare.click();
   await page.waitForTimeout(100); assert.equal(calls.some(item => item.route === '/chat/prepare'), true);
   state.watch.running = false;
+  const unchecked = stable('f', '合成尚未查询关注关系', { followed: null, relationshipStatus: 'unverified', manualAuthorizationEligible: true });
+  allowed.push(unchecked);
+  state.chat.policy.allowlist = [];
+  listOverride = [unchecked, { id: 'conv:' + '8'.repeat(64), name: '合成未核对身份', isGroup: false, followed: null, relationshipStatus: 'unverified', manualAuthorizationEligible: false }];
+  await page.reload();
+  await page.getByRole('tab', { name: '好友互动', exact: true }).click();
+  const savesBeforeConfirmation = calls.filter(item => item.route === '/chat/configure').length;
+  await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).click();
+  const uncheckedChoice = page.getByRole('checkbox', { name: '许可联系人 合成尚未查询关注关系', exact: true });
+  await uncheckedChoice.waitFor();
+  assert.equal(await uncheckedChoice.isDisabled(), true);
+  await page.getByRole('checkbox', { name: '授权已核对的现有会话', exact: true }).check();
+  assert.equal(await uncheckedChoice.isEnabled(), true);
+  assert.equal(await page.getByRole('checkbox', { name: '许可联系人 合成未核对身份', exact: true }).isDisabled(), true);
+  assert.equal(calls.filter(item => item.route === '/chat/configure').length, savesBeforeConfirmation);
+  const savedUnchecked = page.waitForResponse(response => response.url().endsWith('/chat/configure') && response.request().method() === 'POST');
+  await uncheckedChoice.check();
+  assert.equal((await savedUnchecked).ok(), true);
+  const submission = calls.filter(item => item.route === '/chat/configure').at(-1);
+  assert.deepEqual(submission.body.recipientIds, [unchecked.id]);
+  assert.equal(submission.body.allowConversationOnly, true);
   assert.equal(calls.filter(item => item.method === 'POST').every(item => item.token === state.token), true); assert.deepEqual(errors, []);
 });

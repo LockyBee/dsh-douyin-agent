@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { connect as tlsConnect } from 'node:tls';
-import { Readable } from 'node:stream';
+import { Readable, pipeline } from 'node:stream';
 import { parseEnv } from 'node:util';
 import { makeProviders } from './vendor/voice/lib/providers.js';
 import { resolveRuntimePaths } from '../runtime-paths.mjs';
@@ -49,12 +49,31 @@ function isLocalWhisperNoSpeech(value) {
     && (value.duration===undefined || Number.isFinite(value.duration) && value.duration>0)
     && (value.task===undefined || value.task==='transcribe');
 }
-export async function validatePublicMediaUrl(source) {
+function isScopedMediaUrl(source, domains) {
+  if (typeof source !== 'string' || !source || source.length > 8000) return false;
+  try {
+    const url = new URL(source);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash && domains.test(url.hostname);
+  } catch { return false; }
+}
+
+export const isDouyinLiveMediaUrl = source => isScopedMediaUrl(source, /\.(?:douyincdn|douyinvod|douyin)\.com$/i);
+export const isDouyinAttachmentUrl = source => isScopedMediaUrl(source, /\.(?:douyinpic|douyincdn|douyinvod|douyin)\.com$/i);
+export const isDouyinWorkMediaUrl = source => isScopedMediaUrl(source, /\.(?:douyincdn|douyinvod)\.com$/i);
+
+export async function validatePublicMediaUrl(source,{trustedMessageMedia=false,trustedDouyinImage=false,trustedDouyinLive=false,trustedDouyinAttachment=false,verifiedWorkId}={}) {
   let url;
   try { url = new URL(source); } catch { throw new Error('媒体 URL 格式错误。'); }
   if (url.protocol !== 'https:' || url.username || url.password || url.hash || privateHost(url.hostname)) throw new Error('只接受不带认证信息的公开 HTTPS 媒体 URL。');
-  if ([...url.searchParams.keys()].some(key => signed.test(key))) throw new Error('带签名、凭据或有效期的媒体地址未接受；请提供本地文件或公开地址。');
-  const addresses = await dns.lookup(url.hostname, { all: true });
+  if (trustedDouyinLive && !isDouyinLiveMediaUrl(url.href)) throw new Error('直播地址未指向可核对的抖音媒体域名。');
+  if (trustedDouyinAttachment && !isDouyinAttachmentUrl(url.href)) throw new Error('附件地址未指向可核对的抖音媒体域名。');
+  if (verifiedWorkId !== undefined &&
+      (typeof verifiedWorkId !== 'string' || !/^\d{10,30}$/.test(verifiedWorkId) || !isDouyinWorkMediaUrl(url.href))) {
+    throw new Error('分享作品的媒体地址未通过核对。');
+  }
+  const scoped = trustedDouyinLive || trustedDouyinAttachment;
+  if ([...url.searchParams.keys()].some(key => signed.test(key))&&!scoped&&!((trustedMessageMedia||trustedDouyinImage)&&url.hostname.endsWith('.douyinpic.com'))) throw new Error('带签名、凭据或有效期的媒体地址未接受；请提供本地文件或公开地址。');
+  const addresses = await dns.lookup(url.hostname, { all: true, ...(scoped ? { family: 4 } : {}) });
   if (!addresses.length || addresses.some(item => !publicAddress(item))) throw new Error('媒体地址未解析到可用公网 IPv4，未下载。');
   validatedAddresses.set(url,addresses);
   return url;
@@ -88,11 +107,15 @@ function proxyMediaAgent(url,proxy,signal){
   };
   return agent;
 }
-async function publicMediaResponse(url,signal){
+async function publicMediaResponse(url,signal,{verifiedWorkId,range}={}){
   signal?.throwIfAborted();
   const proxy=mediaProxy(url),agent=proxy?proxyMediaAgent(url,proxy,signal):undefined;
+  const headers = {
+    ...(verifiedWorkId ? { referer: 'https://www.douyin.com/' } : {}),
+    ...(range ? { range: `bytes=${range.start}-${range.end}`, 'accept-encoding': 'identity' } : {}),
+  };
   return new Promise((resolve,reject)=>{
-    const request=httpsRequest(url,{method:'GET',family:4,signal,agent,lookup:(hostname,options,callback)=>{
+    const request=httpsRequest(url,{method:'GET',family:4,signal,agent,headers,lookup:(hostname,options,callback)=>{
       // 核对的IP直接交给此次连接，避免检查后又由fetch重新解析到私网。
       dns.lookup(hostname,{all:true,family:4}).then(addresses=>{
         if(!addresses.length||addresses.some(item=>!publicAddress(item)))throw new Error('媒体连接的地址不是可用公网 IPv4。');
@@ -108,23 +131,103 @@ async function publicMediaResponse(url,signal){
     request.on('error',()=>{agent?.destroy();reject(new Error('公开媒体连接失败，未使用任何登录凭据。'));});request.setTimeout(30_000,()=>request.destroy(new Error('媒体连接空闲超时。')));request.end();
   });
 }
-async function run(executable, args, { input, signal, timeoutMs = 180_000, maxOutputBytes = 40 * 1024 * 1024 } = {}) {
+
+async function openPublicMedia(source, signal, trust) {
+  let url = await validatePublicMediaUrl(source, trust), response;
+  try{
+    for(let hop=0;hop<4;hop++){
+      response=await publicMediaResponse(url,signal,trust);
+      if(![301,302,303,307,308].includes(response.status))break;
+      const target=response.headers.get('location');await response.body?.cancel();response=null;
+      if(!target)throw Error('媒体重定向缺少地址。');url=await validatePublicMediaUrl(new URL(target,url).href,trust);
+    }
+    if(!response?.ok)throw Error(`公开媒体下载失败（HTTP ${response?.status||'未知'}）。`);
+    return { response, url: url.href };
+  } catch (error) {
+    await response?.body?.cancel().catch(()=>{});
+    throw error;
+  }
+}
+
+async function openWorkMedia(source, signal, trust) {
+  // 有的播放地址能建立代理隧道，却迟迟没有媒体响应。在取得响应头后取消这段计时。
+  const opening = new AbortController();
+  const watchdog = setTimeout(() => opening.abort(), 6500);
+  try {
+    return await openPublicMedia(source, AbortSignal.any([signal, opening.signal]), trust);
+  } catch (error) {
+    signal.throwIfAborted();
+    if (opening.signal.aborted) throw Object.assign(new Error('播放地址响应超时。'), { code: 'MEDIA_OPEN_TIMEOUT' });
+    throw error;
+  } finally { clearTimeout(watchdog); }
+}
+
+export function openDouyinLiveResource(source, { signal, range } = {}) {
+  if (range !== undefined && (!Number.isSafeInteger(range?.start) || !Number.isSafeInteger(range?.end)
+    || range.start < 0 || range.end < range.start || range.end - range.start >= 32 * 1024 * 1024)) {
+    throw Error('直播资源的下载范围无效。');
+  }
+  return openPublicMedia(source, signal, { trustedDouyinLive: true, range });
+}
+
+export async function openDouyinLiveStream(source, options) {
+  const { response } = await openDouyinLiveResource(source, options);
+  const signal = options?.signal;
+  if (!response.body) throw Error('没有收到直播媒体数据。');
+  return Readable.from((async function* () {
+    let bytes = 0;
+    for await (const chunk of response.body) {
+      signal?.throwIfAborted();
+      bytes += chunk.length;
+      if (bytes > 32 * 1024 * 1024) throw Error('本段直播媒体超出采样体积。');
+      yield chunk;
+    }
+  })(), { objectMode: false });
+}
+
+// 后台视频使用同一公网校验和代理，按块写入本机缓存。
+export async function downloadPublicMedia(source,destination,{signal,maxBytes=128*1024*1024,trustedMessageMedia=false,trustedDouyinImage=false,trustedDouyinAttachment=false,verifiedWorkId}={}){
+  if(!path.isAbsolute(destination)||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>512*1024*1024)throw Error('媒体下载目标或体积限制无效。');
+  const combined=AbortSignal.any([AbortSignal.timeout(180000),...(signal?[signal]:[])]);
+  let response,handle,length=0;
+  try{
+    const trust = { trustedMessageMedia, trustedDouyinImage, trustedDouyinAttachment, verifiedWorkId };
+    const open = verifiedWorkId === undefined ? openPublicMedia : openWorkMedia;
+    ({ response } = await open(source, combined, trust));
+    if(Number(response.headers.get('content-length'))>maxBytes)throw Error('视频体积超出本机缓存范围。');
+    handle=await fs.open(destination,'wx',0o600);
+    for await(const chunk of response.body){combined.throwIfAborted();length+=chunk.length;if(length>maxBytes)throw Error('视频体积超出本机缓存范围。');await handle.writeFile(chunk);}
+    if(!length)throw Error('视频下载为空。');await handle.close();handle=null;return{bytes:length};
+  }catch(error){await handle?.close();if(handle)await fs.unlink(destination).catch(()=>{});throw error;}
+  finally{await response?.body?.cancel().catch(()=>{});}
+}
+export { run as runMediaProcess };
+async function run(executable, args, { input, inputStream, onOutput, signal, timeoutMs = 180_000, maxOutputBytes = 40 * 1024 * 1024 } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const childEnvironment={...process.env,PYTHONUTF8:'1',PYTHONIOENCODING:'utf-8',PYTHONDONTWRITEBYTECODE:'1'};delete childEnvironment.XIAOMI_API_KEY;delete childEnvironment.MINIMAX_API_KEY;
     const child = spawn(executable, args, { windowsHide: true, shell: false, env: childEnvironment, stdio: ['pipe','pipe','pipe'] });
-    const chunks = []; let length = 0, finished = false;
+    const chunks = []; let length = 0, finished = false, streamError;
     const finish = (error, value) => { if (finished) return; finished = true; clearTimeout(timer); signal?.removeEventListener('abort', cancel); error ? reject(error) : resolve(value); };
-    const cancel = () => { child.kill(); finish(signal?.reason instanceof Error ? signal.reason : new Error('媒体任务已停止。')); };
-    const timer = setTimeout(() => { child.kill(); finish(new Error('媒体处理超时。')); }, timeoutMs);
+    const stop = error => { streamError ??= error; child.kill(); if (!inputStream) finish(error); };
+    const cancel = () => stop(signal?.reason instanceof Error ? signal.reason : new Error('媒体任务已停止。'));
+    const timer = setTimeout(() => stop(new Error('媒体处理超时。')), timeoutMs);
     signal?.addEventListener('abort', cancel, { once: true });
     child.on('error', () => finish(new Error('媒体运行时不可用，请核对 Python 或 ffmpeg 路径。')));
-    child.stdout.on('data', chunk => { length += chunk.length; if (length > maxOutputBytes) { child.kill(); finish(new Error('媒体处理输出超过上限。')); } else chunks.push(chunk); });
+    child.stdout.on('data', chunk => {
+      length += chunk.length;
+      if (length > maxOutputBytes) { stop(new Error('媒体处理输出超过上限。')); return; }
+      try { onOutput?.(chunk.toString('utf8')); chunks.push(chunk); }
+      catch (error) { stop(error); }
+    });
     // 子进程详细错误可能含文件路径或临时地址，只返回可操作的固定说明。
     child.stderr.resume();
-    child.on('close', code => finish(code === 0 ? null : new Error('媒体处理失败；依赖、模型下载或媒体格式未通过。'), Buffer.concat(chunks).toString('utf8')));
+    child.on('close', code => finish(streamError ?? (code === 0 ? null : new Error('媒体处理失败；依赖、模型下载或媒体格式未通过。')), Buffer.concat(chunks).toString('utf8')));
     child.stdin.on('error', () => {});
-    child.stdin.end(input === undefined ? undefined : JSON.stringify(input));
+    if (inputStream) pipeline(inputStream, child.stdin, error => {
+      if (error && !['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE'].includes(error.code) && !signal?.aborted) stop(new Error('直播媒体流已中断。'));
+    });
+    else child.stdin.end(input === undefined ? undefined : JSON.stringify(input));
     if (signal?.aborted) cancel();
   });
 }

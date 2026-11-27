@@ -58,5 +58,5 @@ test('软件状态栏直接渲染后端presence；断连不继续显示旧在线
   const html = renderToStaticMarkup(React.createElement(Presence, { connected: true, presence: { online: true, status: 'watching', label: '后端核对：正在看视频', reason: '合成心跳新鲜且所有许可已就绪' }, onOpen() {} }));
   assert.match(html, /后端核对：正在看视频/); assert.match(html, /合成心跳新鲜且所有许可已就绪/);
   const disconnected = renderToStaticMarkup(React.createElement(Presence, { connected: false, presence: { online: true, label: '不得显示的旧在线' }, onOpen() {} })); assert.doesNotMatch(disconnected, /不得显示的旧在线/); assert.match(disconnected, /状态待核实/);
-  const attention = renderToStaticMarkup(React.createElement(Presence, { connected: true, presence: { online: false, status: 'attention', label: '回复未就绪', reason: '合成联系人等待人工核对' }, onOpen() {} })); assert.match(attention, /role="alert"/); assert.match(attention, /合成联系人等待人工核对/);
+  const attention = renderToStaticMarkup(React.createElement(Presence, { connected: true, presence: { online: false, status: 'attention', label: '回复未就绪', reason: '合成联系人等待人工核对' }, onOpen() {} })); assert.match(attention, /role="status"/); assert.match(attention, /data-state="attention"/); assert.match(attention, /合成联系人等待人工核对/);
 });

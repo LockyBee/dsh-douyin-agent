@@ -45,3 +45,163 @@ test('自动观看失败理由跨软件插件与重构实例可回读，重新�
 test('启动后watch异步失败会持久显示原因，保持失败回执且不在每tick重复开新运行',async t=>{
  const f=fixture(t);let watch={running:false,status:'stopped'};const schedule=new ScheduledWatch({...f.options,getWatchState:async()=>watch});schedule.configure({enabled:true},{explicit:true});await schedule.tick();assert.equal(f.starts(),1);watch={running:false,status:'failed',lastError:'合成同一入口锁超时'};await schedule.tick();await schedule.tick();assert.equal(f.starts(),1);const other=new ScheduledWatch({...f.options,source:'dsh'});assert.equal(other.state().last.status,'failed');assert.equal(other.state().lastError,'合成同一入口锁超时');
 });
+
+test('插件核实观看页验证通过后沿用共享排程恢复一次，保留旧回执和今日额度', async t => {
+  const f = fixture(t, '2026-10-23T01:30:00Z');
+  f.video.savePolicy({ windows: ['09:00-10:00'], dailyMinutes: 10, dailyRequests: 30 }, { explicit: true });
+  let watch = { running: false, status: 'stopped' }, ready = false, probes = 0;
+  const options = { ...f.options, getWatchState: async () => watch };
+  const desktop = new ScheduledWatch(options);
+  const plugin = new ScheduledWatch({
+    ...options, source: 'dsh',
+    async checkWatchVerification() { probes++; return ready; },
+  });
+  desktop.configure({ enabled: true }, { explicit: true });
+  await desktop.tick();
+  const first = desktop.state().last;
+  f.video.reserveRequest({ source: 'api' });
+  const used = f.video.state().daily.requests;
+  const reason = '观看页需要抖音安全验证。';
+  watch = { running: false, status: 'needs_user', sessionId: first.sessionId, lastError: reason, recovery: { action: 'verify' } };
+  await desktop.tick();
+  await plugin.tick();
+  await plugin.tick();
+  assert.equal(probes, 1);
+  assert.equal(f.starts(), 1);
+  const paused = plugin.state().last;
+  assert.equal(paused.status, 'failed');
+  assert.equal(paused.error, reason);
+
+  ready = true;
+  f.setTime('2026-10-23T01:30:15Z');
+  await Promise.all([plugin.tick(), desktop.tick()]);
+  assert.equal(probes, 2);
+  assert.equal(f.starts(), 2);
+  assert.equal(plugin.state().last.status, 'started');
+  assert.equal(plugin.state().lastError, '');
+  assert.equal(f.video.state().daily.requests, used);
+  assert.deepEqual(plugin.policy(), { enabled: true });
+  const previous = plugin.ledger().runs.find(run => run.id === first.id);
+  assert.equal(previous.status, 'acknowledged');
+  assert.equal(previous.error, reason);
+  assert.equal(previous.recovery.code, 'WATCH_VERIFICATION_CLEARED');
+});
+
+test('验证检查期间关闭观看、离开时段或用完额度都保留原暂停', async t => {
+  for (const restriction of ['关闭观看', '离开时段', '用完额度']) {
+    await t.test(restriction, async t => {
+      const f = fixture(t, '2026-10-23T01:30:00Z');
+      f.video.savePolicy({ windows: ['09:00-10:00'], dailyRequests: 1 }, { explicit: true });
+      let watch = { running: false, status: 'stopped' }, probes = 0;
+      const schedule = new ScheduledWatch({
+        ...f.options, source: 'dsh', getWatchState: async () => watch,
+        async checkWatchVerification() {
+          probes++;
+          if (restriction === '关闭观看') schedule.configure({ enabled: false }, { explicit: true });
+          if (restriction === '离开时段') f.setTime('2026-10-23T02:00:00Z');
+          if (restriction === '用完额度') f.video.reserveRequest({ source: 'api' });
+          return true;
+        },
+      });
+      schedule.configure({ enabled: true }, { explicit: true });
+      await schedule.tick();
+      const reason = '观看页需要抖音安全验证。';
+      watch = { running: false, status: 'needs_user', sessionId: schedule.state().last.sessionId, lastError: reason, recovery: { action: 'verify' } };
+      await schedule.tick();
+      const paused = schedule.state().last;
+      await schedule.tick();
+      assert.equal(probes, 1);
+      assert.equal(f.starts(), 1);
+      assert.deepEqual(schedule.state().last, paused);
+    });
+  }
+});
+
+test('排程锁打开遇到短暂 Windows 拒绝会在本次检查重试，只启动一次', async t => {
+  const f = fixture(t), schedule = new ScheduledWatch(f.options);
+  schedule.configure({ enabled: true }, { explicit: true });
+  const open = fs.openSync;
+  let attempts = 0;
+  fs.openSync = (file, flags, ...args) => {
+    if (file === schedule.guardFile && flags === 'wx' && ++attempts <= 2) {
+      throw Object.assign(new Error('合成文件占用'), { code: 'EPERM', path: file });
+    }
+    return open(file, flags, ...args);
+  };
+  try { await schedule.tick(); } finally { fs.openSync = open; }
+  assert.ok(attempts >= 3);
+  assert.equal(f.starts(), 1);
+  assert.equal(schedule.state().last.status, 'started');
+  assert.equal(schedule.state().lastError, '');
+  assert.equal(fs.existsSync(schedule.guardFile), false);
+});
+
+test('启动回执写入前排程锁暂时不可用，恢复后补记同一轮且另一入口不重启', async t => {
+  const f = fixture(t);
+  let blocked = false;
+  const schedule = new ScheduledWatch({ ...f.options, startRound: async () => {
+    const result = await f.options.startRound();
+    blocked = true;
+    return result;
+  } });
+  const other = new ScheduledWatch({ ...f.options, source: 'dsh' });
+  schedule.configure({ enabled: true }, { explicit: true });
+  const open = fs.openSync;
+  fs.openSync = (file, flags, ...args) => {
+    if (blocked && file === schedule.guardFile && flags === 'wx') {
+      throw Object.assign(new Error('合成 Windows 路径拒绝'), { code: 'EPERM', path: file });
+    }
+    return open(file, flags, ...args);
+  };
+  try {
+    await schedule.tick();
+    assert.equal(f.starts(), 1);
+    assert.equal(schedule.state().last.status, 'starting');
+    assert.match(schedule.state().lastError, /自动再试/);
+    assert.doesNotMatch(schedule.state().lastError, /EPERM|watch-schedule\.guard/);
+    assert.equal(other.state().lastError, '');
+  } finally { fs.openSync = open; }
+  await other.tick();
+  assert.equal(f.starts(), 1);
+  await schedule.tick();
+  assert.equal(f.starts(), 1);
+  assert.equal(other.state().last.status, 'started');
+  assert.equal(other.state().last.sessionId, 'synthetic-session');
+  assert.equal(schedule.state().lastError, '');
+});
+
+test('排程锁释放短暂受阻时保留原所有者，下一次检查释放后补记回执', async t => {
+  const f = fixture(t), schedule = new ScheduledWatch(f.options);
+  schedule.configure({ enabled: true }, { explicit: true });
+  const unlink = fs.unlinkSync;
+  fs.unlinkSync = (file, ...args) => {
+    if (file === schedule.guardFile) throw Object.assign(new Error('合成锁暂不可删除'), { code: 'EPERM', path: file });
+    return unlink(file, ...args);
+  };
+  try {
+    await schedule.tick();
+    assert.equal(f.starts(), 1);
+    assert.equal(schedule.state().last.status, 'starting');
+    const other = new ScheduledWatch({ ...f.options, source: 'dsh' });
+    assert.throws(() => other.configure({ enabled: false }, { explicit: true }), { code: 'SCHEDULE_BUSY' });
+  } finally { fs.unlinkSync = unlink; }
+  await schedule.tick();
+  assert.equal(f.starts(), 1);
+  assert.equal(schedule.state().last.status, 'started');
+  assert.equal(fs.existsSync(schedule.guardFile), false);
+});
+
+test('允许时段外也会清除已恢复的旧锁错误，旧观看失败回执原样保留', async t => {
+  const f = fixture(t), schedule = new ScheduledWatch(f.options);
+  f.video.savePolicy({ windows: ['09:00-10:00'] }, { explicit: true });
+  schedule.configure({ enabled: true }, { explicit: true });
+  const runs = [{ key: 'old-slot', id: 'earlier-round', status: 'failed', error: '合成旧观看错误' }];
+  fs.writeFileSync(schedule.ledgerFile, JSON.stringify({
+    version: 1, runs, lastError: `EPERM: operation not permitted, open '${schedule.guardFile}'`,
+  }));
+  assert.match(schedule.state().lastError, /自动再试/);
+  await schedule.tick();
+  assert.equal(f.starts(), 0);
+  assert.equal(schedule.state().lastError, '');
+  assert.deepEqual(schedule.ledger().runs, runs);
+});

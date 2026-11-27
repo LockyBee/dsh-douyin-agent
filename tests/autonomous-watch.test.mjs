@@ -4,10 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AutonomousWatch } from '../autonomous-watch.mjs';
-import { ApiAgent, parseWatchDecision, watchDecisionMessages } from '../api-agent.mjs';
+import { ApiAgent, parseWatchDecision, playbackWatchDecision, watchDecisionMessages } from '../api-agent.mjs';
 import { PersonaMemory } from '../persona-memory.mjs';
 import { VideoLimits } from '../video-limits.mjs';
 import { MemoryStore } from '../memory.mjs';
+import { VideoReactions } from '../video-reactions.mjs';
+import { AutonomousComments } from '../autonomous-comments.mjs';
+import { PUBLIC_COMMENT_PROMPT } from '../public-comment-agent.mjs';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jGDkAAAAASUVORK5CYII=';
 const choice = (action = 'stop', extra = {}) => ({ action, reason: '根据当前合成画面选择。', reflection: '有限采样显示猫咪，这是代理兴趣。', topics: [{ topic: '猫咪', signal: 'like' }], ...extra });
@@ -50,12 +53,29 @@ test('冷启动从空白加载页有界等待到就绪，再观察和请求模�
   const before = f.now(); f.watch.start({ startSession: true, maxRequests: 1 }, { explicit: true }); await f.watch.completion;
   assert.equal(f.watch.state().status, 'stopped'); assert.equal(observations, 1); assert.equal(f.watch.state().counts.requests, 1); assert.ok(f.now() - before >= 2000);
 });
+
+test('已在推荐页时先等待作品加载，不为刚恢复的页面再次导航', async t => {
+  const f = fixture(t), original = f.controller.execute;
+  let checks = 0;
+  f.controller.execute = async (...args) => {
+    if (args[0] === 'douyin_status' && ++checks < 3) return { url: 'https://www.douyin.com/?recommend=1', video: null };
+    if (args[0] === 'douyin_open') assert.fail('已有推荐页不应再打开');
+    return original(...args);
+  };
+  f.watch.start({ startSession: true, maxRequests: 1 }, { explicit: true });
+  await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped');
+  assert.equal(f.watch.state().counts.requests, 1);
+  assert.ok(checks >= 3);
+});
+
 test('冷启动持续加载最多30秒且不调用模型，验证码与外站立即停止', async t => {
   for (const mode of ['loading', 'verification', 'foreign']) {
     const f = fixture(t), before = f.now(); let calls = 0;
     f.controller.execute = async () => { calls++; return { url: mode === 'foreign' ? 'https://example.invalid/' : 'https://www.douyin.com/jingxuan', video: null, verificationRequired: mode === 'verification' }; };
     f.watch.start({ startSession: true, maxRequests: 1 }, { explicit: true }); await f.watch.completion;
     assert.equal(f.watch.state().status, 'needs_user'); assert.equal(f.watch.state().counts.requests, 0);
+    if (mode === 'verification') assert.equal(f.watch.state().lastError, '观看页需要抖音安全验证。');
     if (mode === 'loading') { assert.equal(f.now() - before, 30_000); assert.ok(calls <= 63); } else assert.ok(calls <= 2);
   }
 });
@@ -69,6 +89,50 @@ test('跨上海午夜结束的一轮分别保留开始日与结束日的事实�
   const dates = f.watch.reportService.state().reports.map(item => item.date);
   assert.ok(dates.includes('2026-10-15')); assert.ok(dates.includes('2026-10-16'));
   assert.equal(f.watch.reportService.read({ date: '2026-10-15' }).observedCount, 1);
+});
+
+test('人格记录超过原文件上限后仍能观察、决策、换片和生成日报', async t => {
+  const f = fixture(t), store = f.personaMemory;
+  store.initialize({ importLegacy: false });
+  const existing = f.state();
+  existing.video.id = '100051';
+  existing.url = existing.video.url = 'https://www.douyin.com/video/100051';
+  const first = store.recordObservation(existing, { source: 'api' });
+  const state = JSON.parse(fs.readFileSync(store.stateFile, 'utf8'));
+  const maximum = 8 * 1024 * 1024;
+  state.syntheticPadding = '';
+  state.syntheticPadding = 'x'.repeat(maximum - 32 - Buffer.byteLength(JSON.stringify(state) + '\n'));
+  const original = JSON.stringify(state) + '\n';
+  fs.writeFileSync(store.stateFile, original);
+  const queue = [choice('stay', { seconds: 2 }), choice('skip'), choice('stop')];
+  f.provider(async () => ({ text: JSON.stringify(queue.shift()), usage: { total_tokens: 5 } }));
+  f.watch.start({ startSession: true, maxRequests: 3 }, { explicit: true });
+  await f.watch.completion;
+
+  const run = f.watch.state();
+  assert.equal(run.status, 'stopped');
+  assert.equal(run.lastError, '');
+  assert.equal(run.counts.requests, 3);
+  assert.equal(f.calls.filter(call => call.name === 'douyin_next').length, 1);
+  assert.equal(fs.readFileSync(store.stateFile, 'utf8'), original);
+  const reopened = new PersonaMemory({ memoryDir: path.dirname(store.personaFolder), clock: f.now });
+  const joined = reopened.readEvidence().state;
+  assert.ok(Buffer.byteLength(JSON.stringify(joined)) > maximum);
+  assert.ok(joined.observations.some(row => row.id === first.evidenceId));
+  assert.ok(joined.behavior.viewings.length > 0);
+  assert.ok(joined.behavior.actions.some(row => row.action === 'stay'));
+  assert.ok(joined.interests.some(item => item.topic === '猫咪' && item.evidence.length));
+  assert.ok(f.watch.reportService.read().observedCount >= 3);
+
+  state.observations[0].sources.push('dsh');
+  state.generation++;
+  const olderWrite = JSON.stringify(state) + '\n';
+  assert.ok(Buffer.byteLength(olderWrite) <= maximum);
+  fs.writeFileSync(store.stateFile, olderWrite);
+  const afterOldWrite = reopened.readEvidence().state;
+  assert.deepEqual(afterOldWrite.observations[0].sources, ['api', 'dsh']);
+  assert.deepEqual(afterOldWrite.behavior, joined.behavior);
+  assert.equal(afterOldWrite.generation, joined.generation + 1);
 });
 
 test('默认停止且允许关闭不能启动，允许后可自动建立内部运行', async t => {
@@ -471,4 +535,114 @@ test('倒退或非有限的学习间隔不伪造观看时长且不吞掉其他�
   const f=fixture(t);let writes=0;const record=f.personaMemory.recordViewing.bind(f.personaMemory);f.personaMemory.recordViewing=(...args)=>{writes++;return record(...args);};
   for(const start of [f.now()+1,Number.NaN,Number.NEGATIVE_INFINITY])assert.equal(f.watch.viewing('synthetic-evidence',f.state(),f.state(),start,'synthetic-sample'),null);
   assert.equal(writes,0);assert.throws(()=>f.watch.viewing('synthetic-evidence',f.state(),f.state(),f.now(),'synthetic-sample'));
+});
+
+
+test('点赞收藏决策只接受宿主布尔许可，不接受图文、直播或自带作品地址', () => {
+  for (const action of ['like', 'favorite']) {
+    assert.equal(parseWatchDecision(choice(action), { reactionContext: { [action]: true } }).action, action);
+    for (const reactionContext of [undefined, {}, { [action]: false }, { [action]: 1 }]) assert.throws(() => parseWatchDecision(choice(action), { reactionContext }), /未获许可/);
+    for (const mediaKind of ['image-post', 'live-room']) {
+      const controls = { mediaKind, reactionContext: { [action]: true } };
+      assert.throws(() => parseWatchDecision(choice(action), controls), { code: 'WATCH_REACTION_UNAVAILABLE' });
+      const playback = playbackWatchDecision(choice(action), controls);
+      assert.equal(playback.decision.action, 'skip');
+      assert.deepEqual(playback.decision.topics, []);
+      assert.equal(playback.skippedReaction, action);
+    }
+    assert.throws(() => parseWatchDecision(choice(action, { videoId: '12345' }), { reactionContext: { [action]: true } }));
+  }
+});
+
+test('连续提出未获许可的点赞或收藏都换下一条，保留实际观看而不误写快划偏好', async t => {
+  const f = fixture(t), decisions = [choice('like'), choice('favorite'), choice('stop')];
+  const service = new VideoReactions({ ...f.options, react: async () => assert.fail('互动开关关闭时不能点击') });
+  f.watch.reactionService = service;
+  t.after(() => service.close());
+  f.provider(async () => ({ text: JSON.stringify(decisions.shift()), usage: { total_tokens: 1 } }));
+  f.watch.start({ startSession: true, maxRequests: 3 }, { explicit: true });
+  await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped');
+  assert.equal(f.watch.state().lastError, '');
+  assert.equal(f.watch.state().counts.requests, 3);
+  assert.equal(f.calls.filter(call => call.name === 'douyin_next').length, 2);
+  assert.deepEqual(f.events.filter(event => event.type === 'watch.reaction-skipped').map(event => event.action), ['like', 'favorite']);
+  assert.deepEqual(service.state().recent, []);
+  const state = JSON.parse(fs.readFileSync(f.personaMemory.stateFile, 'utf8'));
+  assert.equal((state.behavior?.actions || []).some(action => action.action === 'skip'), false);
+});
+
+test('模型生成中或动作执行前关闭点赞，观看继续且没有点击或回执', async t => {
+  for (const revokeAt of ['model', 'action']) {
+    const f = fixture(t);
+    const service = new VideoReactions({ ...f.options, react: async () => assert.fail('撤权后不能点击') });
+    service.configure({ like: true, favorite: false }, { explicit: true });
+    f.watch.reactionService = service;
+    t.after(() => service.close());
+    let calls = 0, reachedAction = false;
+    f.provider(async input => {
+      calls++;
+      if (calls === 1) {
+        assert.match(input.messages[1].content[0].text, /"like":true/);
+        if (revokeAt === 'model') service.configure({ like: false, favorite: false }, { explicit: true });
+      }
+      return { text: JSON.stringify(choice(calls === 1 ? 'like' : 'stop')) };
+    });
+    if (revokeAt === 'action') {
+      const react = service.react.bind(service);
+      service.react = (...args) => {
+        reachedAction = true;
+        service.configure({ like: false, favorite: false }, { explicit: true });
+        return react(...args);
+      };
+    }
+    f.watch.start({ startSession: true, maxRequests: 2 }, { explicit: true });
+    await f.watch.completion;
+    assert.equal(reachedAction, revokeAt === 'action');
+    assert.equal(f.watch.state().lastError, '');
+    assert.equal(calls, 2);
+    assert.equal(f.events.filter(event => event.type === 'watch.reaction-skipped').length, 1);
+    assert.deepEqual(service.state().recent, []);
+  }
+});
+
+test('自主观看从模型许可到两类互动回执完整衔接，同一作品每类只操作一次', async t => {
+  const f = fixture(t), actions = [], queue = [choice('like'), choice('favorite'), choice('stop')];
+  const service = new VideoReactions({ ...f.options, react: async (input, controls) => {
+    controls.authorize({ phase: 'before-click', action: input.action, videoId: input.expectedVideoId });
+    controls.authorize.beginDispatch()(); actions.push(input.action);
+    return { action: input.action, videoId: input.expectedVideoId, active: true, verified: true };
+  } });
+  t.after(() => service.close()); service.configure({ like: true, favorite: true }, { explicit: true }); f.watch.reactionService = service;
+  f.provider(async request => { assert.match(request.messages[1].content[0].text, /宿主核对的点赞收藏许可/); return { text: JSON.stringify(queue.shift()), usage: { total_tokens: 1 } }; });
+  f.watch.start({ startSession: true, maxRequests: 3 }, { explicit: true }); await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped'); assert.deepEqual(actions, ['like', 'favorite']);
+  assert.equal(f.events.filter(event => event.type === 'watch.reaction' && event.delivery.confirmed).length, 2);
+  assert.deepEqual(service.context(f.state().video.id), { like: false, favorite: false });
+});
+
+test('一次点赞回读不明只暂停互动，观看仍可继续到模型主动停止', async t => {
+  const f = fixture(t), queue = [choice('like'), choice('stay', { seconds: 3 }), choice('stop')]; let clicks = 0;
+  const service = new VideoReactions({ ...f.options, react: async (input, controls) => {
+    controls.authorize({ phase: 'before-click', action: input.action, videoId: input.expectedVideoId }); clicks++;
+    return { verified: false, deliveryUncertain: true };
+  } });
+  t.after(() => service.close()); service.configure({ like: true, favorite: true }, { explicit: true }); f.watch.reactionService = service;
+  f.provider(async () => ({ text: JSON.stringify(queue.shift()), usage: { total_tokens: 1 } }));
+  f.watch.start({ startSession: true, maxRequests: 3 }, { explicit: true }); await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped'); assert.equal(clicks, 1); assert.equal(service.state().paused, true);
+  assert.ok(f.events.some(event => event.type === 'watch.reaction-paused'));
+});
+
+test('不同作品下模型重复评论被跳过，不消耗发布次数也不中断观看', async t => {
+  const f = fixture(t), queue = [choice('comment'), choice('skip'), choice('comment'), choice('stop')]; let posts = 0;
+  const service = new AutonomousComments({ ...f.options, post: async (input, controls) => {
+    controls.authorize({ phase: 'before-click', videoId: input.expectedVideoId }); posts++;
+    return { confirmed: true, videoId: input.expectedVideoId, commentId: '90001' };
+  } });
+  t.after(() => service.close()); service.configure({ enabled: true, dailyLimit: 3, perSessionLimit: 3 }, { explicit: true }); f.watch.commentService = service;
+  f.provider(async request => ({ text: JSON.stringify(request.system === PUBLIC_COMMENT_PROMPT ? { text: '小猫把纸袋当成了躲猫猫的基地。' } : queue.shift()), usage: { total_tokens: 1 } }));
+  f.watch.start({ startSession: true, maxRequests: 6 }, { explicit: true }); await f.watch.completion;
+  assert.equal(f.watch.state().status, 'stopped'); assert.equal(posts, 1); assert.equal(service.state().daily.attempts, 1);
+  assert.ok(f.events.some(event => event.type === 'watch.comment' && event.delivery.code === 'COMMENT_REPEATED'));
 });

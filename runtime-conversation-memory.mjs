@@ -4,6 +4,10 @@ import { isChatShareableMemory } from './memory.mjs';
 import { appendConversationOriginals, readConversationOriginals, recallLocalConversationHistory } from './conversation-history-store.mjs';
 import { hasStableConversationIdentity } from './contact-authorization.mjs';
 import { ownerPrivateNotes, recentOwnerQQContext } from './owner-qq-context.mjs';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
 const CONTACTS=new WeakMap();
 export function bindMemoryContact(contact){if(!hasStableConversationIdentity(contact))return null;const token=Object.freeze({});CONTACTS.set(token,structuredClone(contact));return token;}
 export function memoryContactFromToken(token){const contact=token&&CONTACTS.get(token);if(!contact)throw new TypeError('会话记忆缺少可信宿主绑定。');return structuredClone(contact);}
@@ -15,6 +19,8 @@ export function createRuntimeConversationMemory({store,contact,messages=[],host=
   const scope={platform:'douyin',conversationId:contact.id,isGroup:contact.isGroup};
   const saved=appendConversationOriginals(store.db,scope,messages.slice(-50));
   const qq=store.syncQQ();
+  const continuityFile=typeof store.dbPath==='string'&&path.isAbsolute(store.dbPath)
+    ? path.resolve(path.dirname(store.dbPath),'..','..','dsh配置','screen-companion','dafeiyu_bridge','owner-continuity.mjs') : null;
   const getContext=()=>{authorize();return {...scope,sharedEnabled:store.qqConnection?.available===true&&store.qqConnection?.shared===true};};
   function loadRecords({query='',refs=[]}={}){
     const recalled=store.recallForChat({query,limit:100});
@@ -34,7 +40,17 @@ export function createRuntimeConversationMemory({store,contact,messages=[],host=
     window.sourceWindowLimited=local.windowLimited||all.length>5000;return window;
   }
   const session=createMemorySession({host,getContext,loadRecords,retrievalMode:'lexical',historyReader:({context,...options})=>recallLocalConversationHistory(store.db,context,options),
-    externalHistory:({query})=>{authorize();return qq.available===true&&qq.shared===true
-      ? [...recentOwnerQQContext({store,contact,isAuthorized}).slice(-4),...ownerPrivateNotes({store,contact,isAuthorized,query})] : [];}});
+    externalHistory:({query})=>{
+      authorize();
+      if(qq.available!==true||qq.shared!==true)return [];
+      const notes=ownerPrivateNotes({store,contact,isAuthorized,query});
+      if(host!=='desktop'||!continuityFile||!existsSync(continuityFile))return [...recentOwnerQQContext({store,contact,isAuthorized}).slice(-4),...notes];
+      try {
+        const { readOwnerContinuity }=require(continuityFile);
+        const { entries }=readOwnerContinuity({ target:{...contact,platform:'douyin'},query,expectedMemory:store.dbPath,expectedQQ:store.qqMemoryPath });
+        authorize();
+        return [...entries.slice(-(8-notes.length)),...notes];
+      } catch { return notes; }
+    }});
   return {session,retainedOriginals:saved,connections:{qq:qq.available===true&&qq.shared===true}};
 }

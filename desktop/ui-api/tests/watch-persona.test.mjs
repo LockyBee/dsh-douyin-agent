@@ -14,7 +14,23 @@ test('按时段自动观看与共用人格在主界面可用，运行状态未�
   const video = { allowed: false, window: { expiresAt: Date.now() + 600_000 }, remainingSeconds: 0, session: { status: 'ended' }, policy: { windows: ['00:00-24:00'], sessionMinutes: 10 } };
   const schedule = { policy: { enabled: false } };
   const watch = { protocol: 'autonomous-watch-v1', running: false, owned: false, worker: null, status: 'stopped', sessionId: 'synthetic-session-1', counts: { requests: 1, maxRequests: 30, dailyRequests: 2, dailyLimit: 200 }, remainingSeconds: 0, lastDecision: { action: 'search', reason: '合成选择理由：对轻松动物题材感兴趣。', query: '合成猫咪', topics: ['动物'] } };
-  let persona = { personaFolder: 'C:\\合成共享记忆\\persona', roleCardFile: 'C:\\合成共享记忆\\persona\\role-card.md', revision: 'r1', manualText: '合成手编人格原文', personaText: '合成当前生效人格，包含持续观察。', interests: [{ topic: '合成动物兴趣', key: 'synthetic-topic', signal: 'neutral', counts: { like: 0, dislike: 0, neutral: 1 }, basis: '合成依据：仅有画面，待实际观看行为核实。', updatedAt: 1792058400000, evidence: [{ evidenceId: 'synthetic-evidence', videoId: '1234567890123', reflection: '合成反思：识别到动物互动主题，尚不代表喜欢。', watchedSeconds: 2, watchRatio: 0.2, actions: { stay: 0, skip: 0, share: 0 }, basis: '合成依据：观看不足以判断喜好。', source: 'api', at: 1792058400000 }] }], recentObservations: [{ id: 'synthetic-observation', videoId: '1234567890123', title: '合成观察：小猫正在玩球。', author: '合成公开作者', kind: 'visual', playback: { time: 3, duration: 10, paused: true }, watchedSeconds: 2, watchRatio: 0.2, actions: { stay: 0, skip: 0, share: 0 }, basis: '合成依据：观看不足以判断喜好。', frameCount: 1, source: 'api', observedAt: 1792058400000 }] };
+  const sample = {
+    watchedSeconds: 2, watchRatio: 0.2, actions: { stay: 1, skip: 0, share: 0 },
+    basis: '已核对观看 2 秒（20%），现有行为不足以判断喜好，待观察。', basisCode: 'insufficient-behavior'
+  };
+  let persona = {
+    personaFolder: 'C:\\合成共享记忆\\persona', roleCardFile: 'C:\\合成共享记忆\\persona\\role-card.md',
+    revision: 'r1', manualText: '合成手编人格原文', personaText: '合成当前生效人格，包含持续观察。',
+    interests: [{
+      topic: '合成动物兴趣', key: 'synthetic-topic', signal: 'neutral', counts: { like: 0, dislike: 0, neutral: 1 },
+      basis: '按不同作品汇总：0 条正向、0 条负向、1 条待观察；每条作品只计一次。', updatedAt: 1792058400000,
+      evidence: [{ evidenceId: 'synthetic-evidence', videoId: '1234567890123', reflection: '合成反思：识别到动物互动主题，尚不代表喜欢。', ...sample, source: 'api', at: 1792058400000 }]
+    }],
+    recentObservations: [{
+      id: 'synthetic-observation', videoId: '1234567890123', title: '合成观察：小猫正在玩球。', author: '合成公开作者', kind: 'visual',
+      playback: { time: 3, duration: 10, paused: true }, ...sample, frameCount: 1, source: 'api', observedAt: 1792058400000
+    }]
+  };
   const prefs = () => ({ configured: true, baseUrl: 'https://api.example.invalid', model: '合成模型', remember: false, memoryFolder: 'C:\\合成共享记忆' });
   const server = http.createServer(async (request, response) => {
     try {
@@ -70,15 +86,39 @@ test('按时段自动观看与共用人格在主界面可用，运行状态未�
   const automatic = page.getByRole('switch', { name: '允许自动观看', exact: true }); await automatic.click(); await page.getByText(/自主观看进行中/).waitFor();
   await page.getByRole('tab', { name: '基础设置', exact: true }).click(); await page.getByRole('button', { name: '配置模型与 API Key', exact: true }).click();
   assert.equal(await page.getByRole('textbox', { name: 'API Key', exact: true }).isDisabled(), true); await page.getByRole('dialog').getByRole('button', { name: '返回', exact: true }).click();
+  const personaSummary = page.locator('.effective-persona > summary');
+  const effectiveText = page.getByText('合成当前生效人格，包含持续观察。', { exact: true });
+  assert.equal(await effectiveText.isVisible(), false);
+  assert.equal(await page.getByText('合成手编人格原文', { exact: true }).isVisible(), false);
+  await personaSummary.click(); await effectiveText.waitFor();
+  assert.equal(await page.locator('.persona-section .persona-card').count(), 1);
   assert.equal(await page.getByRole('button', { name: '编辑人格', exact: true }).isDisabled(), true);
   await page.getByRole('tab', { name: '视频观看', exact: true }).click(); await automatic.click(); await page.waitForFunction(() => document.querySelector('[aria-label="允许自动观看"]').getAttribute('aria-checked') === 'false');
-  await page.getByRole('tab', { name: '基础设置', exact: true }).click(); await page.getByRole('button', { name: '编辑人格', exact: true }).click();
+  await page.getByRole('tab', { name: '基础设置', exact: true }).click(); await personaSummary.click(); await page.getByRole('button', { name: '编辑人格', exact: true }).click();
   const editor = page.getByRole('textbox', { name: '人格正文', exact: true }); await editor.fill('合成保留草稿，不夹带自动兴趣'); persona = { ...persona, revision: 'r2', manualText: '合成外部更新二' };
   await page.getByText('人格文件已有新版本，未保存的草稿已保留。', { exact: true }).waitFor(); assert.equal(await editor.inputValue(), '合成保留草稿，不夹带自动兴趣');
   assert.equal(await page.getByRole('button', { name: '保存人格', exact: true }).count(), 0);
   await page.getByRole('button', { name: '打开人格文件夹', exact: true }).click(); assert.equal(personaOpened, 1);
-  await page.getByText('合成观察：小猫正在玩球。', { exact: true }).waitFor(); await page.locator('.interest-reflection').filter({ hasText: '合成反思：识别到动物互动主题，尚不代表喜欢。' }).waitFor(); assert.equal(await page.getByText('待观察', { exact: true }).isVisible(), true); assert.equal(await page.getByText('感兴趣', { exact: true }).count(), 0);
+  await page.getByText('合成观察：小猫正在玩球。', { exact: true }).waitFor();
+  const interest = page.locator('.interest-details').filter({ hasText: '合成动物兴趣' });
+  const interestSummary = interest.locator('summary');
+  const reflection = interest.locator('.interest-reflection').filter({ hasText: '合成反思：识别到动物互动主题，尚不代表喜欢。' });
+  await page.setViewportSize({ width: 920, height: 640 });
+  await interestSummary.waitFor();
+  assert.deepEqual(await interestSummary.locator(':scope > *').allTextContents(), ['合成动物兴趣', '待观察', '1 条依据']);
+  assert.equal(await reflection.isVisible(), false);
+  const collapsedHeight = (await interest.boundingBox()).height;
+  assert.ok(collapsedHeight <= 48, '收起后占一行');
+  await interestSummary.press('Enter'); await reflection.waitFor();
+  assert.ok((await interest.boundingBox()).height > collapsedHeight);
+  assert.equal(await interest.getByText('正向 0 · 负向 0 · 待观察 1', { exact: true }).count(), 1);
+  assert.equal(await interest.getByText(/按不同作品汇总/).count(), 0);
+  assert.equal(await reflection.getByText('观看 2 秒（20%） · 继续停留 1 次 · 待观察', { exact: true }).count(), 1);
+  assert.doesNotMatch(await reflection.innerText(), /跳过 0 次|分享 0 次|已核对观看/);
+  await reflection.getByText(/独立软件/).waitFor();
+  await interestSummary.click(); await reflection.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: /◉ 自主观看/ }).click(); await page.getByText('合成选择理由：对轻松动物题材感兴趣。', { exact: true }).waitFor();
+  await interestSummary.waitFor(); assert.equal(await reflection.isVisible(), false);
   await page.getByRole('button', { name: /对话与视频/ }).click(); await page.getByRole('textbox', { name: '视频任务' }).fill('合成手动任务'); watchReadFails = true; await page.getByText('自主观看状态尚未核实，请等待本机服务回读后再开始操作。', { exact: true }).waitFor(); assert.equal(await page.getByRole('button', { name: '开始任务 ↑', exact: true }).isDisabled(), true);
   watchReadFails = false; await page.getByText('自主观看状态尚未核实，请等待本机服务回读后再开始操作。', { exact: true }).waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: '开始任务 ↑', exact: true }).click(); await page.getByRole('button', { name: '■ 停止任务', exact: true }).waitFor(); await page.getByRole('button', { name: '■ 停止任务', exact: true }).click();

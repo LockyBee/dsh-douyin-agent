@@ -37,11 +37,11 @@ test('软件好友页显示回复等待原因和准备入口，无收到收据�
   const browser = await chromium.launch({ channel: 'msedge', headless: true }); t.after(() => browser.close());
   const page = await browser.newPage(); const errors = []; page.on('pageerror', error => errors.push(error.message)); await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.waitForTimeout(500);
-  if (!(await page.getByText('等待准备：专用消息标签页已离开抖音；请点准备回复通道。', { exact: false }).count())) { t.diagnostic(`errors=${errors.join('|')} body=${(await page.locator('body').innerText()).slice(0,1000)}`); }
-  await page.getByText('等待准备：专用消息标签页已离开抖音；请点准备回复通道。', { exact: false }).waitFor();
+  if (!(await page.getByText('专用消息标签页已离开抖音；请点准备回复通道。', { exact: true }).count())) { t.diagnostic(`errors=${errors.join('|')} body=${(await page.locator('body').innerText()).slice(0,1000)}`); }
+  await page.getByText('专用消息标签页已离开抖音；请点准备回复通道。', { exact: true }).waitFor();
   await page.getByText(/暂不能自主分享/).waitFor();
   assert.equal(await page.getByText(/有 0 条分享收据/).count(), 0);
-  const prepare = page.getByRole('button', { name: '准备回复通道/重新连接并重试', exact: true }); await prepare.waitFor();
+  const prepare = page.getByRole('button', { name: '准备回复通道', exact: true }); await prepare.waitFor();
   await prepare.click(); await page.waitForTimeout(100);
   const calls = await page.evaluate(() => window.__calls || []); assert.ok(calls.some(item => item.route === '/api/chat/prepare'));
 });

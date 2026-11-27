@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
+import { browserExecutionMode } from './browser-mode.mjs';
 
 const fail = (message, code = 'WATCH_MODE_INVALID') => Object.assign(new Error(message), { code, status: 409 });
 const names = new Set(['deepseek-douyin-api', 'deepseek-douyin-dsh', 'deepseek-douyin-launcher', 'deepseek-douyin-api-chat', 'deepseek-douyin-dsh-chat']);
@@ -63,7 +64,7 @@ export class WatchMode {
     this.installed = new WeakSet(); this.lastApplied = null;
   }
   policy() { const value = read(this.policyFile, { version: 1, silent: false }); if (value?.version !== 1 || typeof value.silent !== 'boolean') throw fail('静默观看设置损坏，未用默认值覆盖。'); return value; }
-  state() { const policy = this.policy(); return { protocol: 'watch-mode-v1', silent: policy.silent, source: this.source, configured: fs.existsSync(this.policyFile), lastApplied: this.lastApplied, application: this.application || null, capabilities: { headless: false, persistentMute: true, visibilityEmulation: false, minimizeManagedWindow: true, windowRestoreRequiresExplicit: true }, note: '静默模式会静音作品视频并最小化已核对的专用窗口；登录验证时保留显示。后台能否持续播放以实际进度为准。' }; }
+  state() { const policy = this.policy(); return { protocol: 'watch-mode-v1', silent: policy.silent, source: this.source, configured: fs.existsSync(this.policyFile), executionMode: this.application?.executionMode || this.lastApplied?.executionMode || 'unknown', lastApplied: this.lastApplied, application: this.application || null, capabilities: { headless: true, persistentMute: true, visibilityEmulation: false, minimizeManagedWindow: true, windowRestoreRequiresExplicit: true }, note: '后台模式无需最小化窗口；普通窗口可按静默设置静音、最小化。实际后台播放以视频进度核对。' }; }
   acquireControl() {
     fs.mkdirSync(this.stateDir, { recursive: true }); const owner = { pid: process.pid, token: randomUUID() }; let descriptor;
     try { descriptor = fs.openSync(this.controlFile, 'wx', 0o600); } catch (error) { if (error.code === 'EEXIST') throw fail('静默设置或专用窗口操作正在处理，请稍后重试；设置尚未改变。', 'WATCH_MODE_BUSY'); throw error; }
@@ -75,7 +76,12 @@ export class WatchMode {
     if (!explicit) throw fail('静默观看开关只能由用户明确修改。');
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || typeof input.silent !== 'boolean') throw new TypeError('静默观看只接收 silent 布尔开关。');
     const release = this.acquireControl();
-    try { this.policy(); write(this.policyFile, { version: 1, silent: input.silent }); return this.state(); } finally { release(); }
+    try {
+      this.policy();
+      const windows = this.windows();
+      if (windows.keepVisible) { delete windows.keepVisible; write(this.windowsFile, windows); }
+      write(this.policyFile, { version: 1, silent: input.silent }); return this.state();
+    } finally { release(); }
   }
   async identity(page, anyManaged = false) {
     if (!page || page.isClosed()) return { managed: false, blocked: true, reason: '专用页已关闭。' };
@@ -93,7 +99,7 @@ export class WatchMode {
       if (!this.installed.has(page)) { await page.addInitScript(installSilentMode, { key, label }); this.installed.add(page); }
       await page.evaluate(({ key, silent }) => { sessionStorage.setItem(key, String(silent)); }, { key, silent });
       const result = await page.evaluate(installSilentMode, { key, label });
-      this.lastApplied = { silent, ...result, at: new Date(this.now()).toISOString(), focusRequested: false, playbackChanged: false, visibilityEmulated: false };
+      this.lastApplied = { silent, ...result, executionMode: await browserExecutionMode(page.context?.()?.browser?.()), at: new Date(this.now()).toISOString(), focusRequested: false, playbackChanged: false, visibilityEmulated: false };
       return this.lastApplied;
     } finally { release(); }
   }
@@ -110,17 +116,17 @@ export class WatchMode {
   async inspectBrowser(browser) {
     const silent = this.policy().silent;
     if (!browser?.isConnected()) return { silent, connected: false, managedPages: 0, windows: [], mediaCount: 0, unmutedMedia: 0 };
+    const executionMode = await browserExecutionMode(browser), background = executionMode === 'background';
     const pages = browser.contexts().flatMap(context => context.pages()).filter(page => !page.isClosed());
     if (pages.length > 32) throw fail('专用浏览器标签页过多，无法完整核对。');
     const windows = new Map();
     let managedPages = 0, mediaCount = 0, unmutedMedia = 0, loginRequired = false, verificationRequired = false;
     for (const page of pages) {
-      const identity = await this.identity(page, true), target = await this.target(page);
-      if (!windows.has(target.windowId)) windows.set(target.windowId, { state: target.bounds.windowState, managedPages: 0, blocked: false });
-      const window = windows.get(target.windowId);
-      window.blocked ||= identity.blocked;
+      const identity = await this.identity(page, true);
+      let window;
+      if (!background) { const target = await this.target(page); if (!windows.has(target.windowId)) windows.set(target.windowId, { state: target.bounds.windowState, managedPages: 0, blocked: false }); window = windows.get(target.windowId); window.blocked ||= identity.blocked; }
       if (!identity.managed) continue;
-      managedPages++; window.managedPages++;
+      managedPages++; if (window) window.managedPages++;
       loginRequired ||= identity.loginRequired; verificationRequired ||= identity.verificationRequired;
       if (!identity.blocked && ['deepseek-douyin-api', 'deepseek-douyin-dsh'].includes(identity.name)) {
         const media = await page.evaluate(() => {
@@ -131,7 +137,7 @@ export class WatchMode {
       }
     }
     // 只返回数量和窗口状态，不把网址、页面文字或联系人写进诊断报告。
-    return { silent, connected: true, managedPages, mediaCount, unmutedMedia, loginRequired, verificationRequired,
+    return { silent, executionMode, background, connected: true, managedPages, mediaCount, unmutedMedia, loginRequired, verificationRequired,
       windows: [...windows.values()].filter(window => window.managedPages).map(window => ({ ...window, manageable: !window.blocked && ['normal', 'maximized', 'minimized'].includes(window.state) })) };
   }
   async managedWindow(page, anyManaged = false) {
@@ -141,22 +147,44 @@ export class WatchMode {
     if (!browser) throw fail('无法核对专用浏览器窗口归属，未隐藏窗口。');
     const pages = browser.contexts().flatMap(context => context.pages()).filter(candidate => !candidate.isClosed());
     if (pages.length > 32) throw fail('专用浏览器标签页过多，未自动改动窗口。');
-    let present = false;
+    const targetIds = new Set();
     for (const candidate of pages) {
       const other = await this.target(candidate);
       if (other.windowId !== target.windowId) continue;
-      if (other.targetId === target.targetId) present = true;
+      targetIds.add(other.targetId);
       const checked = await this.identity(candidate, true);
       if (checked.blocked) throw fail('同一窗口包含非受管页面或登录验证，未隐藏窗口。');
     }
-    if (!present) throw fail('目标作品页没有出现在已核对的专用窗口中。');
-    return target;
+    if (!targetIds.has(target.targetId)) throw fail('目标作品页没有出现在已核对的专用窗口中。');
+    return { ...target, targetIds };
+  }
+  async revealWindow(page) {
+    const release = this.acquireControl();
+    try {
+      const target = await this.target(page), value = this.windows();
+      if (target.bounds.windowState === 'minimized') {
+        const own = value.windows.find(item => item.windowId === target.windowId && item.targetId === target.targetId && item.minimizedConfirmed);
+        const windowState = own?.previousState === 'maximized' ? 'maximized' : 'normal';
+        const session = await page.context().newCDPSession(page);
+        try { await session.send('Browser.setWindowBounds', { windowId: target.windowId, bounds: { windowState } }); }
+        finally { await session.detach().catch(() => {}); }
+      }
+      await page.bringToFront();
+      const shown = await this.target(page);
+      if (shown.windowId !== target.windowId || shown.bounds.windowState === 'minimized') throw fail('专用浏览器窗口未能显示。');
+      if (this.policy().silent) {
+        value.keepVisible = { windowId: shown.windowId, targetId: shown.targetId };
+        write(this.windowsFile, value);
+      }
+    } finally { release(); }
   }
   async minimizeManagedWindow(page, { anyManaged = false } = {}) {
+    if (await browserExecutionMode(page.context?.()?.browser?.()) === 'background') return { minimized: false, background: true, headless: true, changed: false, focusRequested: false };
     if (!this.policy().silent) return { minimized: false, changed: false, reason: '静默观看尚未开启。', focusRequested: false };
     const release = this.acquireControl();
     try {
       const target = await this.managedWindow(page, anyManaged), value = this.windows();
+      if (value.keepVisible?.windowId === target.windowId && target.targetIds.has(value.keepVisible.targetId)) return { minimized: false, keptVisible: true, changed: false, focusRequested: false };
       if (target.bounds.windowState === 'minimized') return { minimized: true, changed: false, focusRequested: false };
       if (!['normal', 'maximized', 'fullscreen'].includes(target.bounds.windowState)) throw fail('专用窗口状态无法核对，未隐藏窗口。');
       if (target.bounds.windowState === 'fullscreen') throw fail('专用窗口处于全屏，保留用户状态；退出全屏后才能请求静默最小化。');
@@ -179,6 +207,7 @@ export class WatchMode {
   async applyBrowser(browser, { minimize = false } = {}) {
     const silent = this.policy().silent, pages = [];
     if (!browser?.isConnected()) return this.application = { applied: false, silent, minimized: false, pendingNextVideoAction: true, message: '静默设置已保存；尚无已连接的专用浏览器，下次浏览时应用。', focusRequested: false };
+    const executionMode = await browserExecutionMode(browser), background = executionMode === 'background';
     for (const page of browser.contexts().flatMap(context => context.pages())) {
       if (page.isClosed()) continue;
       let identity;
@@ -187,15 +216,15 @@ export class WatchMode {
       if (!identity.managed) continue;
       const result = { entry: identity.name, applied: false };
       if (['deepseek-douyin-api', 'deepseek-douyin-dsh'].includes(identity.name)) Object.assign(result, await this.apply(page, { anyVideoSource: true }));
-      if (minimize && silent) {
+      if (minimize && silent && !background) {
         try { result.window = await this.minimizeManagedWindow(page, { anyManaged: true }); }
         catch (error) { result.window = { minimized: false, reason: error.message }; }
       }
       pages.push(result);
     }
-    const minimized = pages.some(item => item.window?.minimized), failures = pages.filter(item => item.window && !item.window.minimized);
-    const message = !silent ? '静默观看已关闭；保留当前窗口状态。' : minimized && !failures.length ? '专用浏览器已最小化。' : failures.length ? `静默设置已保存，窗口未全部最小化：${failures[0].window.reason}` : '没有找到可处理的专用抖音页面；下次浏览时应用。';
-    return this.application = { applied: minimized || pages.some(item => item.applied), silent, minimized, pages, message, at: new Date(this.now()).toISOString(), focusRequested: false };
+    const minimized = pages.some(item => item.window?.minimized), failures = pages.filter(item => item.window && !item.window.minimized && !item.window.keptVisible);
+    const message = background ? '专用浏览器以无界面模式运行，无需最小化窗口。' : !silent ? '静默观看已关闭；保留当前窗口状态。' : minimized && !failures.length ? '专用浏览器已最小化。' : failures.length ? `静默设置已保存，窗口未全部最小化：${failures[0].window.reason}` : '没有找到可处理的专用抖音页面；下次浏览时应用。';
+    return this.application = { applied: background || minimized || pages.some(item => item.applied), executionMode, background, silent, minimized, pages, message, at: new Date(this.now()).toISOString(), focusRequested: false };
   }
   async restoreManagedWindow(page, { explicit = false } = {}) {
     if (!explicit) throw fail('恢复显示专用窗口需要用户明确操作。');

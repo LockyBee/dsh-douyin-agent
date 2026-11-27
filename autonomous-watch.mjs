@@ -1,8 +1,9 @@
 import fs from 'node:fs';
+import {atomicJsonWrite} from './atomic-file.mjs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ApiAgent, redact, watchDecisionMessages, parseWatchDecision } from './api-agent.mjs?v=13';
+import { ApiAgent, redact, watchDecisionMessages, playbackWatchDecision } from './api-agent.mjs?v=13';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { AutonomousShare, isSharePreflightNotSent } from './autonomous-share.mjs?v=9';
 import { AutonomousComments } from './autonomous-comments.mjs?v=9';
@@ -12,14 +13,52 @@ import { DailyReport } from './daily-report.mjs?v=9';
 import { WatchOptions } from './watch-options.mjs';
 import { UsageLedger } from './usage-ledger.mjs';
 import { BEHAVIOR_THRESHOLDS } from './persona-memory.mjs';
+import { isLiveRoom, readyImagePost } from './video-limits.mjs';
+import { isRecommendationAddress } from './browser-pages.mjs';
 
 export const WATCH_LIMITS = Object.freeze({ sampleSeconds: 3 });
 const alive = pid => { if (!Number.isSafeInteger(pid) || pid < 1) return false; try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
 const exited = pid => { if (!Number.isSafeInteger(pid) || pid < 1) return false; try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
 const read = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return fallback; throw new Error('自主观看状态文件损坏，未重置预算或运行锁。'); } };
-const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600, flag: 'wx' }); fs.renameSync(temporary, file); } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } };
+const write = atomicJsonWrite;
 const day = now => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
-const failure = (message, watchStatus = 'failed') => Object.assign(new Error(message), { watchStatus });
+const failure = (message, watchStatus = 'failed', code) => Object.assign(new Error(message), { watchStatus, code });
+const stopActions = new Map([
+  ['WATCH_LOGIN_REQUIRED', 'verify'],
+  ['WATCH_VERIFICATION_REQUIRED', 'verify'],
+  ['WATCH_CHAT_BLOCKING', 'browser'],
+  ['WATCH_PAGE_UNAVAILABLE', 'browser'],
+  ['WATCH_PLAYBACK_PAUSED', 'resume'],
+  ['WATCH_WORK_UNAVAILABLE', 'resume'],
+  ['WATCH_SWITCH_UNCONFIRMED', 'resume'],
+  ['WATCH_COMMENT_UNCERTAIN', 'review-comments'],
+]);
+const previousStopActions = new Map([
+  ['观看页需要抖音安全验证。', 'verify'],
+  ['观看页需要登录抖音。', 'verify'],
+  ['私信面板挡住了观看页。', 'browser'],
+  ['未确认切换到另一条就绪作品，已停止自主观看。', 'resume'],
+  ['评论发布结果未确认，请在抖音核对，已停止自主观看。', 'review-comments'],
+  ['没有确认公开评论发布成功。', 'review-comments'],
+]);
+const previousStayErrors = new Set([
+  '停留前作品或播放状态已变化，已停止自主观看，没有学习本次停留。',
+  '停留期间作品或播放状态已变化，已停止自主观看，没有学习本次停留。',
+]);
+function watchRecovery({ status, lastError, lastErrorCode }) {
+  if (!lastError || !['failed', 'needs_user'].includes(status)) return null;
+  if (previousStayErrors.has(lastError)) return { action: 'resume', message: '播放状态发生变化，观看已暂停。' };
+  return { action: stopActions.get(lastErrorCode) || previousStopActions.get(lastError) || 'diagnostics', message: lastError };
+}
+
+function watchPageBlocker(state, allowLoading = false) {
+  if (state?.verificationRequired) return failure('观看页需要抖音安全验证。', 'needs_user', 'WATCH_VERIFICATION_REQUIRED');
+  if (state?.loginRequired) return failure('观看页需要登录抖音。', 'needs_user', 'WATCH_LOGIN_REQUIRED');
+  if (state?.privateChatVisible) return failure('私信面板挡住了观看页。', 'needs_user', 'WATCH_CHAT_BLOCKING');
+  if (state?.blocked || state?.unsupportedPage && !allowLoading) return failure('当前页面无法继续自主观看。', 'needs_user', 'WATCH_PAGE_UNAVAILABLE');
+  return null;
+}
+
 export function readShareProgress(value) {
   const keys=['total','currentIndex','completed','confirmed','notSent','skipped'];
   if(!value||!keys.every(key=>Number.isSafeInteger(value[key])&&value[key]>=0)||value.total<1||value.currentIndex>value.total||value.completed>value.currentIndex||value.confirmed+value.notSent+value.skipped>value.completed||!['sharing','completed','paused'].includes(value.status))return null;
@@ -27,10 +66,15 @@ export function readShareProgress(value) {
 }
 const isLivePreview = state => state?.pageKind === 'live-preview' && state.livePreview?.recognized === true && state.livePreview.scope === 'recommend-feed' && (['active-feed-live-link','active-feed-live-room'].includes(state.livePreview.source)&&/^\d{4,30}$/.test(state.livePreview.roomId || '')||state.livePreview.source==='active-feed-live-status'&&state.livePreview.roomId===null&&/^[a-f0-9]{16}$/.test(state.livePreview.previewKey||''));
 const readyVideo = state => !isLivePreview(state) && /^\d{10,30}$/.test(state?.video?.id || '') && state.video.readyState >= 2;
-const readyImagePost = state => state?.pageKind==='image-post'&&state.imagePost?.recognized===true&&state.imagePost.source==='active-image-element'&&state.imagePost.loaded===true&&/^\d{10,30}$/.test(state.imagePost.id||'');
-const isLiveRoom=state=>state?.pageKind==='live-room'&&state.liveRoom?.recognized===true&&state.liveRoom.source==='direct-live-url-and-player'&&/^\d{4,30}$/.test(state.liveRoom.roomId||'');
 const readyWork = state => readyVideo(state)||readyImagePost(state);
 const currentWorkId = state => readyImagePost(state)?state.imagePost.id:state?.video?.id;
+function playingWork(state) {
+  if (readyImagePost(state)) return `image:${state.imagePost.id}`;
+  if (isLivePreview(state)) return `preview:${state.livePreview.roomId || state.livePreview.previewKey}`;
+  if (isLiveRoom(state)) return `live:${state.liveRoom.roomId}`;
+  if (readyVideo(state) && state.video.paused === false && state.video.ended !== true && !state.videoSelection?.identityConflict) return `video:${state.video.id}`;
+  return null;
+}
 
 function switchFailureDiagnostic({ name, output, error, source, runId, now, startedAt, expectedVideoId, stage }) {
   const hash = value => typeof value === 'string' && value.length > 0 && value.length <= 128 ? createHash('sha256').update(value).digest('hex') : null;
@@ -54,13 +98,13 @@ function readSwitchDiagnostic(value) {
 }
 // API 与原生入口通过同一锁、有限视频轮次和持久预算协调，不在重启时恢复循环。
 export class AutonomousWatch {
-  constructor({ controller, config = {}, videoLimits, personaMemory, agent, shareService, commentService, commentAgent, reportService, decisionProvider, stateDir = resolveRuntimePaths().stateDir, source = 'api', fetchImpl = fetch, now = Date.now, delayImpl = (ms, signal) => delay(ms, undefined, { signal }), onEvent = () => {} } = {}) {
+  constructor({ controller, config = {}, videoLimits, personaMemory, agent, shareService, commentService, reactionService, commentAgent, reportService, decisionProvider, stateDir = resolveRuntimePaths().stateDir, source = 'api', fetchImpl = fetch, now = Date.now, delayImpl = (ms, signal) => delay(ms, undefined, { signal }), onEvent = () => {} } = {}) {
     if (!controller?.execute || !videoLimits?.state || !personaMemory?.context || !['api', 'dsh'].includes(source)) throw new Error('自主观看缺少浏览器、时限或共同人格接口。');
     Object.assign(this, { controller, config, videoLimits, personaMemory, shareService, decisionProvider, stateDir, source, now, delayImpl, onEvent });
     this.optionsService = new WatchOptions({ stateDir });
     this.usageLedger = new UsageLedger({ stateDir, now });
     this.agent = agent || new ApiAgent({ controller, config, personaMemory, fetchImpl });
-    Object.assign(this, { commentService, reportService });
+    Object.assign(this, { commentService, reactionService, reportService });
     this.agent.usageLedger = this.usageLedger; this.agent.source = source;
     this.commentAgent = commentAgent || new PublicCommentAgent({ config, fetchImpl });
     this.commentAgent.usageLedger = this.usageLedger; this.commentAgent.source = source;
@@ -119,7 +163,7 @@ export class AutonomousWatch {
     const request = read(this.files.stop, null), stopping = worker?.alive && request?.runId === worker.runId;
     const savedRunMatches = savedMatches && worker?.alive && Number.isFinite(worker.heartbeatAt) && this.now() - worker.heartbeatAt >= 0 && this.now() - worker.heartbeatAt < 5000;
     const ownRun = this.running && worker?.owned && worker.sessionId === this.sessionId && worker.source === this.source;
-    return redact({ protocol: 'autonomous-watch-v1', running: Boolean(worker?.alive), owned: Boolean(worker?.owned), worker, status: stopping ? 'stopping' : worker?.alive ? 'running' : ['running', 'stopping'].includes(selectedSaved.status) ? 'stopped' : selectedSaved.status || 'stopped', sessionId, counts: { ...counts, maxRequests:null, dailyRequests: time.daily?.requests ?? budget.days[day(this.now())] ?? 0, dailyLimit: time.policy.dailyRequests ?? null }, phase: ownRun ? this.phase || 'waiting' : savedRunMatches ? selectedSaved.phase || 'waiting' : 'idle', pendingRequests: ownRun ? this.pendingRequests || 0 : savedRunMatches && selectedSaved.pendingRequests === 1 ? 1 : 0, shareProgress: ownRun ? this.shareProgress || null : savedRunMatches ? readShareProgress(selectedSaved.shareProgress) : null, options: this.optionsService.state().policy, lastDecision: selectedSaved.lastDecision || null, lastError: selectedSaved.lastError || '', lastSwitchDiagnostic: readSwitchDiagnostic(selectedSaved.lastSwitchDiagnostic), remainingSeconds: time.allowed && time.session?.id === sessionId ? time.remainingSeconds : 0 }, [this.config.apiKey]);
+    return redact({ protocol: 'autonomous-watch-v1', running: Boolean(worker?.alive), owned: Boolean(worker?.owned), worker, status: stopping ? 'stopping' : worker?.alive ? 'running' : ['running', 'stopping'].includes(selectedSaved.status) ? 'stopped' : selectedSaved.status || 'stopped', sessionId, counts: { ...counts, maxRequests:null, dailyRequests: time.daily?.requests ?? budget.days[day(this.now())] ?? 0, dailyLimit: time.policy.dailyRequests ?? null }, phase: ownRun ? this.phase || 'waiting' : savedRunMatches ? selectedSaved.phase || 'waiting' : 'idle', pendingRequests: ownRun ? this.pendingRequests || 0 : savedRunMatches && selectedSaved.pendingRequests === 1 ? 1 : 0, shareProgress: ownRun ? this.shareProgress || null : savedRunMatches ? readShareProgress(selectedSaved.shareProgress) : null, options: this.optionsService.state().policy, lastDecision: selectedSaved.lastDecision || null, lastError: selectedSaved.lastError || '', recovery: worker?.alive ? null : watchRecovery(selectedSaved), updatedAt: selectedSaved.updatedAt || null, lastSwitchDiagnostic: readSwitchDiagnostic(selectedSaved.lastSwitchDiagnostic), remainingSeconds: time.allowed && time.session?.id === sessionId ? time.remainingSeconds : 0 }, [this.config.apiKey]);
   }
   save(value) { write(this.files.state, redact({ ...read(this.files.state, {}), ...value, source: this.source, sessionId: this.sessionId, runId:this.runId, updatedAt: new Date(this.now()).toISOString() }, [this.config.apiKey])); }
   assertAllowed() {
@@ -169,7 +213,7 @@ export class AutonomousWatch {
     });
     this.abort = new AbortController(); this.running = true; this.playbackClosed=false;this.phase='waiting';this.pendingRequests=0;this.startedDate = day(this.now());
     try {
-    this.save({ status: 'running', phase:'waiting',pendingRequests:0,lastError: '', lastDecision: null });
+    this.save({ status: 'running', phase:'waiting',pendingRequests:0,lastError: '', lastErrorCode: null, lastDecision: null });
     this.heartbeat = setInterval(() => {
       try {
         const request = read(this.files.stop, null); if (request?.runId === this.runId) this.abort.abort(failure('用户停止自主观看。', 'stopped'));
@@ -205,7 +249,8 @@ export class AutonomousWatch {
     const state = output?.state || output;
     this.videoLimits.notePlayback?.(this.source,state,{ownerId:this.runId});
     const expectedLoading = allowLoading && (state?.url === 'about:blank' || (() => { try { return new URL(state?.url).origin === 'https://www.douyin.com'; } catch { return false; } })());
-    if (state?.loginRequired || state?.verificationRequired || state?.blocked || state?.privateChatVisible || state?.unsupportedPage && !expectedLoading) throw failure('抖音页面需要手动处理，已停止自主观看。', 'needs_user');
+    const blocker = watchPageBlocker(state, expectedLoading);
+    if (blocker) throw blocker;
     this.onEvent(redact({ type: 'watch.tool', tool: name, result: output }, [this.config.apiKey]));
     return output;
   }
@@ -214,11 +259,12 @@ export class AutonomousWatch {
     for (let attempt = 0; ; attempt++) {
       this.assertAllowed();
       const state = current.state || current;
-      if (state.loginRequired || state.verificationRequired || state.blocked || state.privateChatVisible) throw failure('抖音页面需要登录、验证或处理私信遮挡，已停止自主观看。', 'needs_user');
+      const blocker = watchPageBlocker(state, true);
+      if (blocker) throw blocker;
       if (readyWork(state) || isLivePreview(state)||isLiveRoom(state)) return current;
       let origin; try { origin = new URL(state.url).origin; } catch {}
-      if (state.url !== 'about:blank' && origin !== 'https://www.douyin.com') throw failure('启动页面已离开抖音，未继续等待或输入。', 'needs_user');
-      if (attempt >= 60 || this.now() >= deadline) throw failure('冷启动等待30秒仍未读到就绪作品，请检查专用页面。', 'needs_user');
+      if (state.url !== 'about:blank' && origin !== 'https://www.douyin.com') throw failure('启动页面已离开抖音，未继续等待或输入。', 'needs_user', 'WATCH_PAGE_UNAVAILABLE');
+      if (attempt >= 60 || this.now() >= deadline) throw failure('等待 30 秒后，作品仍未加载。', 'needs_user', 'WATCH_WORK_UNAVAILABLE');
       this.phase = 'preparing'; this.save({ phase: this.phase, pendingRequests: 0 });
       await this.delayImpl(Math.min(500, deadline - this.now()), this.abort.signal);
       current = await this.execute('douyin_status', {}, { allowLoading: true });
@@ -232,12 +278,39 @@ export class AutonomousWatch {
       let origin; try { origin = new URL(state.url).origin; } catch { /* 暂缺页面资料只作有界回读，不据此输入。 */ }
       if (origin && origin !== 'https://www.douyin.com'&&!isLiveRoom(state)) throw failure('模型等待后已离开抖音，未执行旧决策。', 'needs_user');
       if (readyImagePost(state)||isLivePreview(state)||isLiveRoom(state)) return current;
-      if (state.video?.paused === true) throw failure('模型等待后播放已暂停，未继续执行旧决策。', 'needs_user');
-      if (attempt > 0 && this.now() > deadline) throw failure('模型等待后的作品状态仍未稳定，已停止自主观看。', 'needs_user');
+      if (state.video?.paused === true) throw failure('视频已暂停。', 'needs_user', 'WATCH_PLAYBACK_PAUSED');
+      if (attempt > 0 && this.now() > deadline) throw failure('等待后，作品状态仍未稳定。', 'needs_user', 'WATCH_WORK_UNAVAILABLE');
       if (readyVideo(state) && state.video.paused === false) return current;
-      if (attempt >= 16 || this.now() >= deadline) throw failure('模型等待后的作品状态仍未稳定，已停止自主观看。', 'needs_user');
+      if (attempt >= 16 || this.now() >= deadline) throw failure('等待后，作品状态仍未稳定。', 'needs_user', 'WATCH_WORK_UNAVAILABLE');
       await this.delayImpl(Math.min(250, deadline - this.now()), this.abort.signal); this.assertAllowed();
       current = await this.execute('douyin_status');
+    }
+  }
+  async recoverAfterStay(current, previousId) {
+    const deadline = this.now() + 4000;
+    let seenWork = null, ended = false;
+    for (let attempt = 0; ; attempt++) {
+      this.assertAllowed();
+      const state = current.state || current;
+      const work = playingWork(state);
+      if (work && work === seenWork) return current;
+      seenWork = work;
+
+      const atEnd = readyVideo(state) && state.video.id === previousId && state.video.ended === true && !state.videoSelection?.identityConflict;
+      if (atEnd && ended) {
+        const next = await this.execute('douyin_next', {}, { expectedVideoId: previousId });
+        const nextState = next.state || next;
+        const alreadyChanged = next.staleObservation === true && next.reasonCode === 'observed-video-changed' && next.expectedVideoId === previousId;
+        if ((next.changed === true || alreadyChanged) && playingWork(nextState) && currentWorkId(nextState) !== previousId) return next;
+        throw failure('视频已播完，暂时没能切到下一条。', 'needs_user', 'WATCH_SWITCH_UNCONFIRMED');
+      }
+      ended = atEnd;
+      if (attempt >= 16 || this.now() >= deadline) {
+        if (state.video?.paused === true) throw failure('视频已暂停。', 'needs_user', 'WATCH_PLAYBACK_PAUSED');
+        throw failure('暂时没读到可播放的作品。', 'needs_user', 'WATCH_WORK_UNAVAILABLE');
+      }
+      await this.delayImpl(Math.min(250, deadline - this.now()), this.abort.signal);
+      current = await this.execute('douyin_status', {}, { allowLoading: true });
     }
   }
   cancel(reason = failure('自主观看已取消。', 'stopped')) { if (this.worker()?.owned) this.abort?.abort(reason); }
@@ -300,7 +373,41 @@ export class AutonomousWatch {
     if (!this.commentService && this.personaMemory.snapshot) { this.commentService = new AutonomousComments({ controller: this.controller, videoLimits: this.videoLimits, personaMemory: this.personaMemory, stateDir: this.stateDir, source: this.source, now: this.now }); this.ownsCommentService = true; }
     return this.commentService;
   }
-  commentContext() { return this.getCommentService()?.context() ?? { enabled: false, paused: false, remainingDaily: 0, remainingSession: 0 }; }
+  async getReactionService() { return this.reactionService ??= await this.controller.getReactions?.({ personaMemory: this.personaMemory }); }
+  async reactionContext(videoId) { return (await this.getReactionService())?.context(videoId) ?? { like: false, favorite: false }; }
+  reportSkippedReaction(action) {
+    if (!['like', 'favorite'].includes(action)) return;
+    this.onEvent({ type: 'watch.reaction-skipped', action, code: 'WATCH_REACTION_UNAVAILABLE', message: '跳过本次点赞或收藏，继续观看。' });
+  }
+  commentContext(videoId) { return this.getCommentService()?.context(videoId) ?? { enabled: false, paused: false, remainingDaily: 0, remainingSession: 0 }; }
+  async publishCommentDecision(observation, { evidenceId, videoId }) {
+    const commentService = this.getCommentService(), signal = this.abort.signal;
+    let discussion = [];
+    try { discussion = await commentService.discussion?.(videoId, { signal }) ?? []; }
+    catch { this.assertAllowed(); }
+    const current = await this.execute('douyin_status');
+    if ((current.state || current).video?.id !== videoId) return null;
+    this.phase = 'comment-model';
+    this.pendingRequests = 1;
+    this.save({ phase: this.phase, pendingRequests: 1 });
+    let generated;
+    try {
+      this.reserveRequest();
+      generated = await this.commentAgent.generate({ observation, discussion, signal, decisionProvider: this.decisionProvider });
+    } finally {
+      this.pendingRequests = 0;
+      this.phase = 'waiting';
+      this.save({ phase: this.phase, pendingRequests: 0 });
+    }
+    this.assertAllowed();
+    if (generated.text === null) {
+      if (generated.code) this.onEvent({ type: 'watch.comment-skipped', code: generated.code });
+      return null;
+    }
+    const delivery = await commentService.comment({ evidenceId, videoId, text: generated.text }, { signal, watchRunId: this.runId });
+    this.onEvent({ type: 'watch.comment', delivery, usage: generated.usage });
+    return delivery;
+  }
   viewing(evidenceId, from, to, startedAt, sampleId) {
     if (!this.personaMemory.recordViewing) return null;
     const wallSeconds = (this.now() - startedAt) / 1000;
@@ -327,6 +434,11 @@ export class AutonomousWatch {
     }
     return current;
   }
+  async stayOnImage(seconds) {
+    await this.delayImpl(seconds * 1000, this.abort.signal);
+    this.assertAllowed();
+    return this.execute('douyin_status');
+  }
   async watchImagePost(current,options) {
     const initial=current.state||current,id=initial.imagePost.id;
     this.liveSkipStreak=0;
@@ -334,20 +446,22 @@ export class AutonomousWatch {
     this.phase='observing';this.save({phase:this.phase,pendingRequests:0});
     const observation=await this.execute('douyin_observe',{seconds:1});
     if(!readyImagePost(observation.state||observation)||currentWorkId(observation.state||observation)!==id)return{current:await this.execute('douyin_status')};
-    if(initial.imageKey&&(observation.state||observation).imagePost.imageKey!==initial.imageKey)return{current:observation};
+    if(initial.imagePost.imageKey&&(observation.state||observation).imagePost.imageKey!==initial.imagePost.imageKey)return{current:observation};
     watchDecisionMessages(observation);
     const shareContext={enabled:false,paused:false,dailyRemaining:0,recipients:[]},commentContext={enabled:false,remainingDaily:0,remainingSession:0};
     this.phase='model';this.pendingRequests=1;this.save({phase:this.phase,pendingRequests:1});let result;
     try{this.reserveRequest();result=await this.agent.decideWatch({observation,context:this.personaMemory.context(),watchOptions:options,shareContext,commentContext,signal:this.abort.signal,decisionProvider:this.decisionProvider});}
     catch(error){if(!['WATCH_DECISION_FORMAT','WATCH_DECISION_INCOMPLETE'].includes(error?.code))throw error;return{current:await this.recoverDecision(error)};}
     finally{this.pendingRequests=0;this.phase='waiting';this.save({phase:this.phase,pendingRequests:0});}
-    this.assertAllowed();let decision;
-    try{decision=redact(parseWatchDecision(result.decision,{shareContext,commentContext,mediaKind:'image-post'}),[this.config.apiKey]);}catch(error){return{current:await this.recoverDecision(error)};}
+    this.assertAllowed();let checked;
+    try{checked=playbackWatchDecision(result.decision,{shareContext,commentContext,mediaKind:'image-post'});}catch(error){return{current:await this.recoverDecision(error)};}
+    const decision = redact(checked.decision, [this.config.apiKey]);
+    this.reportSkippedReaction(checked.skippedReaction ?? result.skippedReaction);
     this.invalidDecisionStreak=0;this.save({lastDecision:decision,usage:result.usage,decisionRetry:null});
     current=await this.execute('douyin_status');
     if(decision.action==='stop')return{current,stopRequested:true};
-    if(!readyImagePost(current.state||current)||currentWorkId(current.state||current)!==id||initial.imageKey&&(current.state||current).imagePost.imageKey!==initial.imageKey){this.onEvent({type:'watch.decision-discarded',action:decision.action,reasonCode:'observed-image-post-changed'});return{current};}
-    if(decision.action==='stay'){await this.delayImpl(decision.seconds*1000,this.abort.signal);this.assertAllowed();current=await this.execute('douyin_status');}
+    if(!readyImagePost(current.state||current)||currentWorkId(current.state||current)!==id||initial.imagePost.imageKey&&(current.state||current).imagePost.imageKey!==initial.imagePost.imageKey){this.onEvent({type:'watch.decision-discarded',action:decision.action,reasonCode:'observed-image-post-changed'});return{current};}
+    if(decision.action==='stay')current=await this.stayOnImage(decision.seconds);
     else if(decision.action==='next_image'){
       const image=(current.state||current).imagePost;
       if(!image.album?.hasNext||!image.imageKey)throw failure('当前图文没有已核对的下一张，未重复输入。','needs_user');
@@ -366,11 +480,18 @@ export class AutonomousWatch {
     this.onEvent({type:'watch.image-post',action:decision.action,observationScope:'current-visible-image',videoProgressLearned:false});
     return{current};
   }
-  async watchLiveRoom(current) {
+  async watchLiveRoom(current, { seconds = WATCH_LIMITS.sampleSeconds, continuousPlayback = true } = {}) {
     const initial=current.state||current,roomId=initial.liveRoom.roomId;
     const leave=()=>this.execute('douyin_next',{}, {expectedLiveRoomId:roomId,exitLive:true,allowLoading:true});
     if(initial.liveRoom.ended)return{current:await leave()};
-    this.phase='observing';this.save({phase:this.phase,pendingRequests:0});const observation=await this.execute('douyin_observe',{seconds:WATCH_LIMITS.sampleSeconds});
+    this.phase='observing';this.save({phase:this.phase,pendingRequests:0});
+    let observation;
+    try { observation = await this.execute('douyin_observe', { seconds }, { expectedLiveRoomId: roomId }); }
+    catch (error) {
+      if (error.code !== 'BACKGROUND_LIVE_UNAVAILABLE') throw error;
+      this.onEvent({type:'watch.live-unavailable',roomVerified:true,reasonCode:'live-frames-unavailable'});
+      return { current: await leave() };
+    }
     if(!isLiveRoom(observation.state||observation)||(observation.state||observation).liveRoom.roomId!==roomId)return{current:await this.execute('douyin_status')};
     if(!observation.frames?.length){this.onEvent({type:'watch.live-unavailable',roomVerified:true,reasonCode:'live-frames-unavailable'});return{current:await leave()};}
     watchDecisionMessages(observation);const shareContext={enabled:false,recipients:[]},commentContext={enabled:false};
@@ -378,26 +499,37 @@ export class AutonomousWatch {
     try{this.reserveRequest();result=await this.agent.decideWatch({observation,context:this.personaMemory.context(),shareContext,commentContext,signal:this.abort.signal,decisionProvider:this.decisionProvider});}
     catch(error){if(!['WATCH_DECISION_FORMAT','WATCH_DECISION_INCOMPLETE'].includes(error?.code))throw error;return{current:await this.recoverDecision(error)};}
     finally{this.phase='waiting';this.pendingRequests=0;this.save({phase:this.phase,pendingRequests:0});}
-    this.assertAllowed();let decision;try{decision=parseWatchDecision(result.decision,{shareContext,commentContext,mediaKind:'live-room'});}catch(error){return{current:await this.recoverDecision(error)};}
+    this.assertAllowed();let checked;try{checked=playbackWatchDecision(result.decision,{shareContext,commentContext,mediaKind:'live-room'});}catch(error){return{current:await this.recoverDecision(error)};}
+    const decision = checked.decision;
+    this.reportSkippedReaction(checked.skippedReaction ?? result.skippedReaction);
     this.invalidDecisionStreak=0;this.save({lastDecision:decision,usage:result.usage,decisionRetry:null});current=await this.execute('douyin_status');
     if(!isLiveRoom(current.state||current)||(current.state||current).liveRoom.roomId!==roomId){this.onEvent({type:'watch.decision-discarded',action:decision.action,reasonCode:'observed-live-room-changed'});return{current};}
-    if(decision.action==='stay'){await this.delayImpl(decision.seconds*1000,this.abort.signal);this.assertAllowed();current=await this.execute('douyin_status');}
-    else current=await leave();
-    this.onEvent({type:'watch.live-room',action:decision.action,observationScope:'sampled-live-frames',videoProgressLearned:false});return{current,stopRequested:decision.action==='stop'};
+    if (decision.action === 'stay') {
+      if (continuousPlayback) {
+        await this.delayImpl(decision.seconds * 1000, this.abort.signal);
+        current = await this.execute('douyin_status');
+      }
+    } else if (continuousPlayback || decision.action === 'skip') current = await leave();
+    this.onEvent({type:'watch.live-room',action:decision.action,observationScope:'sampled-live-frames',videoProgressLearned:false});
+    return { current, stopRequested: decision.action === 'stop', ...(decision.action === 'stay' && !continuousPlayback ? { nextSeconds: decision.seconds } : {}) };
   }
   async run() {
-    let status = 'stopped', lastError = '';
+    let status = 'stopped', lastError = '', lastErrorCode = null;
     this.liveSkipStreak = 0;this.invalidDecisionStreak=0;this.shareProgress=null;
     try {
       this.save({shareProgress:null,decisionRetry:null});
       let current = await this.execute('douyin_status', {}, { allowLoading: true });
       const initialOptions = this.optionsService.state().policy;
+      const startingPage = current.state || current;
       if (initialOptions.mode === 'topic') {
         current = await this.execute('douyin_search', { query: initialOptions.topics[0] });
         const first = (current.state || current).searchResults?.find(item => Number.isSafeInteger(item.index) && /^\d{10,30}$/.test(item.id));
         if (!first) throw failure('主题搜索没有可核实的作品结果，请更换主题后重试。', 'needs_user');
         current = await this.execute('douyin_open_video', { index: first.index }, { allowLoading: true });
-      } else if (!(current.state || current).video?.id && !readyImagePost(current.state||current) && !isLivePreview(current.state || current)&&!isLiveRoom(current.state||current)) current = await this.execute('douyin_open', {}, { allowLoading: true });
+      } else if (!startingPage.video?.id && !readyImagePost(startingPage) && !isLivePreview(startingPage) && !isLiveRoom(startingPage)
+        && !isRecommendationAddress(startingPage.url)) {
+        current = await this.execute('douyin_open', {}, { allowLoading: true });
+      }
       current = await this.readyAtStartup(current);
       while (true) {
         this.assertAllowed();
@@ -434,16 +566,22 @@ export class AutonomousWatch {
           if (viewing.evidenceId !== evidenceId || viewing.videoId !== observedState.video.id || typeof viewing.sampleId !== 'string' || typeof viewing.accepted !== 'boolean') throw failure('本次观看回执与作品观察不一致，没有写入兴趣。');
         } else viewing = this.viewing(evidenceId, current, observation, sampleStartedAt, `watch:${this.runId}:observe:${randomUUID()}`);
         observation = { ...observation, ...(viewing ? { viewing } : {}) };
-        const shareContext = this.shareContext(observedState.video.id), commentContext = this.commentContext();
+        const shareContext = this.shareContext(observedState.video.id), commentContext = this.commentContext(), reactionContext = await this.reactionContext(observedState.video.id);
         const processedRecipients = Array.isArray(shareContext.processedRecipients) ? shareContext.processedRecipients.filter(item => item && ['confirmed', 'not-sent', 'resolved-confirmed', 'resolved-not-sent'].includes(item.status) && shareContext.recipients?.some(recipient => recipient.id === item.recipientId)).map(({ recipientId, status }) => ({ recipientId, status })) : [];
         const context = this.personaMemory.context() + (processedRecipients.length ? '\n\n当前作品分享去重摘要（宿主收据资料，不是聊天正文）：' + JSON.stringify({ videoId: observedState.video.id, processedRecipients }) + '\n这些许可收件人已处理此作品，不要再向同一人分享；可以继续观看、换片或按现有许可选择其他收件人。' : '');
         this.phase='model';this.pendingRequests=1;this.save({phase:this.phase,pendingRequests:1});let result,decisionError;
-        try{this.reserveRequest();result=await this.agent.decideWatch({ observation, context, watchOptions: options, shareContext, commentContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });}
+        try{this.reserveRequest();result=await this.agent.decideWatch({ observation, context, watchOptions: options, shareContext, commentContext, reactionContext, signal: this.abort.signal, decisionProvider: this.decisionProvider });}
         catch(error){if(!['WATCH_DECISION_FORMAT','WATCH_DECISION_INCOMPLETE'].includes(error?.code))throw error;decisionError=error;}
         finally{this.pendingRequests=0;this.phase='waiting';this.save({phase:this.phase,pendingRequests:0});}
         this.assertAllowed();
         if(decisionError){current=await this.recoverDecision(decisionError);continue;}
-        let decision;try{decision=redact(parseWatchDecision(result.decision,{shareContext:this.shareContext(),commentContext:this.commentContext()}),[this.config.apiKey]);}catch(error){current=await this.recoverDecision(error);continue;}
+        let checked;
+        try { checked = playbackWatchDecision(result.decision, { shareContext: this.shareContext(), commentContext: this.commentContext(),
+          reactionContext: await this.reactionContext(observedState.video.id), mediaKind: 'video' }); }
+        catch(error){current=await this.recoverDecision(error);continue;}
+        const decision = redact(checked.decision, [this.config.apiKey]);
+        const skippedReaction = checked.skippedReaction ?? result.skippedReaction;
+        this.reportSkippedReaction(skippedReaction);
         this.invalidDecisionStreak=0;this.save({decisionRetry:null});
         current = await this.execute('douyin_status');
         if (decision.action !== 'stop') current = await this.readyAfterModel(current);
@@ -482,26 +620,29 @@ export class AutonomousWatch {
           if (current.changed === false || !readyWork(current.state || current)&&!isLivePreview(current.state||current) || currentWorkId(current.state||current) === observedState.video.id) {
             const reasonCode = current.reasonCode || (!readyVideo(current.state || current) ? 'autonomous-switch-not-ready' : (current.state || current).video.id === observedState.video.id ? 'autonomous-switch-same-id' : 'autonomous-switch-changed-false');
             this.recordSwitchFailure('douyin_next',{...current,before:current.before||observedState.video,reasonCode},{startedAt:switchStartedAt,expectedVideoId:observedState.video.id,stage:'autonomous-verification'});
-            throw failure('未确认切换到另一条就绪作品，已停止自主观看。');
+            throw failure('未确认切换到另一条就绪作品，已停止自主观看。', 'failed', 'WATCH_SWITCH_UNCONFIRMED');
           }
-          if (gapTrusted && (viewing?.accepted === true || waited?.accepted === true)) learned = this.behavior(evidenceId, 'skip')?.accepted === true;
+          if (!skippedReaction && gapTrusted && (viewing?.accepted === true || waited?.accepted === true)) learned = this.behavior(evidenceId, 'skip')?.accepted === true;
         } else if (decision.action === 'search') {
           const found = await this.execute('douyin_search', { query: decision.query });
           const first = (found.state || found).searchResults?.find(item => Number.isSafeInteger(item.index) && item.index >= 0);
           if (!first) throw failure('搜索没有返回可核对的作品，已停止自主观看。');
           current = await this.execute('douyin_open_video', { index: first.index });
+        } else if (['like', 'favorite'].includes(decision.action)) {
+          try {
+            const delivery = await (await this.getReactionService()).react({ action: decision.action, evidenceId, videoId: observedState.video.id }, { signal: this.abort.signal, watchRunId: this.runId });
+            this.onEvent({ type: 'watch.reaction', delivery });
+            if (delivery.deliveryUncertain) this.onEvent({ type: 'watch.reaction-paused', code: 'REACTION_UNCERTAIN', message: '本次互动结果未确认，暂停后续点赞收藏，继续观看。' });
+          } catch (error) {
+            if (error.code !== 'REACTION_DISABLED') throw error;
+            this.assertAllowed();
+            this.reportSkippedReaction(decision.action);
+          }
         } else if (decision.action === 'comment') {
           if (freshState.video?.id !== observedState.video.id) throw failure('评论前作品已变化，未发布评论。', 'needs_user');
-          this.phase='comment-model';this.pendingRequests=1;this.save({phase:this.phase,pendingRequests:1});let generated;
-          try{this.reserveRequest();generated=await this.commentAgent.generate({ observation, signal: this.abort.signal, decisionProvider: this.decisionProvider });}
-          finally{this.pendingRequests=0;this.phase='waiting';this.save({phase:this.phase,pendingRequests:0});}
-          this.assertAllowed();
-          if (generated.text !== null) {
-            const delivery = await this.getCommentService().comment({ evidenceId, videoId: observedState.video.id, text: generated.text }, { signal: this.abort.signal, watchRunId: this.runId });
-            this.onEvent({ type: 'watch.comment', delivery, usage: generated.usage });
-            if (delivery?.deliveryUncertain) throw failure('评论发布结果未确认，请在抖音核对，已停止自主观看。', 'needs_user');
-            if (delivery?.confirmed !== true) throw failure(delivery?.reason || '没有确认公开评论发布成功。', 'needs_user');
-          }
+          const delivery = await this.publishCommentDecision(observation, { evidenceId, videoId: observedState.video.id });
+          if (delivery?.deliveryUncertain) throw failure('评论发布结果未确认，请在抖音核对，已停止自主观看。', 'needs_user', 'WATCH_COMMENT_UNCERTAIN');
+          if (delivery && !delivery.skipped && delivery.confirmed !== true) throw failure(delivery.reason || '没有确认公开评论发布成功。', 'needs_user', 'WATCH_COMMENT_UNCERTAIN');
         } else if (decision.action === 'share') {
           learned=await this.shareDecision(decision,{evidenceId,videoId:observedState.video.id});
         } else if (decision.action === 'stay') {
@@ -509,26 +650,45 @@ export class AutonomousWatch {
           if (beforeState.video?.id !== observedState.video.id || beforeState.video.paused !== false) throw failure('停留前作品或播放状态已变化，已停止自主观看，没有学习本次停留。', 'needs_user');
           const stayStartedAt = freshAt;
           this.phase='waiting';this.save({phase:this.phase,pendingRequests:0});await this.delayImpl(decision.seconds * 1000, this.abort.signal); this.assertAllowed();
-          current = await this.execute('douyin_status');
+          current = await this.execute('douyin_status', {}, { allowLoading: true });
           const afterState = current.state || current;
-          if (afterState.video?.id !== beforeState.video.id || afterState.video.paused !== false) throw failure('停留期间作品或播放状态已变化，已停止自主观看，没有学习本次停留。', 'needs_user');
+          if (playingWork(afterState) !== `video:${beforeState.video.id}`) {
+            current = await this.recoverAfterStay(current, beforeState.video.id);
+            this.save({ lastDecision: null });
+            this.onEvent({ type: 'watch.playback-recovered', message: '播放状态已恢复，重新观察当前作品。' });
+            continue;
+          }
           const stayed = this.viewing(evidenceId, stayBefore, current, stayStartedAt, `watch:${this.runId}:stay-view:${randomUUID()}`);
           if (stayed?.accepted === true) learned = this.behavior(evidenceId, 'stay')?.accepted === true;
         }
         if (learned && decision.topics.length) this.personaMemory.updateAgentInterests({ evidenceId, topics: decision.topics, reflection: decision.reflection }, { source: this.source });
-        if (['share', 'comment'].includes(decision.action)) current = await this.execute('douyin_status');
+        if (['share', 'comment', 'like', 'favorite'].includes(decision.action)) current = await this.execute('douyin_status');
       }
     } catch (error) {
       const reason = this.abort?.signal.aborted ? this.abort.signal.reason || error : error;
       status = reason.watchStatus || 'failed'; lastError = redact(reason.message || String(reason), [this.config.apiKey]);
+      lastErrorCode = stopActions.has(reason.code) ? reason.code : null;
     } finally {
+      await this.finishRun(status, lastError, lastErrorCode);
+    }
+    return this.state();
+  }
+  async finishRun(status, lastError, lastErrorCode = null) {
       this.playbackClosed=true;this.pendingRequests=0;this.phase='idle';clearInterval(this.heartbeat); clearTimeout(this.deadline);
+      if (this.shareProgress?.status === 'sharing') this.shareProgress = { ...this.shareProgress, status: 'paused' };
       try{this.videoLimits.settleWatching?.(this.source,{ownerId:this.runId});}catch{}
-      try { if (this.worker()?.owned) await this.controller.pauseForLimits?.(); } catch (error) { status = 'failed'; lastError ||= redact(error.message, [this.config.apiKey]); }
+      try {
+        if (this.worker()?.owned) {
+          await this.controller.pauseForLimits?.();
+          try {
+            await this.controller.releaseFinishedWatchMedia?.({ allowUnload: status === 'limited', failedFeed: status === 'failed' });
+          } catch { /* 页面回收独立于观看结果。 */ }
+        }
+      } catch (error) { status = 'failed'; lastError ||= redact(error.message, [this.config.apiKey]); }
       try { for(let attempt=0;;attempt++){try{if(this.worker()?.owned&&this.videoLimits.state().session?.id===this.sessionId)this.videoLimits.endSession?.({explicit:true,reason:'本次自动观看已结束，今日用量继续保留。'});break;}catch(error){if(error.code!=='VIDEO_CONTROL_BUSY'||attempt>=100)throw error;await delay(20);}} } catch(error) {status='failed';lastError ||= redact(error.message,[this.config.apiKey]);}
       try {
         for (let attempt = 0; ; attempt++) {
-          try { this.control(() => { const worker = this.worker(); if (worker?.owned) { this.save({ status, lastError,phase:'idle',pendingRequests:0 }); fs.unlinkSync(this.files.lock); const request = read(this.files.stop, null); if (request?.runId === this.runId) fs.unlinkSync(this.files.stop); } }); break; }
+          try { this.control(() => { const worker = this.worker(); if (worker?.owned) { this.save({ status, lastError, lastErrorCode,phase:'idle',pendingRequests:0,shareProgress:this.shareProgress ?? null }); fs.unlinkSync(this.files.lock); const request = read(this.files.stop, null); if (request?.runId === this.runId) fs.unlinkSync(this.files.stop); } }); break; }
           catch (error) { if (error.code !== 'WATCH_CONTROL_BUSY' || attempt >= 100) throw error; await delay(20); }
         }
       } catch (error) { status = 'failed'; lastError ||= error.message; }
@@ -541,7 +701,6 @@ export class AutonomousWatch {
         }
       } catch (error) { this.onEvent({ type: 'watch.report_failed', message: error.message || String(error) }); }
       this.onEvent({ type: `watch.${status}`, message: lastError || '自主观看已停止。' });
-    }
     return this.state();
   }
   async stop({ explicit = false } = {}) {

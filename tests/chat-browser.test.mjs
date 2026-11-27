@@ -6,6 +6,8 @@ import path from 'node:path';
 import { chromium } from '../playwright-runtime.mjs';
 import { ChatBrowser, MessageIdentityTracker, readContactDom, readConversationDom, readChatIdentityDom, readFollowingDom } from '../chat-browser.mjs';
 import { messageFingerprint } from '../chat-message.mjs';
+import { browserExecutionMode } from '../browser-mode.mjs';
+import { BrowserController, verifySharedVideoFrameProof } from '../core.mjs';
 
 let browser;
 before(async () => { browser = await chromium.launch({ channel: 'msedge', headless: true }); });
@@ -203,8 +205,10 @@ test('会话列表到达底部后等待延迟加载，不把短暂稳定当成�
   } finally { await f.chat.close(); }
 });
 
-async function fixture() {
-  const page = await browser.newPage();
+async function fixture({ sharedViewer = false } = {}) {
+  const context = sharedViewer ? await browser.newContext() : null;
+  const page = context ? await context.newPage() : await browser.newPage();
+  await page.context().route('https://fixture.local/**', route => route.abort());
   await page.setContent(`<div data-e2e="im-dialog">
     <div data-e2e="conversation-item" data-conversation-id="test-a" data-conversation-type="direct"><img src="https://fixture.local/avatar-a.png"><div class="conversationConversationItemtitle">测试甲</div><div class="unread-count">1</div><pre id="private-preview">不应读取的其他预览</pre></div>
     <div data-e2e="conversation-item" data-conversation-id="test-b" data-conversation-type="direct"><img src="https://fixture.local/avatar-b.png"><div class="conversationConversationItemtitle">测试乙</div></div>
@@ -232,7 +236,7 @@ async function fixture() {
       document.querySelector('[contenteditable]').textContent = '';
     });
   });
-  const controller = { withPage: async (callback, { signal } = {}) => { signal?.throwIfAborted(); return callback(page); }, close: async () => page.close() };
+  const controller = { withPage: async (callback, { signal } = {}) => { signal?.throwIfAborted(); return callback(page); }, close: async () => context ? context.close() : page.close() };
   const chat = new ChatBrowser({ controller });
   chat.following = [{ displayName: '测试甲', mutual: true }, { displayName: '测试乙', mutual: true }];
   return { page, chat };
@@ -1371,6 +1375,62 @@ test('聊天检查暂停当次背景视频，不拦截之后主动播放', async
   } finally { await chat.close(); }
 });
 
+test('个人主页消息面板不把群聊缺失的主页链接解析成个人身份', async () => {
+  const page = await browser.newPage();
+  try {
+    await page.route('https://www.douyin.com/**', route => route.fulfill({
+      contentType: 'text/html; charset=utf-8',
+      body: `<div data-e2e="im-dialog">
+        <div data-e2e="conversation-item" data-conversation-id="synthetic-group">
+          <div data-e2e="conversation-name">单名测试群</div>
+        </div>
+        <div data-e2e="conversation-item" data-conversation-id="synthetic-user">
+          <a href="/user/synthetic-contact"><span data-e2e="conversation-name">测试好友</span></a>
+        </div>
+        <div data-e2e="chat-page">
+          <div data-e2e="chat-header" data-conversation-id="synthetic-group">
+            <a href=""><span data-e2e="chat-title">单名测试群</span></a>
+          </div>
+        </div>
+      </div>`,
+    }));
+    await page.goto('https://www.douyin.com/user/synthetic-self');
+    const [group, direct] = await page.evaluate(readContactDom);
+    assert.equal(group.isGroup, true);
+    assert.equal(group.profileUrl, null);
+    assert.equal(direct.isGroup, false);
+    assert.equal(direct.profileUrl, 'https://www.douyin.com/user/synthetic-contact');
+    const selected = await page.evaluate(readChatIdentityDom);
+    const snapshot = await page.evaluate(readConversationDom);
+    assert.equal(selected.conversationType, 'group');
+    assert.equal(snapshot.conversationType, 'group');
+    assert.equal(snapshot.nativeId, group.nativeId);
+  } finally { await page.close(); }
+});
+
+test('无窗口聊天释放页面预览源，保留消息里的附件播放器', async () => {
+  const { page, chat } = await fixture();
+  try {
+    chat.controller.executionMode = async () => 'background';
+    await page.evaluate(() => {
+      const makeVideo = id => {
+        const video = document.createElement('video');
+        video.id = id;
+        video.src = 'data:video/mp4;base64,AAAA';
+        video.innerHTML = '<source src="data:video/mp4;base64,BBBB">';
+        return video;
+      };
+      document.body.append(makeVideo('preview'));
+      document.querySelector('[data-e2e="im-dialog"]').append(makeVideo('attachment'));
+    });
+    await chat.listContacts();
+    assert.equal(await page.locator('#preview').getAttribute('src'), null);
+    assert.equal(await page.locator('#preview source').getAttribute('src'), null);
+    assert.equal(await page.locator('#attachment').getAttribute('src'), 'data:video/mp4;base64,AAAA');
+    assert.equal(await page.locator('#attachment source').getAttribute('src'), 'data:video/mp4;base64,BBBB');
+  } finally { await chat.close(); }
+});
+
 test('解析没有公开链接的分享卡片，点击前紧邻检查时间限制', async () => {
   const { page, chat } = await fixture();
   try {
@@ -1385,36 +1445,100 @@ test('解析没有公开链接的分享卡片，点击前紧邻检查时间限�
 });
 
 test('无链接卡片点击没有导航或新窗口，原详情 URL 不能充当作品回读', async () => {
-  const { page, chat } = await fixture();
+  const { page, chat } = await fixture({ sharedViewer: true });
   try {
     const markup = await page.content();
     await page.route('https://www.douyin.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><body></body>' }));
     await page.goto('https://www.douyin.com/video/12345'); await page.setContent(markup);
     await page.evaluate(() => { document.querySelector('[data-e2e="msg-item-content"]').innerHTML = '<div class="MessageItemShareAwemecontainer" style="width:80px;height:40px">合成卡片</div>'; window.cardClicks = 0; document.querySelector('.MessageItemShareAwemecontainer').addEventListener('click', () => window.cardClicks += 1); });
     chat.controller.source = 'api-chat'; chat.controller.limits = () => ({ beforeAction: () => ({ allowed: true }) });
+    const viewer = await shareViewer(page, chat);
+    let viewerClicks = 0;
+    viewer.on('console', message => { if (message.text() === '合成卡片已点') viewerClicks++; });
+    await viewer.evaluate(() => document.querySelector('.MessageItemShareAwemecontainer').addEventListener('click', () => console.log('合成卡片已点')));
     const { contacts } = await chat.listContacts();
     const read = await chat.readConversation(contacts[0].id, { allowed: true });
     const resolved = await chat.openSharedVideo(contacts[0].id, read.messages[0].id, { allowed: true });
     assert.equal(resolved.opened, true); assert.equal(resolved.videoId, null); assert.equal(resolved.url, null);
     assert.match(resolved.reason, /未采用原详情页/);
-    assert.equal(await page.evaluate(() => window.cardClicks), 1);
+    assert.equal(viewerClicks, 1);
+    assert.equal(await page.evaluate(() => window.cardClicks), 0);
   } finally { await chat.close(); }
 });
 
 test('同作品 ID 在点击后新开窗口可回读，解析窗口暂停后关闭', async () => {
-  const { page, chat } = await fixture();
+  const { page, chat } = await fixture({ sharedViewer: true });
   try {
     const markup = await page.content(); let pauseCount = 0;
     await page.context().route('https://www.douyin.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><body><video id="fixture-video"></video><script>document.querySelector("video").pause=()=>console.log("fixture-paused")</script></body>' }));
     await page.goto('https://www.douyin.com/video/12345'); await page.setContent(markup);
-    await page.evaluate(() => { document.querySelector('[data-e2e="msg-item-content"]').innerHTML = '<div class="MessageItemShareAwemecontainer" style="width:80px;height:40px">合成卡片</div>'; document.querySelector('.MessageItemShareAwemecontainer').addEventListener('click', () => window.open('https://www.douyin.com/video/12345')); });
-    page.on('popup', popup => popup.on('console', message => { if (message.text() === 'fixture-paused') pauseCount += 1; }));
+    await page.evaluate(() => { document.querySelector('[data-e2e="msg-item-content"]').innerHTML = '<div class="MessageItemShareAwemecontainer" style="width:80px;height:40px">合成卡片</div>'; });
     chat.controller.source = 'api-chat'; chat.controller.limits = () => ({ beforeAction: () => ({ allowed: true }) });
+    const viewer = await shareViewer(page, chat);
+    await viewer.evaluate(() => document.querySelector('.MessageItemShareAwemecontainer').addEventListener('click', () => window.open('https://www.douyin.com/video/12345')));
+    viewer.on('popup', popup => popup.on('console', message => { if (message.text() === 'fixture-paused') pauseCount += 1; }));
     const { contacts } = await chat.listContacts();
     const read = await chat.readConversation(contacts[0].id, { allowed: true });
     const resolved = await chat.openSharedVideo(contacts[0].id, read.messages[0].id, { allowed: true });
     assert.equal(resolved.opened, true); assert.equal(resolved.videoId, '12345'); assert.equal(resolved.source, 'actual-opened-page-url');
-    assert.equal(pauseCount, 1); assert.equal(page.context().pages().length, 1);
+    assert.equal(pauseCount, 1); assert.equal(page.context().pages().length, 2);
+  } finally { await chat.close(); }
+});
+
+async function shareViewer(page, chat) {
+  const viewer = await page.context().newPage();
+  await viewer.route('https://www.douyin.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><body></body>' }));
+  await viewer.goto('https://www.douyin.com/video/12345');
+  await viewer.setContent(await page.content());
+  await viewer.evaluate(() => { window.name = 'deepseek-douyin-api'; });
+  chat.controller.resolveSharedVideoCard = (work, { signal } = {}) => work(viewer, () => signal?.throwIfAborted());
+  return viewer;
+}
+
+test('没有作品 ID 的私信卡片只在视频页跳转并采到正片，原聊天页和草稿保留', async () => {
+  const { page, chat } = await fixture({ sharedViewer: true });
+  try {
+    const markup = await page.content();
+    await page.route('https://www.douyin.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><body></body>' }));
+    await page.goto('https://www.douyin.com/?recommend=1');
+    await page.setContent(markup);
+    await page.evaluate(() => { document.querySelector('[data-e2e="msg-item-content"]').innerHTML = '<div class="MessageItemShareAwemecontainer" style="width:80px;height:40px">合成短剧</div>'; });
+    chat.controller.source = 'api-chat';
+    chat.controller.limits = () => ({ beforeAction: () => ({ allowed: true }) });
+    const viewer = await shareViewer(page, chat);
+    await viewer.evaluate(() => {
+      document.querySelector('.MessageItemShareAwemecontainer').onclick = () => {
+        history.pushState({}, '', '/video/76543212345678901');
+        document.querySelector('[data-e2e="im-dialog"]').remove();
+      };
+    });
+    await page.locator('[contenteditable="true"]').fill('原聊天草稿');
+    const { id: recipient } = (await chat.listContacts()).contacts[0];
+    const before = await chat.readConversation(recipient, { allowed: true });
+    assert.ok(!before.messages[0].media.videoId);
+    const resolved = await chat.openSharedVideo(recipient, before.messages[0].id, { allowed: true });
+    assert.equal(resolved.url, 'https://www.douyin.com/video/76543212345678901');
+    const bytes = fs.readFileSync(new URL('./fixtures/shared-canvas-synthetic.mp4', import.meta.url));
+    await viewer.route('**/synthetic-clip.mp4', route => route.fulfill({ contentType: 'video/mp4', body: bytes }));
+    await viewer.route(resolved.url, route => route.fulfill({ contentType: 'text/html', body: '<video src="/synthetic-clip.mp4" style="width:420px;height:240px" muted autoplay playsinline loop></video>' }));
+    await viewer.goto(resolved.url);
+    await viewer.waitForFunction(() => { const player = document.querySelector('video'); return player.readyState >= 2 && player.currentTime > 0.1; });
+    const controller = Object.create(BrowserController.prototype);
+    controller.source = 'verification';
+    controller.page = viewer;
+    controller.checkVideoLimits = async () => {};
+    controller.currentVideo = async () => viewer.locator('video');
+    controller.state = () => viewer.evaluate(id => {
+      const player = document.querySelector('video');
+      return { video: { id, time: player.currentTime, duration: player.duration, paused: player.paused, readyState: player.readyState } };
+    }, resolved.videoId);
+    const observation = await controller.captureSharedFrames(1.5);
+    assert.equal(verifySharedVideoFrameProof(observation, resolved.videoId), true);
+    assert.ok(new Set(observation.frames.map(frame => frame.data)).size > 1);
+    assert.equal(page.url(), 'https://www.douyin.com/?recommend=1');
+    assert.equal(await page.locator('[contenteditable="true"]').innerText(), '原聊天草稿');
+    assert.equal((await chat.readConversation(recipient, { allowed: true })).messages[0].id, before.messages[0].id);
+    assert.equal(page.context().pages().length, 2);
   } finally { await chat.close(); }
 });
 
@@ -1783,4 +1907,19 @@ test('群发送范围：填写期间或最终许可后稳定群ID变化仍拒绝
       assert.equal(await f.page.locator('[data-deepseek-send-token],[data-deepseek-send-marker]').count(), 0);
     } finally { await f.chat.close(); }
   }
+});
+
+
+test('后台聊天：浏览器真实参数证明无界面时，页面逻辑焦点不阻止读取和一次确认回复', async () => {
+  const { page, chat } = await fixture();
+  try {
+    chat.controller.executionMode = () => browserExecutionMode(browser);
+    assert.equal(await chat.controller.executionMode(), 'background');
+    await page.evaluate(() => Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }));
+    assert.equal(await chat.isForeground(page), false);
+    const { contacts } = await chat.listContacts();
+    const read = await chat.readConversation(contacts[1].id, { allowed: true }); assert.equal(read.conversation.id, contacts[1].id);
+    const result = await chat.sendMessage(contacts[1].id, '合成后台回复', { allowed: true });
+    assert.equal(result.confirmed, true); assert.equal(result.deliveryUncertain, false); assert.equal(await page.evaluate(() => window.sent), 1);
+  } finally { await chat.close(); }
 });

@@ -1,3 +1,4 @@
+import { AUTO_MEMORY_BYTES, bytes } from './memory-budget.mjs';
 import { validateMemoryContext, createAccessView, recordKey } from './memory-policy.mjs';
 import { recallHybrid } from './memory-retrieval.mjs';
 import { recallConversationHistory } from './memory-history.mjs';
@@ -73,8 +74,10 @@ export function createMemorySession({ host, loadRecords, getContext, semanticPro
       if(!fields)throw new TypeError('未知记忆工具。'); argumentsOnly(args,fields);
       return ({memory_recall:session.recall,memory_history:session.history,memory_sources:session.sources,memory_tone:session.tone})[name](args);
     },
-    buildReplyContext({query='',maxChars=6500,toneMode='auto'}={}) {
-      if(typeof query!=='string'||query.length>200||!Number.isInteger(maxChars)||maxChars<800||maxChars>9000)throw new TypeError('本轮上下文字数或查询无效。');
+    buildReplyContext({query='',maxChars=6500,maxBytes=AUTO_MEMORY_BYTES,toneMode='auto'}={}) {
+      if(typeof query!=='string'||query.length>200||!Number.isInteger(maxChars)||maxChars<800||maxChars>9000||!Number.isInteger(maxBytes)||maxBytes<0)throw new TypeError('本轮上下文字数或查询无效。');
+      const byteLimit=Math.min(AUTO_MEMORY_BYTES,maxBytes);
+      if(byteLimit<1000)return {text:'',metrics:{historyCount:0,recalledCount:0,toneCount:0,contextChars:0,tokenUpperBound:0}};
       const context=contextNow();
       // 同一同步读取窗口用于事实与回溯，避免两次来源读取得到互不相容的版本。
       const records=loadRecords({operation:'reply',context:copy(context),query});
@@ -91,11 +94,17 @@ export function createMemorySession({ host, loadRecords, getContext, semanticPro
       const suffix='\n保持同一人格，先回应当前消息。历史保留来源、时间和角色；assistant原话不等于对方确认事实。conflict表示同一事实尚有未解决的矛盾，不能擅自选一个当真。不得把其他主体的一般资料认作当前联系人经历。没有引用时只说这次未查到。摘要仅定位原话；不能凭历史声称本轮已观看、已执行或已经联系。手编人格与当前明确要求优先。';
       let toneText=formatToneContext(tone);
       const render=()=>prefix+JSON.stringify(data)+suffix+toneText;
-      while(render().length>maxChars && (data.facts.length||data.history.length||data.ownerContext.length)) {
-        if(data.facts.length)data.facts.pop();else if(data.history.length)data.history.pop();else data.ownerContext.shift();
+      const fits=()=>{const candidate=render();return candidate.length<=maxChars&&bytes(candidate)<=byteLimit;};
+      if(!fits())toneText='';
+      while(!fits() && (data.facts.length||data.history.length||data.ownerContext.length)) {
+        if(data.facts.length)data.facts.pop();
+        else if(data.history.length)data.history.pop();
+        else {
+          const lessRelevant=data.ownerContext.findIndex(row=>!row.focus);
+          data.ownerContext.splice(Math.max(0,lessRelevant),1);
+        }
       }
-      if(render().length>maxChars)toneText='';
-      const text=render();
+      const text=fits()?render():'';
       return {text,metrics:{...facts.metrics,historyCount:data.history.length,recalledCount:data.facts.length,toneCount:toneText?tone.entries.length:0,contextChars:text.length,tokenUpperBound:Buffer.byteLength(text,'utf8')}};
     },
   };

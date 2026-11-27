@@ -57,7 +57,7 @@ createRoot(document.getElementById('root')).render(<Harness/>);` }, outfile: pat
   assert.equal(await seconds.evaluate(input => input.validity.rangeUnderflow), true); assert.equal(posts.length, 0);
   await seconds.fill('600'); await page.getByText('已生效。', { exact: true }).waitFor();
   assert.deepEqual(posts, [{ route: '/api/task/limits', body: { maxSteps: 40, maxToolCalls: 45, timeoutSeconds: 600 } }]);
-  await page.getByText('这三个上限只控制手动模型任务。保存不会改变视频允许时段或本轮截止，也不会重置自主观看预算。', { exact: true }).waitFor();
+  await page.getByRole('heading', { name: '手动任务预算', exact: true }).waitFor();
   policy = { maxSteps: 25, maxToolCalls: 30, timeoutSeconds: 240 };
   await page.waitForFunction(() => document.querySelector('[aria-label="手动任务超时秒数"]').value === '240');
   assert.equal(await steps.inputValue(), '25'); assert.equal(await calls.inputValue(), '30');

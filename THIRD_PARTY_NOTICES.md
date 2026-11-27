@@ -2,7 +2,8 @@
 
 ## 浏览器、运行时及接口
 
-- Microsoft Playwright CLI 0.1.22、Playwright MCP 0.0.83 及锁定的 playwright-core：Apache-2.0，来源为 [Microsoft Playwright](https://github.com/microsoft/playwright)。依赖由包管理器安装，原 LICENSE 和版权声明保留在包内；分发时须保留 Apache-2.0 要求的声明和通知。
+- Microsoft playwright-core 1.64.0-alpha-1790635538000（复用此前运行包的锁定版本；1.5 开发版不再直接依赖 CLI/MCP）：Apache-2.0，来源为 [Microsoft Playwright](https://github.com/microsoft/playwright)。依赖由包管理器安装，原 LICENSE 和版权声明保留在包内；分发时须保留 Apache-2.0 要求的声明和通知。
+- YAML 2.9.0：ISC，来源为 [eemeli/yaml](https://github.com/eemeli/yaml)，复用独立运行包已锁定的版本；原 LICENSE 随依赖保留。
 - DSH 原生插件使用本机已安装产品的 runtime、schema、Cordis Loader 与附件接口，相关包的 MIT LICENSE 留在依赖内。独立软件的 UI 源码复用范围另见下文；账号配置和个人历史不随源码或软件提供。
 - DeepSeek API：按官方 Chat Completions 协议调用，使用用户已有账户配置；接口服务使用与费用另受供应商条款约束。
 - 相关抖音方案研究：`chu557/douyin-plugin-dsh-plugin`（MIT）、`AnacondaKC/dsh-douyin`（BSD-3-Clause）、`q35888/dsh-plugin-browser`（MIT）。本项目没有复制这三个抖音插件的业务实现。
@@ -14,6 +15,8 @@
 续火花另核对 MIT 项目 [HRuiCcc/dy-xuhuohua](https://github.com/HRuiCcc/dy-xuhuohua) 及 MIT 与 NOTICE 项目 [dr-190/ScriptCat-Douyin-Fire-Helper](https://github.com/dr-190/ScriptCat-Douyin-Fire-Helper)；未复制其发送实现或新增其运行依赖。固定提交、未采用原因与本地复用范围见 [功能复用与来源](docs/reuse.md)。来源核查不代表新版插件已实机加载，也不证明评论发布、平台火花或最小化持续播放已通过。
 
 ## 实际保存的媒体源码
+
+PDF 正文提取使用 [unpdf 1.4.0](https://github.com/unjs/unpdf) 分发的 [PDF.js 5.4.296](https://github.com/mozilla/pdf.js/tree/v5.4.296) 独立解析包。MIT 与 Apache-2.0 许可证以及原始包摘要随 `media/vendor/pdf/` 分发。
 
 下列三个社区项目的原始源码和 MIT LICENSE 已复制到 `media/vendor/`，不是仅安装依赖或参考名称。固定 commit、原始路径、SHA256 和 `modified:false` 记录见 [media/PROVENANCE.json](media/PROVENANCE.json)；本机核对全部记录的文件哈希与清单一致。
 

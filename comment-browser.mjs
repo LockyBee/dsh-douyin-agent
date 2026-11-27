@@ -6,6 +6,7 @@ import { BrowserController, readPageState } from './core.mjs?v=9';
 import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { validateCommentText } from './autonomous-comments.mjs';
+import { publicDiscussionExcerpts, repeatsPublicDiscussion } from './comment-novelty.mjs';
 
 const stop = signal => signal?.throwIfAborted();
 const cleanDraft = value => String(value ?? '').replace(/[\u200B-\u200F\uFEFF]/g, '').trim();
@@ -323,13 +324,17 @@ export function readCommentSelfIdentity() {
 // 只读公开评论的编号、正文和自身发出状态；不采集其他评论者的账号、昵称或头像。
 export function readCommentDom(input) {
   const expectedVideoId = typeof input === 'string' ? input : input?.expectedVideoId;
+  const discussion = input?.discussion === true;
+  const detailed = discussion && input.detailed === true;
   const trustedOwnProfileId = typeof input === 'object' && input !== null ? input.ownProfileId : null;
-  if (typeof input !== 'string' && (!input || Object.keys(input).some(key => !['expectedVideoId', 'ownProfileId'].includes(key)) || typeof trustedOwnProfileId !== 'string' || !/^[A-Za-z0-9_-]{5,300}$/.test(trustedOwnProfileId))) return { rows: [] };
+  if (discussion) {
+    if (location.origin !== 'https://www.douyin.com' || typeof expectedVideoId !== 'string' || !/^\d{1,64}$/.test(expectedVideoId) || Object.keys(input).some(key => !['expectedVideoId', 'discussion', 'detailed'].includes(key))) return { rows: [] };
+  } else if (typeof input !== 'string' && (!input || Object.keys(input).some(key => !['expectedVideoId', 'ownProfileId'].includes(key)) || typeof trustedOwnProfileId !== 'string' || !/^[A-Za-z0-9_-]{5,300}$/.test(trustedOwnProfileId))) return { rows: [] };
   const visible = element => { const r = element.getBoundingClientRect(), s = getComputedStyle(element); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth && s.display !== 'none' && s.visibility !== 'hidden'; };
   const profileId = anchor => {
     try { const url = new URL(anchor.getAttribute('href'), 'https://www.douyin.com/'); return url.origin === 'https://www.douyin.com' && !url.username && !url.password ? /^\/user\/([A-Za-z0-9_-]{5,300})\/?$/.exec(url.pathname)?.[1] || null : null; } catch { return null; }
   };
-  const privateArea = '[data-e2e="im-dialog"],[data-e2e="conversation-item"]';
+  const privateArea = '[data-e2e="im-dialog"],[data-e2e="conversation-item"],[data-e2e="danmaku-container"]';
   const ownNavigation = [...document.querySelectorAll('.tab-user_self a[href]')].filter(anchor => visible(anchor) && !anchor.closest(`${privateArea},[data-e2e="comment-item"]`) && anchor.textContent.trim() === '我的');
   const navigationProfile = ownNavigation.length === 1 ? profileId(ownNavigation[0]) : null;
   if (trustedOwnProfileId && (ownNavigation.length !== 1 || navigationProfile && navigationProfile !== trustedOwnProfileId)) return { rows: [] };
@@ -341,6 +346,19 @@ export function readCommentDom(input) {
     const id = /(?:^|\s)video_(\d+)(?:\s|$)/.exec(player.className || '')?.[1]; if (id) pageVideoIds.add(id);
   }
   if (pageVideoIds.size && (pageVideoIds.size !== 1 || !pageVideoIds.has(expectedVideoId))) return { rows: [] };
+  const panels = discussion ? [...document.querySelectorAll('.comment-mainContent,[data-e2e="comment-list"]')].filter(element =>
+    visible(element) && !element.closest(privateArea) && !element.parentElement?.closest('.comment-mainContent,[data-e2e="comment-list"]')) : [];
+  if (discussion && panels.length !== 1) return { rows: [] };
+  if (discussion) {
+    const owner = panels[0].closest('[data-aweme-id],[data-video-id]');
+    if (['data-aweme-id', 'data-video-id'].some(name => owner?.hasAttribute(name) && owner.getAttribute(name) !== expectedVideoId)) return { rows: [] };
+  }
+  const rowSelector = detailed ? '[data-e2e="comment-item"],[data-e2e="comment-reply-item"]' : '[data-e2e="comment-item"]';
+  const ownedBy = (row, selector) => [...row.querySelectorAll(selector)].filter(element => element.closest(rowSelector) === row);
+  const commentIdOf = row => {
+    const ids = [row.getAttribute('data-comment-id'), /^comment_(\d+)$/.exec(row.id)?.[1], ...ownedBy(row, '[id^="tooltip_"]').map(element => /^tooltip_(\d+)$/.exec(element.id)?.[1])].filter(Boolean);
+    return new Set(ids).size === 1 ? ids[0] : null;
+  };
   const readOwnedCommentText = (content, row) => {
     let visited = 0, images = 0, length = 0;
     const inlineTags = new Set(['SPAN','DIV','P','B','I','EM','STRONG','A','BR','IMG']);
@@ -348,7 +366,7 @@ export function readCommentDom(input) {
     const walk = node => {
       if (++visited > 180) return null;
       if (node.nodeType === 3) return append(node.nodeValue || '');
-      if (node.nodeType !== 1 || node.closest(privateArea) || node.closest('[data-e2e="comment-item"]') !== row || !inlineTags.has(node.tagName)) return null;
+      if (node.nodeType !== 1 || node.closest(privateArea) || node.closest(rowSelector) !== row || !inlineTags.has(node.tagName)) return null;
       const style = getComputedStyle(node);
       if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return '';
       if (node.tagName === 'BR') return append('\n');
@@ -367,16 +385,48 @@ export function readCommentDom(input) {
     return value === null ? null : value.trim();
   };
 
+  const nativeLikeCount = (row, commentId) => {
+    const fields = Object.getOwnPropertyNames(row).filter(key => key.startsWith('__reactFiber$'));
+    if (fields.length !== 1) return null;
+    const own = (value, key) => value && Object.getOwnPropertyDescriptor(value, key)?.value;
+    let fiber = own(row, fields[0]);
+    const found = new Set();
+    for (let level = 0; fiber && level < 4; level++) {
+      const info = own(own(fiber, 'memoizedProps'), 'commentInfo');
+      const id = own(info, 'cid'), count = own(info, 'diggCount');
+      if ((typeof id === 'string' || Number.isSafeInteger(id)) && String(id) === commentId && Number.isSafeInteger(count) && count >= 0) found.add(count);
+      fiber = own(fiber, 'return');
+    }
+    return found.size === 1 ? found.values().next().value : null;
+  };
+  const countLikes = (row, owned, commentId) => {
+    const labels = [row.getAttribute('data-like-count'), ...owned('[data-e2e="comment-like-count"],[data-e2e="comment-digg-count"],.comment-like-count,[data-e2e="comment-like"],[data-e2e="comment-digg"]').filter(visible).flatMap(element => [element.getAttribute('aria-label'), element.textContent])];
+    const counts = new Map();
+    for (const label of labels) {
+      const displayed = label?.trim().replace(/^(?:点赞|取消点赞)\s*[：:]?\s*/, '');
+      const match = /^(\d+(?:,\d{3})*(?:\.\d{1,3})?)([万亿wWkK])?$/.exec(displayed || '');
+      if (!match) continue;
+      const multiplier = ({ 万: 10000, 亿: 100000000, w: 10000, k: 1000 })[match[2]?.toLowerCase()] ?? 1;
+      const value = Math.round(Number(match[1].replaceAll(',', '')) * multiplier);
+      if (Number.isSafeInteger(value)) counts.set(value, { likeCount: value, likeCountText: displayed });
+    }
+    const displayed = counts.size === 1 ? counts.values().next().value : null;
+    const exact = nativeLikeCount(row, commentId);
+    return exact === null ? displayed ?? { likeCount: null } : { likeCount: exact, likeCountText: displayed?.likeCountText ?? String(exact) };
+  };
+
   const result = [];
-  for (const row of document.querySelectorAll('[data-e2e="comment-item"]')) {
-    if (!visible(row) || row.closest(privateArea) || row.parentElement?.closest('[data-e2e="comment-item"]')) continue;
-    const owned = selector => [...row.querySelectorAll(selector)].filter(element => element.closest('[data-e2e="comment-item"]') === row);
+  for (const row of (discussion ? panels[0] : document).querySelectorAll(rowSelector)) {
+    const parent = row.parentElement?.closest(rowSelector);
+    if (!visible(row) || row.closest(privateArea) || (!detailed && parent)) continue;
+    const owned = selector => ownedBy(row, selector);
     const ancestorVideoId = row.closest('[data-aweme-id],[data-video-id]')?.getAttribute('data-aweme-id') || row.closest('[data-video-id]')?.getAttribute('data-video-id');
     if (ancestorVideoId && ancestorVideoId !== expectedVideoId) continue;
     const videoBound = ancestorVideoId === expectedVideoId || pageVideoIds.size === 1 && pageVideoIds.has(expectedVideoId);
-    const ids = [row.getAttribute('data-comment-id'), /^comment_(\d+)$/.exec(row.id)?.[1], ...owned('[id^="tooltip_"]').map(element => /^tooltip_(\d+)$/.exec(element.id)?.[1])].filter(Boolean);
-    const rawId = new Set(ids).size === 1 ? ids[0] : null;
-    const content = owned('[data-e2e="comment-content"],.comment-item-content,.FduGc_lz > .Sh1Da424');
+    const rawId = commentIdOf(row);
+    const baseContent = '[data-e2e="comment-content"],.comment-item-content,.FduGc_lz > .Sh1Da424';
+    const candidates = owned(detailed ? `${baseContent},[data-comment-content]` : baseContent);
+    const content = detailed ? candidates.filter(element => !candidates.some(parent => parent !== element && parent.contains(element))) : candidates;
     const textNode = content.length === 1 ? content[0] : null;
     const reconstructed = textNode ? readOwnedCommentText(textNode, row) : null;
     const text = reconstructed === null ? '' : reconstructed;
@@ -385,13 +435,65 @@ export function readCommentDom(input) {
     const selfMarker = row.getAttribute('data-is-self') === 'true' || row.getAttribute('data-author-is-self') === 'true' || owned('[data-e2e="comment-self"]').length === 1;
     const mine = videoBound && (!trustedOwnProfileId || !authorProfile || authorProfile === trustedOwnProfileId) && (selfMarker || Boolean(ownProfile && authorProfile && ownProfile === authorProfile));
     const status = row.getAttribute('data-send-status') || row.getAttribute('data-comment-status') || '';
-    const labels = owned('[data-e2e="comment-status"],.comment-item-tag-text').map(element => element.textContent.trim());
+    const labels = owned('[data-e2e="comment-status"],.comment-item-tag-text,[data-e2e="comment-author-tag"]').filter(element => !detailed || visible(element)).map(element => element.textContent.trim());
     const pending = /^(?:sending|pending|reviewing)$/.test(status) || owned('[data-e2e="comment-pending"],[aria-busy="true"],[class*="sending" i]').length > 0 || labels.some(value => /^(?:待审核|审核中|评论审核中|发送中|发布中)$/.test(value));
     const failed = /^(?:failed|rejected|error)$/.test(status) || owned('[data-e2e="comment-failed"],[class*="sendFail"]').length > 0 || labels.some(value => /^(?:审核未通过|发布失败|评论未发布|发送失败)$/.test(value));
+    if (discussion) {
+      if (videoBound && rawId && /^\d{1,64}$/.test(rawId) && text && !pending && !failed) {
+        if (detailed) {
+          const isReply = Boolean(parent || row.hasAttribute('data-parent-comment-id') || row.matches('[data-e2e="comment-reply-item"]'));
+          const explicitParent = row.getAttribute('data-parent-comment-id');
+          const nestedParent = parent ? commentIdOf(parent) : null;
+          if (explicitParent && nestedParent && explicitParent !== nestedParent) continue;
+          if (isReply && !labels.includes('作者') && row.getAttribute('data-is-author') !== 'true') continue;
+          result.push({ commentId: rawId, text, ...countLikes(row, owned, rawId), ...(isReply ? { parentCommentId: explicitParent || nestedParent || null } : {}) });
+        } else result.push({ text });
+      }
+      if (result.length >= (detailed ? 60 : 24)) break;
+      continue;
+    }
     const sent = /^(?:sent|published|success)$/.test(status) || mine && /^\d{1,64}$/.test(rawId || '') && !pending && !failed;
     result.push({ commentId: /^\d{1,64}$/.test(rawId || '') ? rawId : null, videoId: ancestorVideoId || expectedVideoId, text, mine, sent, pending, failed });
   }
-  return { rows: result };
+  return detailed ? { panelVisible: true, rows: result } : { rows: result };
+}
+
+export async function readPublicCommentsFromPage(page, { videoId, limit = 5, signal } = {}) {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new TypeError('每次读取 1 到 10 条公开热评。');
+  const state = await page.evaluate(readPageState);
+  videoId ??= state.video?.id;
+  const check = async () => { stop(signal); assertVideo(await page.evaluate(readPageState), videoId); stop(signal); };
+  if (typeof videoId !== 'string' || !/^\d{1,64}$/.test(videoId)) throw new Error('请先打开可核对的抖音视频。');
+  await check();
+  const snapshot = () => page.evaluate(readCommentDom, { expectedVideoId: videoId, discussion: true, detailed: true });
+  let current = await snapshot();
+  if (!current.panelVisible) {
+    const toggle = page.locator('[data-e2e="video-player-comment"],[data-e2e="video-comment-icon-container"]')
+      .filter({ visible: true });
+    if (await toggle.count() === 1 && await toggle.evaluate(element => !element.closest('[data-e2e="im-dialog"],[data-e2e="comment-item"],[data-e2e="comment-list"]'))) {
+      await check();
+      await toggle.click({ timeout: 1800 });
+    }
+  }
+  await waitCommentState(async () => ((current = await snapshot()).rows.length > 0), check, signal, 2000);
+  const top = current.rows.filter(row => !Object.hasOwn(row, 'parentCommentId'))
+    .sort((a, b) => (b.likeCount ?? -1) - (a.likeCount ?? -1)).slice(0, limit);
+  const replies = current.rows.filter(row => row.parentCommentId);
+  for (const item of top) {
+    await check();
+    const identity = `:is([data-comment-id="${item.commentId}"],#comment_${item.commentId},:has(#tooltip_${item.commentId}))`;
+    const rows = page.locator(`:is([data-e2e="comment-list"],.comment-mainContent) [data-e2e="comment-item"]${identity}`);
+    const expand = rows.getByText(/^展开\s*(?:\d+\s*条\s*)?回复$/, { exact: true }).filter({ visible: true });
+    if (await expand.count() !== 1 || !await expand.evaluate(element => !element.closest('[data-e2e="comment-content"],.comment-item-content,[data-comment-content],[data-e2e="im-dialog"],[contenteditable="true"]') && (element.closest('button,[role="button"],[data-e2e="comment-reply-expand"]') || getComputedStyle(element).cursor === 'pointer'))) continue;
+    await expand.click({ timeout: 1500 });
+    await waitCommentState(async () => {
+      const next = (await snapshot()).rows.filter(row => row.parentCommentId === item.commentId);
+      for (const reply of next) if (!replies.some(row => row.commentId === reply.commentId)) replies.push(reply);
+      return next.length > 0;
+    }, check, signal, 700);
+  }
+  await check();
+  return { videoId, status: current.panelVisible ? 'ready' : 'unavailable', scope: 'visible-comment-panel', rows: top.map(({ commentId, ...row }) => ({ ...row, authorReplies: replies.filter(reply => reply.parentCommentId === commentId).slice(0, 5).map(({ commentId: _id, parentCommentId: _parent, ...reply }) => reply) })) };
 }
 
 function assertVideo(state, expectedVideoId) {
@@ -413,6 +515,16 @@ export class CommentBrowser {
   record(operation) { const value = this.receipts(), index = value.operations.findIndex(item => item.operationId === operation.operationId), stored = preserveReceiptBaseline(index < 0 ? null : value.operations[index], operation, 'public-comment'); if (index < 0) value.operations.push(stored); else value.operations[index] = stored; write(this.receiptsFile, value); }
   acquire() { fs.mkdirSync(this.stateDir, { recursive: true }); let descriptor; try { descriptor = fs.openSync(this.guardFile, 'wx', 0o600); } catch (error) { if (error.code === 'EEXIST') throw new Error('其他评论仍在处理，或发布锁需要核对；未抢锁重试。'); throw error; } const owner = { pid: process.pid, token: randomUUID() }; try { fs.writeFileSync(descriptor, JSON.stringify(owner)); } finally { fs.closeSync(descriptor); } return () => { const current = JSON.parse(fs.readFileSync(this.guardFile, 'utf8')); if (current?.pid === owner.pid && current.token === owner.token) fs.unlinkSync(this.guardFile); }; }
   async gate(signal) { stop(signal); const state = this.videoLimits.state(); if (!state.allowed) throw new Error(state.reason || '有限观看时段已结束，未发布评论。'); }
+  async discussion(expectedVideoId, { signal } = {}) {
+    await this.gate(signal);
+    return this.controller.withPage(async page => {
+      assertVideo(await page.evaluate(readPageState), expectedVideoId);
+      const snapshot = await page.evaluate(readCommentDom, { expectedVideoId, discussion: true });
+      stop(signal);
+      assertVideo(await page.evaluate(readPageState), expectedVideoId);
+      return publicDiscussionExcerpts(snapshot.rows.map(row => row.text));
+    }, { signal, launch: false, create: false });
+  }
   async post({ expectedVideoId, text, ...extra } = {}, { signal: parentSignal, authorize, autonomousRunId } = {}) {
     if (typeof expectedVideoId !== 'string' || !/^\d{1,64}$/.test(expectedVideoId) || Object.keys(extra).length) throw new TypeError('评论只能指定当前作品编号与纯文字。');
     text = validateCommentText(text);
@@ -445,6 +557,8 @@ export class CommentBrowser {
         if (cleanDraft(await draft()) || await editor.locator('img,video,audio,a,[data-slate-void="true"]').count() || await hasFile()) return { confirmed: false, deliveryUncertain: false, videoId: expectedVideoId, reason: '评论输入框已有草稿或媒体内容，已保留原内容。' };
         if (await root.locator('[data-e2e="comment-reply-target"],.PPsJmqBy').filter({ visible: true }).count() || await editor.getAttribute('aria-label').then(value => /回复\s*[@＠]/.test(value || ''))) return { confirmed: false, deliveryUncertain: false, videoId: expectedVideoId, reason: '当前输入框处于回复他人的状态，未改发回复或@。' };
         const before = await page.evaluate(readCommentDom, { expectedVideoId, ownProfileId });
+        const discussion = await page.evaluate(readCommentDom, { expectedVideoId, discussion: true });
+        if (repeatsPublicDiscussion(text, discussion.rows.map(row => row.text))) return { confirmed: false, skipped: true, code: 'COMMENT_DISCUSSION_DUPLICATE', deliveryUncertain: false, videoId: expectedVideoId };
         operation.baseline = createCommentReceiptBaseline(operation, { rows: before.rows, ownProfileId, text });
         const knownIds = new Set(operation.baseline.knownIds);
         let monitoring = true, polling, prepared = false, releaseDispatch, submitPointer;

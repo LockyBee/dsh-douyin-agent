@@ -10,7 +10,7 @@ const { version: productVersion } = JSON.parse(await fs.readFile(path.join(root,
 const ui = JSON.parse(await fs.readFile(path.join(runtime, 'public', 'build-info.json'), 'utf8'));
 if (ui.version !== productVersion) throw new Error('软件界面版本与桌面版本不一致，请重新构建界面和后台资源。');
 await fs.mkdir(output, { recursive: true });
-const entries = ['main.mjs', 'api-process.mjs', 'prepare-api-runtime.mjs', 'media-key-store.mjs', 'startup-navigation.mjs', 'preload.cjs', 'update-service.mjs', 'update-launcher.mjs'];
+const entries = ['main.mjs', 'api-process.mjs', 'prepare-api-runtime.mjs', 'media-key-store.mjs', 'startup-navigation.mjs', 'preload.cjs', 'update-service.mjs', 'update-launcher.mjs', 'browser-verification.mjs'];
 for (const name of entries) await fs.copyFile(name === 'media-key-store.mjs' ? path.join(root, '..', 'media', 'key-store.mjs') : path.join(root, 'src', name), path.join(output, name));
 await fs.copyFile(path.join(root,'assets/app.ico'),path.join(output,'app.ico'));
 const allowed = new Set([...entries, 'app.ico', 'build-manifest.json']);

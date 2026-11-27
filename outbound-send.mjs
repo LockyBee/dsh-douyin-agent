@@ -55,8 +55,9 @@ export class OutboundCoordinator {
         }
         if (stat.size === 0) {
           const observedAt = Date.now(); emptyObservedAt ??= observedAt;
-          const age = observedAt - Math.floor(stat.mtimeMs), waiting = observedAt - emptyObservedAt;
-          if (!Number.isFinite(age) || age < 0 || age >= lockInitializationGraceMs || waiting >= lockInitializationGraceMs) throw failure('共同发送空锁未在启动宽限内写完，需要核对；未自动移除。', 'OUTBOUND_RECOVERY_REQUIRED');
+          const reportedAge = observedAt - Math.floor(stat.mtimeMs), age=Math.max(0,reportedAge), waiting = observedAt - emptyObservedAt;
+          // 文件时间可能略快于墙钟；只在宽限内等待，始终不移除空锁或进入发送。
+          if (!Number.isFinite(reportedAge) || reportedAge < -lockInitializationGraceMs || age >= lockInitializationGraceMs || waiting >= lockInitializationGraceMs) throw failure('共同发送空锁未在启动宽限内写完，需要核对；未自动移除。', 'OUTBOUND_RECOVERY_REQUIRED');
           if (Date.now() - started >= this.waitMs) throw failure('另一项聊天或分享仍在发送，已保留待发内容，请稍后重试。', 'OUTBOUND_BUSY');
           await delay(Math.min(40, Math.max(1, lockInitializationGraceMs - age), Math.max(1, lockInitializationGraceMs - waiting), Math.max(1, this.waitMs - (Date.now() - started))), undefined, { signal });
           continue;

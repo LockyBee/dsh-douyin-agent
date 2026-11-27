@@ -42,10 +42,10 @@ export function interactionPresence({chat={},share={},watch={},modelReady=false,
     if (!selected.length) return result('preparing',false,'准备中','请先选择允许互动的好友或群聊。');
     if (friend?.status==='waiting-settings') return result('preparing',false,'准备中','正在更新许可名单，完成后自动恢复回复。');
     if (friend?.status==='preparing') return result('preparing',false,'正在准备回复通道',friend.waitReason || '正在准备受管聊天入口。');
-    if (chat.recovery?.requiresUserAction===true || contacts.some(item=>item.recovery?.requiresUserAction===true)) return result('attention',false,'需要完成登录或验证','请在专用浏览器完成登录或验证码后继续。');
+    if (friend?.lastErrorCode==='CHAT_LOGIN_REQUIRED' || chat.recovery?.requiresUserAction===true || contacts.some(item=>item.recovery?.requiresUserAction===true)) return result('attention',false,'需要完成登录或验证','请在专用浏览器完成登录或验证码后继续。');
     const hasAutomatic = autoPendingCount+autoRetryCount>0;
     const friendAction = actionable({reason:friend?.waitReason || friend?.lastError, recovery:friend?.recovery});
-    if (friend?.waitReason && (!hasAutomatic || friendAction)) return result('attention',false,'等待准备回复通道',friend.waitReason);
+    if (friend?.waitReason && (!chat.running || !hasAutomatic || friendAction)) return result('attention',false,'等待准备回复通道',friend.waitReason);
     if (friend?.lastError && (!hasAutomatic || friendAction)) return result('attention',false,'回复暂缓',friendAction ? '请完成专用浏览器登录或验证，并确认许可设置。' : '回复服务暂未恢复，详细原因保留在好友互动。');
     if (chat.starting || friend?.status==='starting') return result('preparing',false,'准备中','正在核对会话身份并准备接收消息。');
     if (!chat.running || chat.worker?.alive!==true || !freshAt(chat.worker?.heartbeatAt,5000)) return result('attention',false,'回复未就绪','回复服务未运行或连接已失效，暂不能确认在线。');

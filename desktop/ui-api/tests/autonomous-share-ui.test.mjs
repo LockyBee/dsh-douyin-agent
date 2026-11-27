@@ -18,8 +18,8 @@ test('好友总开关在观看中可关闭，分享异常收据独立核对且�
   const limits = { protocol: 'task-limits-v1', policy: { maxSteps: 20, maxToolCalls: 20, timeoutSeconds: 180 }, hardLimits: TASK_LIMIT_BOUNDS, configured: false };
   const persona = { revision: 'synthetic-behavior', manualText: '合成手编人格', personaText: '合成生效人格', interests: [
     { key: 'pixel-topic', topic: '合成像素识别主题', signal: 'neutral', counts: { like: 0, dislike: 0, neutral: 1 }, basis: '合成依据：只有主题识别，尚不足以判断喜欢。', evidence: [{ evidenceId: 'synthetic-pixel', reflection: '识别出猫咪不等于喜欢。', source: 'api', watchedSeconds: 0, watchRatio: 0, actions: { stay: 0, skip: 0, share: 0 }, basis: '合成依据：只有主题识别。' }] },
-    { key: 'behavior-topic', topic: '合成观看行为主题', signal: 'like', counts: { like: 1, dislike: 0, neutral: 0 }, basis: '合成依据：实际观看并确认继续停留。', evidence: [{ evidenceId: 'synthetic-behavior', reflection: '继续看这类内容。', source: 'dsh', watchedSeconds: 10, watchRatio: 0.5, actions: { stay: 1, skip: 0, share: 0 }, basis: '合成依据：实际观看10秒，继续停留1次。' }] },
-  ], recentObservations: [{ id: 'synthetic-observation', title: '合成行为观察作品', kind: 'visual', frameCount: 1, playback: { time: 12, duration: 20, paused: true }, watchedSeconds: 10, watchRatio: 0.5, actions: { stay: 1, skip: 0, share: 0 }, basis: '合成依据：实际观看10秒，继续停留1次。' }] };
+    { key: 'behavior-topic', topic: '合成观看行为主题', signal: 'like', counts: { like: 1, dislike: 0, neutral: 0 }, basis: '合成依据：实际观看并确认继续停留。', evidence: [{ evidenceId: 'synthetic-behavior', reflection: '继续看这类内容。', source: 'dsh', watchedSeconds: 10, watchRatio: 0.5, actions: { stay: 1, skip: 0, share: 0 }, basis: '已核对观看 10 秒（50%），并确认继续停留。', basisCode: 'sustained-watch' }] },
+  ], recentObservations: [{ id: 'synthetic-observation', title: '合成行为观察作品', kind: 'visual', frameCount: 1, playback: { time: 12, duration: 20, paused: true }, watchedSeconds: 10, watchRatio: 0.5, actions: { stay: 1, skip: 0, share: 0 }, basis: '已核对观看 10 秒（50%），并确认继续停留。', basisCode: 'sustained-watch' }] };
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
@@ -86,6 +86,7 @@ test('好友总开关在观看中可关闭，分享异常收据独立核对且�
   await receipts.getByText('原因：旧记录没有保存详细失败原因。', { exact: true }).waitFor();
   await page.getByRole('button', { name: /◉ 自主观看/ }).click();
   const neutral = page.locator('.interest-card').filter({ hasText: '合成像素识别主题' }); assert.equal(await neutral.getByText('待观察', { exact: true }).isVisible(), true); assert.equal(await neutral.getByText('感兴趣', { exact: true }).count(), 0);
-  const observed = page.locator('.observation-entry').filter({ hasText: '合成行为观察作品' }); await observed.getByText('已核实观看 10 秒', { exact: true }).waitFor(); await observed.getByText('观看比例 50%', { exact: true }).waitFor(); await observed.getByText('继续停留 1 次', { exact: true }).waitFor();
+  const observed = page.locator('.observation-entry').filter({ hasText: '合成行为观察作品' });
+  await observed.getByText('观看 10 秒（50%） · 继续停留 1 次', { exact: true }).waitFor();
   const writes = calls.filter(call => call.method === 'POST'); assert.equal(writes.every(call => ['/api/interactions/configure', '/api/share/resolve'].includes(call.route)), true); assert.equal(writes.every(call => call.token === 'synthetic-share-session'), true); assert.deepEqual(errors, []);
 });

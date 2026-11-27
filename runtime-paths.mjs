@@ -29,6 +29,7 @@ export function resolveRuntimePaths({ env = process.env, home = homedir(), sourc
     for (const field of Object.keys(FIELDS)) if (stored[field] !== undefined) absolute(stored[field], `运行位置 ${field}`);
     if (stored.memoryDir !== undefined) absolute(stored.memoryDir, '运行位置 memoryDir');
     if (stored.memoryDbPath !== undefined) absolute(stored.memoryDbPath, '运行位置 memoryDbPath');
+    if (stored.personaFile !== undefined) absolute(stored.personaFile, '运行位置 personaFile');
     if (stored.memoryDbPath !== undefined && stored.memoryDir !== undefined && path.dirname(path.normalize(stored.memoryDbPath)) !== path.normalize(stored.memoryDir)) throw new Error();
   } catch (error) {
     if (error.code !== 'ENOENT') throw new Error('运行位置记录无法读取或格式错误；未切换到另一套状态。');
@@ -37,6 +38,9 @@ export function resolveRuntimePaths({ env = process.env, home = homedir(), sourc
   const selected = (field, fallback) => absolute(env[FIELDS[field]] || stored[field] || fallback, field);
   const stateDir = selected('stateDir', path.join(sourceRoot, 'state'));
   const mediaRuntimeRoot = selected('mediaRuntimeRoot', mediaRoot);
+  const personaFile = env.DOUYIN_PERSONA_FILE ? absolute(env.DOUYIN_PERSONA_FILE, '共同人格文件')
+    : stored.personaFile ? absolute(stored.personaFile, '共同人格文件') : null;
+  if (env.DOUYIN_PERSONA_FILE && stored.personaFile && personaFile !== path.normalize(stored.personaFile)) throw new Error('共同人格文件与已登记位置不一致。');
   let memoryDbPath;
   if (env.DEEPSEEK_SHARED_MEMORY_DB?.trim()) memoryDbPath = absolute(env.DEEPSEEK_SHARED_MEMORY_DB, '共享记忆数据库');
   else if (stored.memoryDbPath !== undefined) memoryDbPath = absolute(stored.memoryDbPath, '运行位置 memoryDbPath');
@@ -46,7 +50,7 @@ export function resolveRuntimePaths({ env = process.env, home = homedir(), sourc
     memoryDbPath = path.normalize(legacyMemoryDbPath);
   } else memoryDbPath = path.join(home, '.dsh', 'douyin-browser', 'memory', 'shared.sqlite');
   return {
-    locationFile, stateDir, memoryDir: path.dirname(memoryDbPath), memoryDbPath,
+    locationFile, stateDir, memoryDir: path.dirname(memoryDbPath), memoryDbPath, personaFile,
     mediaEnvFile: selected('mediaEnvFile', path.join(mediaRoot, '.env')),
     mediaSettingsFile: selected('mediaSettingsFile', path.join(mediaRoot, 'settings.local.json')),
     mediaRuntimeRoot,

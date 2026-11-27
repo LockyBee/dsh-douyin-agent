@@ -2,9 +2,12 @@ import { mkdirSync, writeFileSync, renameSync, existsSync, readFileSync } from '
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { chromium } from './playwright-runtime.mjs';
+import { connectDedicatedBrowser } from './browser-launcher.mjs';
 
 const execute = promisify(execFile);
 const versionOf = value => /^\d+\.\d+\.\d+\.\d+$/.exec(String(value || '').trim())?.[0] || null;
@@ -32,13 +35,79 @@ async function readEdgeFileVersion(file) {
   const result = await execute(shell, ['-NoProfile', '-NonInteractive', '-Command', '[System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:DOUYIN_EDGE_VERSION_FILE).ProductVersion'], { env, timeout: 3000, windowsHide: true, maxBuffer: 2048 });
   return versionOf(result.stdout);
 }
-export async function probeEdgeInstallation({ env = process.env, candidates, exists = existsSync, readVersion = readEdgeFileVersion } = {}) {
+function findEdgeExecutable({ env = process.env, candidates, exists = existsSync } = {}) {
   const roots = [env.LOCALAPPDATA, env.PROGRAMFILES, env['PROGRAMFILES(X86)'], ...(env.HOMEDRIVE ? [path.join(env.HOMEDRIVE + path.sep, 'Program Files'), path.join(env.HOMEDRIVE + path.sep, 'Program Files (x86)')] : [])].filter(Boolean);
   const files = candidates || roots.map(root => path.join(root, 'Microsoft', 'Edge', 'Application', 'msedge.exe'));
-  const file = files.find(candidate => exists(candidate));
+  return files.find(candidate => exists(candidate));
+}
+export async function probeEdgeInstallation({ env, candidates, exists, readVersion = readEdgeFileVersion } = {}) {
+  const file = findEdgeExecutable({ env, candidates, exists });
   if (!file) return { installed: false, version: null, channel: 'msedge' };
   let version = null; try { version = versionOf(await readVersion(file)); } catch {}
   return { installed: true, version, channel: 'msedge' };
+}
+
+export async function launchWindowsVisibleEdge({ profile, port, spawnEdge = spawn } = {}) {
+  const executable = findEdgeExecutable();
+  if (!executable) throw Object.assign(new Error('未找到可启动的 Microsoft Edge。'), { code: 'ENOENT' });
+  // 原生启动保留 Edge 的真实标签焦点，后续 CDP 连接使用 noDefaults。
+  const child = spawnEdge(executable, [
+    `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1',
+    '--autoplay-policy=no-user-gesture-required', '--no-first-run', '--no-default-browser-check',
+    '--disable-background-mode', '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding', '--disable-extensions', 'about:blank',
+  ], { windowsHide: true, stdio: 'ignore' });
+  const host = new EventEmitter();
+  let launchFailure, exited = false, socket;
+  child.once('error', error => { launchFailure = error; });
+  const finished = new Promise(resolve => child.once('exit', () => {
+    exited = true;
+    host.emit('close');
+    resolve();
+  }));
+  const useVerifiedBrowser = async (signal, action) => {
+    const browser = await connectDedicatedBrowser(socket, { signal });
+    let session;
+    try {
+      session = await browser.newBrowserCDPSession();
+      const { processInfo } = await session.send('SystemInfo.getProcessInfo');
+      const owners = processInfo.filter(item => item.type === 'browser');
+      if (exited || owners.length !== 1 || owners[0].id !== child.pid) throw new Error('调试端口没有绑定本次启动的专用 Edge。');
+      signal.throwIfAborted();
+      return await action?.(session, browser);
+    } finally {
+      await session?.detach().catch(() => {});
+      await browser.close().catch(() => {});
+    }
+  };
+  try {
+    const signal = AbortSignal.timeout(20_000), endpoint = `http://127.0.0.1:${port}/json/version`;
+    while (!socket) {
+      signal.throwIfAborted();
+      if (launchFailure) throw launchFailure;
+      if (exited) throw new Error('专用 Edge 启动进程已退出，请检查资料目录是否被占用。');
+      const response = await fetch(endpoint, { signal: AbortSignal.any([signal, AbortSignal.timeout(750)]), redirect: 'error' }).catch(() => null);
+      if (response?.ok) {
+        const value = (await response.json()).webSocketDebuggerUrl;
+        const prefix = `ws://127.0.0.1:${port}/devtools/browser/`;
+        if (typeof value !== 'string' || !value.startsWith(prefix) || !/^[a-f0-9-]{36}$/i.test(value.slice(prefix.length))) throw new Error('专用 Edge 的调试地址无效。');
+        socket = value;
+      } else await delay(100, undefined, { signal });
+    }
+    await useVerifiedBrowser(signal);
+    if (exited) throw new Error('专用 Edge 已退出。');
+    host.close = async () => {
+      if (exited) return;
+      await useVerifiedBrowser(AbortSignal.timeout(5000), async (session, browser) => {
+        try { await session.send('Browser.close'); } catch (error) { if (browser.isConnected()) throw error; }
+      });
+      if (!exited) await Promise.race([finished, delay(5000, undefined, { ref: false })]);
+    };
+    return host;
+  } catch (error) {
+    if (!exited && child.pid) child.kill();
+    throw error;
+  }
 }
 const focusFailure = error => Object.assign(new Error('专用 Edge 未能清除焦点模拟，已保留窗口和草稿，请重新自检。', { cause: error }), { code: 'EDGE_FOCUS_RESET_FAILED' });
 
@@ -111,8 +180,8 @@ export async function installNativeFocusReset(context, { onFailure = () => {}, t
   } catch (error) { await close(); throw fault || focusFailure(error); }
 }
 
-export async function runBrowserHost({ profile, controlDir, port, chromiumImpl = chromium, probeInstallation = probeEdgeInstallation, logger = console, processImpl = process } = {}) {
-  if (!profile || !controlDir || !Number.isInteger(port) || port < 1024 || port > 65535) return { started: false, exitCode: 2 };
+export async function runBrowserHost({ profile, controlDir, port, mode = 'visible', launchVisible, chromiumImpl = chromium, probeInstallation = probeEdgeInstallation, logger = console, processImpl = process } = {}) {
+  if (!profile || !controlDir || !Number.isInteger(port) || port < 1024 || port > 65535 || !['visible', 'background'].includes(mode)) return { started: false, exitCode: 2 };
   mkdirSync(controlDir, { recursive: true });
   const stateFile = path.join(controlDir, 'browser.json'), startedAt = Date.now(), instanceId = randomUUID(); let context, installation, focusFailed = false, closed = false, exited = false, readyPublished = false;
   const writeState = (ready, extra = {}, initial = false) => {
@@ -121,7 +190,7 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
       if (owner.instanceId !== instanceId || owner.pid !== processImpl.pid || owner.profile !== profile || owner.port !== port) return false;
     }
     const temporary = `${stateFile}.${processImpl.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ pid: processImpl.pid, profile, port, ready, startedAt, instanceId, ...extra }));
+    writeFileSync(temporary, JSON.stringify({ pid: processImpl.pid, profile, port, mode, headless: mode === 'background', ready, startedAt, instanceId, ...extra }));
     renameSync(temporary, stateFile);
     return true;
   };
@@ -129,16 +198,17 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
   try {
     writeState(false, {}, true);
     try { installation = await probeInstallation(); } catch {}
-    context = await chromiumImpl.launchPersistentContext(profile, {
-      channel: 'msedge', headless: false, viewport: null, ignoreDefaultArgs: ['--mute-audio'],
-      args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--autoplay-policy=no-user-gesture-required'],
+    const nativeVisible = mode === 'visible' && typeof launchVisible === 'function';
+    context = nativeVisible ? await launchVisible({ profile, port }) : await chromiumImpl.launchPersistentContext(profile, {
+      channel: 'msedge', headless: mode === 'background', viewport: mode === 'background' ? { width: 1440, height: 900 } : null, ignoreDefaultArgs: ['--mute-audio'],
+      args: [`--remote-debugging-port=${port}`, '--remote-debugging-address=127.0.0.1', '--autoplay-policy=no-user-gesture-required', ...(mode === 'background' ? ['--enable-automation', '--disable-gpu'] : [])],
     });
     context.on('close', () => {
       closed = true;
       try { writeState(false, { closedAt: Date.now(), ...(focusFailed ? { launchFailure: { code: 'EDGE_FOCUS_RESET_FAILED', message: '宿主焦点检查失败，专用浏览器已退出。' } } : {}) }); } catch {}
       exit(focusFailed || !readyPublished ? 1 : 0);
     });
-    const nativeFocus = await installNativeFocusReset(context, { onFailure: error => {
+    const nativeFocus = nativeVisible ? null : await installNativeFocusReset(context, { onFailure: error => {
       focusFailed = true;
       const failure = { code: 'EDGE_FOCUS_RESET_FAILED', message: error.message, browserVersion: versionOf(installation?.version), details: sanitizeBrowserFailure(error.cause?.stack || error.cause?.message || error.message) };
       void (async () => {
@@ -151,10 +221,10 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
         if (!persisted) { try { logger.error('焦点故障无法写入状态，正常结束专用浏览器，避免继续使用旧 ready 状态。'); } catch {} await context.close().catch(() => {}); }
       })().catch(() => {});
     } });
-    nativeFocus.assertHealthy();
+    nativeFocus?.assertHealthy();
     if (closed || !writeState(true, { browserVersion: versionOf(installation?.version) })) throw new Error('专用浏览器已退出或宿主归属已变化。');
     readyPublished = true;
-    logger.log('专用抖音 Edge 已启动。');
+    logger.log(mode === 'background' ? '专用抖音 Edge 已在后台启动。' : '专用抖音 Edge 已启动。');
     for (const signal of ['SIGINT', 'SIGTERM']) processImpl.on(signal, () => context.close().finally(() => exit(0)));
     return { started: true, exitCode: 0 };
   } catch (error) {
@@ -166,7 +236,8 @@ export async function runBrowserHost({ profile, controlDir, port, chromiumImpl =
   }
 }
 if (process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()) {
-  const [profile, controlDir, portText] = process.argv.slice(2);
-  const result = await runBrowserHost({ profile, controlDir, port: Number(portText) });
+  const [profile, controlDir, portText, mode = 'visible'] = process.argv.slice(2);
+  const result = await runBrowserHost({ profile, controlDir, port: Number(portText), mode,
+    launchVisible: process.platform === 'win32' ? launchWindowsVisibleEdge : undefined });
   if (!result.started) process.exit(result.exitCode);
 }

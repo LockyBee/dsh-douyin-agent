@@ -1,6 +1,6 @@
 {
   "name": "dsh-douyin-browser-local",
-  "version": "1.4.7",
+  "version": "1.5.0",
   "type": "module",
   "description": "DSH 原生抖音工具与独立 DeepSeek 本地助手",
   "license": "MIT",
@@ -33,8 +33,8 @@
     "test:memory-integration": "node --test tests/conversation-memory.test.mjs tests/memory-history.test.mjs tests/qq-history-reader.test.mjs tests/tone-router.test.mjs tests/memory-policy-review.test.mjs tests/runtime-conversation-memory.test.mjs"
   },
   "dependencies": {
-    "@playwright/cli": "0.1.22",
-    "@playwright/mcp": "0.0.83"
+    "playwright-core": "1.64.0-alpha-1790635538000",
+    "yaml": "2.9.0"
   },
   "files": [
     "chat-output.mjs",
@@ -79,11 +79,13 @@
     "native-persona-context.mjs",
     "native-settings.mjs",
     "native-settings-transport.mjs",
+    "native-verification.mjs",
     "native-spark-greeting.mjs",
     "native-watch-decision.mjs",
     "outbound-send.mjs",
     "receipt-baseline.mjs",
     "persona-memory.mjs",
+    "persona-evidence-journal.mjs",
     "playwright-runtime.mjs",
     "public-comment-agent.mjs",
     "qq-sync.mjs",
@@ -96,6 +98,11 @@
     "video-limits.mjs",
     "watch-mode.mjs",
     "media/index.mjs",
+    "media/pdf-text-worker.mjs",
+    "media/vendor/pdf/pdfjs.mjs",
+    "media/vendor/pdf/LICENSE-PDFJS",
+    "media/vendor/pdf/LICENSE-unpdf",
+    "media/vendor/pdf/PROVENANCE.json",
     "media/key-store.mjs",
     "media/local_whisper.py",
     "media/mimo_bridge.py",
@@ -126,6 +133,7 @@
     "assets/brand.png",
     "assets/PROVENANCE.json",
     "conversation-memory.mjs",
+    "memory-budget.mjs",
     "memory-policy.mjs",
     "memory-retrieval.mjs",
     "memory-history.mjs",
@@ -134,7 +142,22 @@
     "tone-router.mjs",
     "tone-examples.json",
     "runtime-conversation-memory.mjs",
-    "conversation-history-store.mjs"
+    "conversation-history-store.mjs",
+    "comment-novelty.mjs",
+    "video-reactions.mjs",
+    "reaction-browser.mjs",
+    "browser-mode.mjs",
+    "yunsur-mcp.mjs",
+    "yunsur-video.mjs",
+    "yunsur-chat.mjs",
+    "yunsur-background.mjs",
+    "yunsur-media.mjs",
+    "yunsur-share.mjs",
+    "yunsur-interactions.mjs",
+    "yunsur-live.mjs",
+    "yunsur-hls.mjs",
+    "yunsur-attachments.mjs",
+    "atomic-file.mjs"
   ],
   "exports": {
     ".": "./dsh-plugin.mjs",

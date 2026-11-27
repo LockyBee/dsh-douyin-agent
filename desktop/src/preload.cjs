@@ -8,5 +8,8 @@ contextBridge.exposeInMainWorld('douyinDesktop', Object.freeze({
   clearApiKey: () => ipcRenderer.invoke('douyin:clear-key'),
   openMemoryFolder: () => ipcRenderer.invoke('douyin:open-memory'),
   openPersonaFolder: () => ipcRenderer.invoke('douyin:open-persona'),
+  openBrowserVerification: () => ipcRenderer.invoke('douyin:open-browser-verification'),
+  checkBrowserVerification: () => ipcRenderer.invoke('douyin:check-browser-verification'),
+  readBrowserVerificationStatus: () => ipcRenderer.invoke('douyin:browser-verification-status'),
   saveMediaKey: value => ipcRenderer.invoke('douyin:save-media-key', value),
 }));

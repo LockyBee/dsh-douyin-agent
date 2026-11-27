@@ -49,10 +49,14 @@ test('单条语音经选定本地后端转写，转写不落水位且临时音�
   assert.equal(fs.readFileSync(f.service.watermarkFile,'utf8').includes('合成语音原句'),false);
 });
 
-test('未启用本地语音或后端不可用时不获取音频、不调用模型',async t=>{
+test('缺少本地语音后端时保留文字和语音卡片，确认只回复一次',async t=>{
   for(const options of [{settings:{enabled:false,backend:'local-whisper'}},{settings:{enabled:true,backend:'mimo'}},{status:{enabled:true,backend:'local-whisper',backends:{'local-whisper':{available:false}}}}]){
-    const f=fixture(t,options);f.browser.captureVoiceMessage=async()=>assert.fail('尚未允许本地转写，不能采集音频');await start(f);f.messages.push(voice());await f.service.poll();
-    assert.equal(f.requests.length,0);assert.equal(f.sent.length,0);assert.equal(f.service.state().contacts[0].status,'paused');
+    const f=fixture(t,options);f.browser.captureVoiceMessage=async()=>assert.fail('尚未允许本地转写，不能采集音频');await start(f);
+    f.messages.push(voice(),incoming('new-text',{text:'混发了一段语音'}));await f.service.poll();await f.service.poll();
+    assert.equal(f.requests.length,1);assert.equal(f.sent.length,1);assert.equal(f.service.state().contacts[0].status,'ready');
+    assert.match(JSON.stringify(f.requests[0].messages),/single-message-media-unavailable/);
+    assert.match(JSON.stringify(f.requests[0].messages),/混发了一段语音/);
+    assert.doesNotMatch(JSON.stringify(f.requests[0].messages),/"transcription"/);
   }
 });
 
@@ -86,11 +90,78 @@ test('伪装no-speech但返回范围或字段不合法时仍暂停',async t=>{
   }
 });
 
-test('语音转写抛错或取消时finally释放音频，不迟发',async t=>{
+test('转写失败只影响语音理解，停止时释放音频且不发出',async t=>{
   for(const cancel of [false,true]){
     const f=fixture(t);await start(f);f.adapter.transcribeAudio=async()=>{if(cancel)f.service.stop();throw new Error('合成转写中断');};f.messages.push(voice());await f.service.poll();
-    assert.deepEqual(f.released,[f.capture.captureId]);assert.equal(f.sent.length,0);assert.equal(f.requests.length,0);
+    assert.deepEqual(f.released,[f.capture.captureId]);assert.equal(f.sent.length,cancel?0:1);assert.equal(f.requests.length,cancel?0:1);
   }
+});
+
+test('私信同一批文字、语音、图像、表情、附件视频、文件和引用合并一次回复', async t => {
+  const f = fixture(t);
+  const metadata = 'visible-message-metadata-only';
+  f.browser.canCaptureAttachment = message => ['file', 'video-attachment'].includes(message.media?.type);
+  f.browser.captureMessage = async (_id, messageId) => {
+    const media = f.messages.find(item => item.id === messageId).media;
+    const frame = { mimeType: 'image/png', data: pixel };
+    const result = { messageId, media };
+    if (media.type === 'file') return { ...result, frames: [], understandingScope: 'single-message-file-text',
+      fileText: { text: '合成文件正文', filename: '合成.txt' } };
+    if (media.type === 'video-attachment') return { ...result, understandingScope: 'single-message-video-samples',
+      videoAttachment: { durationSeconds: 8 }, frames: [1, 3, 7].map(time => ({ ...frame, time, timeSemantics: 'approximate-seek-position' })) };
+    return { ...result, understandingScope: 'single-message-image', frames: [frame] };
+  };
+  await start(f);
+  f.messages.push(
+    incoming('video-new', { media: { type: 'video-attachment', understandingScope: metadata } }),
+    voice(),
+    incoming('image-new', { media: { type: 'image' } }),
+    incoming('emoji-new', { media: { type: 'emoji', label: '合成表情' } }),
+    incoming('file-new', { media: { type: 'file', title: '合成.txt', understandingScope: metadata } }),
+    incoming('question-new', { text: '把上面的内容一起说一下', reference: { text: '合成旧问题' } }),
+  );
+  await f.service.poll();
+  await f.service.poll();
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.sent.length, 1);
+  const parts = f.requests[0].messages.at(-1).content;
+  const details = JSON.stringify(f.requests[0].messages);
+  for (const value of ['合成语音原句', '合成文件正文', '合成旧问题', '把上面的内容一起说一下', 'image-new', 'emoji-new', 'video-new']) assert.ok(details.includes(value), value);
+  assert.equal(parts.filter(part => part.type === 'image_url').length, 4);
+  assert.equal(parts.filter(part => part.type === 'text').some(part => part.text.includes('"approximateSampleTimes":[1,3]')), true);
+  assert.doesNotMatch(details, /single-message\.wav|media:synthetic-audio/);
+});
+
+test('群里先发附件再艾特时保留发送者，插入的另一成员附件不会进入画面', async t => {
+  const f = fixture(t, { group: true }), memberId = `member:${'6'.repeat(64)}`;
+  const captured = [], capture = f.browser.captureMessage;
+  f.browser.captureMessage = async (id, messageId) => { captured.push(messageId); return capture(id, messageId); };
+  await start(f);
+  f.messages.push(
+    incoming('image-a', { memberId, media: { type: 'image' } }),
+    incoming('image-b', { memberId: `member:${'7'.repeat(64)}`, media: { type: 'image' } }),
+  );
+  await f.service.poll();
+  assert.equal(f.sent.length, 0);
+  f.messages.push(incoming('ask', { memberId, text: '@大肥鱼，看看上面的图片', mentionedSelf: true }));
+  await f.service.poll();
+  await f.service.poll();
+  assert.deepEqual(captured, ['image-a']);
+  assert.equal(f.sent.length, 1);
+  const transcript = f.requests[0].messages.filter(message => typeof message.content === 'string').map(message => message.content).join('\n');
+  assert.match(transcript, /"replyTarget":true[^\n]+\n消息正文：@大肥鱼/);
+  assert.match(transcript, /"replyTarget":false[^\n]+\n消息正文：\{"messageId":"image-a"/);
+});
+
+test('附件回读发现真实验证页时，同批文字也不外发', async t => {
+  const f = fixture(t);
+  f.browser.captureMessage = async () => ({ verificationRequired: true, frames: [] });
+  await start(f);
+  f.messages.push(incoming('image-new', { media: { type: 'image' } }), incoming('text-new', { text: '同批文字' }));
+  await f.service.poll();
+  assert.equal(f.requests.length, 0);
+  assert.equal(f.sent.length, 0);
+  assert.equal(f.service.state().contacts[0].recovery.requiresUserAction, true);
 });
 
 test('转写期间原语音被替换时丢弃转写，不让模型回复旧媒体',async t=>{

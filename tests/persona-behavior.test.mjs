@@ -193,8 +193,13 @@ test('合成旧数据：旧画面喜好只读降为待观察，保留来源、�
   assert.equal(f.store.snapshot().interests[0].signal, 'like'); assert.equal(f.store.snapshot().manualText, read.manualText);
 });
 
-test('合成跨进程：API 与 DSH 写同一观看区间和样本时只累计一次且保留人格', async t => {
+test('合成跨进程：API 与 DSH 跨过原文件上限时只累计一次且保留人格', async t => {
   const f = fixture(t), evidence = f.observe(); f.observe('100001', 20, 'dsh'); f.topic(evidence);
+  const state = JSON.parse(fs.readFileSync(f.store.stateFile, 'utf8'));
+  state.syntheticPadding = '';
+  state.syntheticPadding = 'x'.repeat(8 * 1024 * 1024 - 32 - Buffer.byteLength(JSON.stringify(state) + '\n'));
+  const original = JSON.stringify(state) + '\n';
+  fs.writeFileSync(f.store.stateFile, original);
   const module = new URL('../persona-memory.mjs', import.meta.url).href;
   const script = `
     import {PersonaMemory} from ${JSON.stringify(module)};
@@ -204,6 +209,8 @@ test('合成跨进程：API 与 DSH 写同一观看区间和样本时只累计�
     store.recordBehavior({evidenceId:process.argv[2],action:'stay',sampleId:'同一个跨进程停留',confirmed:true},{source});
   `;
   await Promise.all(['api', 'dsh'].map(source => run(process.execPath, ['--input-type=module', '-e', script, f.memoryDir, evidence.evidenceId, source], { timeout: 30_000 })));
+  assert.equal(f.store.readEvidence().journal.count, 2);
+  assert.equal(fs.readFileSync(f.store.stateFile, 'utf8'), original);
   const snapshot = f.store.snapshot();
   assert.equal(snapshot.recentObservations[0].watchedSeconds, 8); assert.equal(snapshot.recentObservations[0].actions.stay, 1);
   assert.equal(snapshot.interests[0].signal, 'like'); assert.equal(snapshot.interests[0].evidenceCount, 1);

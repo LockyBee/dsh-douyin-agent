@@ -55,15 +55,15 @@ for(const [label,source,isNative] of [['软件',software,false],['插件',native
 });
 
 test('软件轮询子请求失败会显示来源并撤下旧在线快照，读回成功后只清相应状态错误',async()=>{
-  const code=between(software,'    let alive = true, polling = false, ticks = 0;','    pollRef.current = poll;');
+  const code=between(software,'    let alive = true, polling = false, checkingVerification = false, ticks = 0;','    pollRef.current = poll;');
   let failing=true,pollError='',interactions={presence:{label:'旧在线'}},connected=false;
-  const names=['client','bootRef','bridge','revision','currentTask','setEvents','setWatchSynced','setBoot','setSettings','publicSettings','setConnected','setConnectionError','setRunning','submitLock','setTasks','restoredSelection','setSelectedTask','mergeEvents','setBrowser','setSchedule','setInteractions','setVideo','setTaskLimits','setMode','setComments','setChat','setAudio','setWatch','setShare','setPersona','setPollError'];
+  const names=['client','bootRef','bridge','revision','currentTask','setEvents','setWatchSynced','setBoot','setSettings','publicSettings','setConnected','setConnectionError','setRunning','submitLock','setTasks','restoredSelection','setSelectedTask','mergeEvents','setBrowser','setSchedule','setInteractions','setVideo','setTaskLimits','setMode','setComments','setChat','setAudio','setWatch','setShare','setPersona','setPollError','setBrowserMode','setReactions'];
   const noop=()=>{},client={bootstrap:async()=>({}),request:async route=>{
     if(route.startsWith('/api/state'))return {running:false,events:[]};
     if(route==='/api/interactions/state') {if(failing)throw requestFailure(Object.assign(new Error('signal timed out'),{name:'TimeoutError'}),'读取好友在线状态',{timeoutMs:20_000});return {presence:{label:'新核实在线'}};}
     return {};
   }};
-  const values=[client,{current:{}},null,{current:0},{current:null},noop,noop,noop,noop,noop,value=>{connected=value;},noop,noop,{current:false},noop,{current:false},noop,()=>[],noop,noop,value=>{interactions=value;},noop,noop,noop,noop,noop,noop,noop,noop,noop,value=>{pollError=value;}];
+  const values=[client,{current:{}},null,{current:0},{current:null},noop,noop,noop,noop,noop,value=>{connected=value;},noop,noop,{current:false},noop,{current:false},noop,()=>[],noop,noop,value=>{interactions=value;},noop,noop,noop,noop,noop,noop,noop,noop,noop,value=>{pollError=value;},noop,noop];
   const poll=new Function(...names,`${code};return poll;`)(...values);
   await poll();assert.equal(connected,true);assert.equal(interactions,null);assert.match(pollError,/读取好友在线状态.*超时/);
   failing=false;await poll();assert.equal(interactions.presence.label,'新核实在线');assert.equal(pollError,'');

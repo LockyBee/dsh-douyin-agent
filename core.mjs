@@ -11,12 +11,16 @@ import { VideoLimits } from './video-limits.mjs';
 import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs?v=10';
 import { PersonaMemory } from './persona-memory.mjs?v=10';
 import { BrowserLauncher, connectDedicatedBrowser } from './browser-launcher.mjs';
-import { pauseExistingVideoPages } from './browser-pause.mjs';
-import { browserPageLabel, browserPageLock, findSharedPage, adoptSharedPreparePage } from './browser-pages.mjs';
+import { evaluateDedicatedPages, pauseExistingVideoPages, releaseRetiredFeedBuffers } from './browser-pause.mjs';
+import { browserPageAliases, browserPageLabel, browserPageLock, findSharedPage, adoptSharedPreparePage, isRecommendationAddress } from './browser-pages.mjs';
 import { StoryboardFrameStore } from './video-storyboard.mjs';
+import { BrowserMode, browserExecutionMode, ownedBrowserExecutionMode, validateBrowserMode } from './browser-mode.mjs';
+import { checkPrivateVideoAccess } from './chat-message.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const SHARED_CAPTURE_MODE = Symbol('shared-video-frame-capture');
+const PRIVATE_VIDEO_VIEWERS = new WeakSet();
+const PRIVATE_VIDEO_TASK = 'private-message-video';
 const SHARED_PROOFS = globalThis[Symbol.for('dafeiyu.shared-video-frame-proofs.v1')] ||= new WeakMap();
 const SHARED_PROOF_ISSUER = 'dafeiyu-shared-video-capture-v1';
 const sharedHash = value => createHash('sha256').update(value).digest('hex');
@@ -90,15 +94,19 @@ async function acquireNativeVideoLease(directory,signal) {
 }
 const { browserProfileDir: PROFILE, browserControlDir: CONTROL } = resolveRuntimePaths();
 const RECOMMEND = 'https://www.douyin.com/?recommend=1&from_nav=1';
+const BACKGROUND_CHAT_HOME = 'https://www.douyin.com/user/self';
 const PORT = 9227;
 
-export async function observeChatSharedWork({ url, videoId, signal, videoLimits, createInspector, createWatch, onObservation }) {
-  if (typeof videoId !== 'string' || !/^\d{1,64}$/.test(videoId) || url !== `https://www.douyin.com/video/${videoId}`) throw new Error('分享作品的公开地址未通过核对。');
-  if(onObservation!==undefined&&typeof onObservation!=='function')throw new TypeError('视频续看决策须为本机回调。');
-  const check = () => { signal?.throwIfAborted(); const state = videoLimits.state(); if (!state.allowed) throw Object.assign(new Error(state.reason || '当前不在允许观看的时段或额度内。'),{code:'GROUP_VIDEO_WAIT_BUDGET'}); };
+async function withChatSharedViewer({ signal, videoLimits, createInspector, createWatch, privateVideoAccess, videoId }, useViewer) {
+  const check = () => {
+    signal?.throwIfAborted();
+    if (checkPrivateVideoAccess(privateVideoAccess, videoId)) return;
+    const state = videoLimits.state();
+    if (!state.allowed) throw Object.assign(new Error(state.reason || '当前不在允许观看的时段或额度内。'), { code: 'GROUP_VIDEO_WAIT_BUDGET' });
+  };
   check();
   const inspector = createInspector(), watch = createWatch(inspector);
-  let releaseManual, opened = false;
+  let releaseManual;
   try {
     if (watch.state().running) {
       await watch.stop({ explicit: true });
@@ -109,52 +117,73 @@ export async function observeChatSharedWork({ url, videoId, signal, videoLimits,
       }
     }
     check();
-    releaseManual = watch.claimManual('chat-shared-video');
-    await inspector.execute('douyin_open_video', { url }, { signal });
-    opened = true;
-    check();
-    await inspector.execute('douyin_play', {}, { signal });
-    if(!onObservation)return await inspector.execute('douyin_observe', { seconds: 3 }, { signal, sharedCaptureMode: SHARED_CAPTURE_MODE });
-    let seconds=3,last,segments=0,progress=0,frameCount=0,tailStarted=0;
-    const current=async()=>{
-      const result=await inspector.execute('douyin_status',{}, {signal}),state=result.state||result;
-      if(state.video?.id!==videoId||state.loginRequired||state.verificationRequired||state.privateChatVisible||state.unsupportedPage||state.livePreview?.recognized)throw new Error('续看期间作品或页面状态改变，未继续采用旧视频。');
-      return state;
-    };
-    const finish=reason=>Object.assign(last,{watchOutcome:{stopReason:reason,segments,playbackProgressSeconds:progress,frames:frameCount,reachedEnd:reason==='video-ended',fullVideoObserved:false}});
-    for(;;){
-      check();let state=await current();
-      if(last&&state.video.ended===true)return finish('video-ended');
-      let remaining=Number.isFinite(state.video.duration)?state.video.duration-state.video.time:null;
-      if(last&&state.video.loop===false&&remaining!==null&&remaining<0.5){
-        tailStarted||=performance.now();if(performance.now()-tailStarted>5000)throw Object.assign(new Error('视频尾部没有继续推进，保留已看部分等待恢复。'),{code:'GROUP_VIDEO_PLAYBACK_STALLED'});
-        await wait(100,signal);continue;
-      }
-      tailStarted=0;
-      const sampleSeconds=remaining!==null&&remaining>0.4?Math.max(0.2,Math.min(seconds,remaining-0.25)):seconds;
-      let observed;
-      try{observed=await inspector.execute('douyin_observe',{seconds:sampleSeconds},{signal,sharedCaptureMode:SHARED_CAPTURE_MODE});}
-      catch(error){if(last&&(await current()).video.ended===true)return finish('video-ended');throw error;}
-      segments++;progress+=observed.observation?.playbackProgressSeconds||0;frameCount+=observed.frames?.length||0;last=observed;
-      const first=observed.frames?.[0]?.captureInterval?.before,atEnd=observed.state?.video?.ended===true||Boolean(first?.loop&&observed.observation.playbackProgressSeconds>=first.duration-first.time);
-      await inspector.execute('douyin_pause',{}, {signal});
-      const decision=await onObservation(observed,{segments,playbackProgressSeconds:progress,frames:frameCount,reachedEnd:atEnd});
-      signal?.throwIfAborted();
-      if(!decision||!['continue','stop'].includes(decision.action)||decision.action==='continue'&&(!Number.isFinite(decision.seconds)||decision.seconds<0.2||decision.seconds>30))throw new Error('分享视频续看决策格式无效，未擅自结束或续看。');
-      if(atEnd)return finish('video-ended');
-      if(decision.action==='stop')return finish('model-choice');
-      check();seconds=decision.seconds;await current();
-      await inspector.execute('douyin_play',{}, {signal});
-    }
-  } finally {
-    try {
-      if (opened) await inspector.execute('douyin_pause', {});
-    } finally {
+    releaseManual = watch.claimManual(privateVideoAccess ? PRIVATE_VIDEO_TASK : 'chat-shared-video');
+    if (privateVideoAccess) {
+      PRIVATE_VIDEO_VIEWERS.add(inspector);
       inspector.limitsEnabled = false;
-      try { await inspector.close(); }
-      finally { try { await watch.close(); } finally { await releaseManual?.(); } }
     }
+    return await useViewer(inspector, check);
+  } finally {
+    inspector.limitsEnabled = false;
+    try { await inspector.close(); }
+    finally { try { await watch.close(); } finally { await releaseManual?.(); } }
   }
+}
+
+export async function observeChatSharedWork({ url, videoId, signal, videoLimits, createInspector, createWatch, onObservation, includeComments = false, privateVideoAccess }) {
+  if (typeof videoId !== 'string' || !/^\d{1,64}$/.test(videoId) || url !== `https://www.douyin.com/video/${videoId}`) throw new Error('分享作品的公开地址未通过核对。');
+  if (onObservation !== undefined && typeof onObservation !== 'function') throw new TypeError('视频续看决策须为本机回调。');
+  return withChatSharedViewer({ signal, videoLimits, createInspector, createWatch, privateVideoAccess, videoId }, async (inspector, check) => {
+    let opened = false;
+    try {
+      await inspector.execute('douyin_open_video', { url }, { signal });
+      opened = true;
+      check();
+      await inspector.execute('douyin_play', {}, { signal });
+      if (!onObservation) {
+        const observation = await inspector.execute('douyin_observe', { seconds: 3 }, { signal, sharedCaptureMode: SHARED_CAPTURE_MODE });
+        if (includeComments) {
+          await inspector.execute('douyin_pause', {}, { signal });
+          try { observation.comments = await inspector.readPublicComments({ videoId, signal }); }
+          catch { signal?.throwIfAborted(); observation.comments = { videoId, status: 'unavailable', rows: [] }; }
+        }
+        return observation;
+      }
+      let seconds=3,last,segments=0,progress=0,frameCount=0,tailStarted=0;
+      const current=async()=>{
+        const result=await inspector.execute('douyin_status',{}, {signal}),state=result.state||result;
+        if(state.video?.id!==videoId||state.loginRequired||state.verificationRequired||state.privateChatVisible||state.unsupportedPage||state.livePreview?.recognized)throw new Error('续看期间作品或页面状态改变，未继续采用旧视频。');
+        return state;
+      };
+      const finish=reason=>Object.assign(last,{watchOutcome:{stopReason:reason,segments,playbackProgressSeconds:progress,frames:frameCount,reachedEnd:reason==='video-ended',fullVideoObserved:false}});
+      for(;;){
+        check();let state=await current();
+        if(last&&state.video.ended===true)return finish('video-ended');
+        let remaining=Number.isFinite(state.video.duration)?state.video.duration-state.video.time:null;
+        if(last&&state.video.loop===false&&remaining!==null&&remaining<0.5){
+          tailStarted||=performance.now();if(performance.now()-tailStarted>5000)throw Object.assign(new Error('视频尾部没有继续推进，保留已看部分等待恢复。'),{code:'GROUP_VIDEO_PLAYBACK_STALLED'});
+          await wait(100,signal);continue;
+        }
+        tailStarted=0;
+        const sampleSeconds=remaining!==null&&remaining>0.4?Math.max(0.2,Math.min(seconds,remaining-0.25)):seconds;
+        let observed;
+        try{observed=await inspector.execute('douyin_observe',{seconds:sampleSeconds},{signal,sharedCaptureMode:SHARED_CAPTURE_MODE});}
+        catch(error){if(last&&(await current()).video.ended===true)return finish('video-ended');throw error;}
+        segments++;progress+=observed.observation?.playbackProgressSeconds||0;frameCount+=observed.frames?.length||0;last=observed;
+        const first=observed.frames?.[0]?.captureInterval?.before,atEnd=observed.state?.video?.ended===true||Boolean(first?.loop&&observed.observation.playbackProgressSeconds>=first.duration-first.time);
+        await inspector.execute('douyin_pause',{}, {signal});
+        const decision=await onObservation(observed,{segments,playbackProgressSeconds:progress,frames:frameCount,reachedEnd:atEnd});
+        signal?.throwIfAborted();
+        if(!decision||!['continue','stop'].includes(decision.action)||decision.action==='continue'&&(!Number.isFinite(decision.seconds)||decision.seconds<0.2||decision.seconds>30))throw new Error('分享视频续看决策格式无效，未擅自结束或续看。');
+        if(atEnd)return finish('video-ended');
+        if(decision.action==='stop')return finish('model-choice');
+        check();seconds=decision.seconds;await current();
+        await inspector.execute('douyin_play',{}, {signal});
+      }
+    } finally {
+      if (opened) await inspector.execute('douyin_pause', {});
+    }
+  });
 }
 
 function alive(pid) {
@@ -218,12 +247,14 @@ export async function acquireBrowserOperationLock(name,{signal,directory=CONTROL
 }
 const lock=(name,signal,directory=CONTROL)=>acquireBrowserOperationLock(name,{signal,directory});
 
-async function version() {
+async function browserVersion(port = PORT) {
   try {
-    const response = await fetch(`http://127.0.0.1:${PORT}/json/version`, { signal: AbortSignal.timeout(1200) });
-    return response.ok && /(?:Edg|Chrome)/.test((await response.json()).Browser ?? '');
-  } catch { return false; }
+    const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1200), redirect: 'error' });
+    const value = response.ok ? await response.json() : null;
+    return /(?:Edg|Chrome)/.test(value?.Browser ?? '') ? value : null;
+  } catch { return null; }
 }
+const version = async port => Boolean(await browserVersion(port));
 export function sameBrowserProfile(left, right, platform = process.platform) {
   if (typeof left !== 'string' || !left || typeof right !== 'string' || !right) return false;
   const normalize = value => platform === 'win32' ? path.win32.resolve(value).toLowerCase() : path.resolve(value);
@@ -258,38 +289,164 @@ export function dedicatedHostReadiness(state, { pid, profile, port, processAlive
   if (!sameBrowserProfile(state.profile, profile) || state.port !== port) return 'foreign';
   return state.ready === true ? 'ready' : 'pending';
 }
-async function endpoint(signal) {
-  const release = await lock('launch', signal);
+
+export function readVerificationPage(pageLabels = null, readWatchState) {
+  if (location.origin !== 'https://www.douyin.com'
+    && !(location.origin === 'https://live.douyin.com' && /^\/\d{4,30}\/?$/.test(location.pathname))) return null;
+  if (pageLabels && !pageLabels.includes(window.name)) return null;
+  const watch = pageLabels ? readWatchState() : null;
+  const visible = element => {
+    const bounds = element.getBoundingClientRect(), style = getComputedStyle(element);
+    return bounds.width > 0 && bounds.height > 0 && bounds.bottom > 0 && bounds.right > 0
+      && bounds.top < innerHeight && bounds.left < innerWidth && style.visibility !== 'hidden' && style.display !== 'none';
+  };
+  const hasPrompt = pattern => Array.from(document.querySelectorAll('body *')).some(element =>
+    !element.childElementCount && pattern.test(element.textContent || '')
+    && !element.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]') && visible(element));
+  const verificationRequired = watch?.verificationRequired === true || document.title?.trim() === '验证码中间页'
+    || Array.from(document.querySelectorAll('#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"]')).some(visible)
+    || Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).some(element =>
+      /安全验证|请完成验证|拖动滑块/.test(element.textContent || '')
+      && !element.closest('[data-e2e="im-dialog"]') && visible(element))
+    || hasPrompt(/请完成下方验证|请完成验证|拖动滑块/);
+  const loginRequired = watch?.loginRequired === true || hasPrompt(/扫码登录|验证码登录|登录后即可|手机扫码登录/);
+  const loaded = document.readyState === 'complete';
+  const ready = loaded && !verificationRequired && !loginRequired && !watch?.privateChatVisible && !watch?.unsupportedPage
+    && (Array.from(document.querySelectorAll('[data-e2e="im-entry"]')).some(visible)
+      || Boolean(pageLabels && location.origin === 'https://live.douyin.com'
+        && Array.from(document.querySelectorAll('video')).some(video => video.readyState >= 2 && visible(video))));
+  return { href: location.href, verificationRequired, loginRequired, loaded, ready };
+}
+
+let verifiedInspectionHost;
+export async function inspectDedicatedVerification(binding, { signal, profile = PROFILE, controlDir = CONTROL, port = PORT, pageSource } = {}) {
+  const ownerFile = path.join(controlDir, 'browser.json'), endpoint = `http://127.0.0.1:${port}`;
+  const owner = optionalRecord(ownerFile);
+  if (binding && owner?.instanceId !== binding.instanceId) return { status: 'session-changed' };
+  if (typeof owner?.instanceId !== 'string' || dedicatedHostReadiness(owner, { pid: owner.pid, profile, port }) !== 'ready') {
+    return { status: binding ? 'session-changed' : 'browser-unavailable', verificationRequired: false };
+  }
+
+  const debuggerInfo = await browserVersion(port);
+  aborted(signal);
+  if (!debuggerInfo) return { status: 'browser-unavailable' };
+  // 浏览器进程和 CDP 实例保持一致时复用归属检查，轮询不反复创建浏览器连接或进程探针。
+  const socket = debuggerInfo.webSocketDebuggerUrl;
+  const hostKey = typeof socket === 'string' && socket.startsWith(`ws://127.0.0.1:${port}/devtools/browser/`)
+    ? JSON.stringify([ownerFile, owner.pid, owner.startedAt, owner.instanceId, socket]) : null;
+  if (!hostKey || hostKey !== verifiedInspectionHost) {
+    const plan = await dedicatedHostPlan(owner, { profile, port, endpointReady: true });
+    if (plan !== 'connect') return { status: binding ? 'session-changed' : 'browser-unavailable' };
+    verifiedInspectionHost = hostKey;
+  }
+
+  const pageLabels = pageSource ? browserPageAliases(pageSource) : null;
+  const readArguments = pageLabels ? `${JSON.stringify(pageLabels)}, ${readPageState.toString()}` : '';
+  const results = await evaluateDedicatedPages({
+    endpoint, signal, expression: `(${readVerificationPage.toString()})(${readArguments})`,
+    select: target => /^[a-f0-9]{32}$/i.test(target.id)
+      && (!binding || target.id === binding.targetId)
+      && target.webSocketDebuggerUrl === `ws://127.0.0.1:${port}/devtools/page/${target.id}`,
+  });
+  aborted(signal);
+  const current = optionalRecord(ownerFile);
+  if (current?.instanceId !== owner.instanceId || current.pid !== owner.pid || current.ready !== true) return { status: 'session-changed' };
+  const mode = owner.mode || 'visible';
+  if (binding && results.length !== 1) return { status: 'session-changed', mode };
+  const states = results.flatMap(result => {
+    if (result.status !== 'fulfilled') return [];
+    const { value, id, url } = result.value;
+    return value?.href === url ? [{ ...value, id }] : [];
+  });
+  if (pageLabels && (states.length !== 1 || results.some(result => result.status !== 'fulfilled'))) {
+    return { status: 'checking', mode, verificationRequired: null };
+  }
+  const challenge = states.find(state => state.verificationRequired === true);
+  const pending = challenge || states.find(state => state.loginRequired === true);
+  const verificationRequired = challenge ? true
+    : (pageLabels || states.length === results.length) && states.every(state => state.loaded === true) ? false : null;
+  if (pending) return { status: 'required', mode, verificationRequired, binding: { instanceId: owner.instanceId, targetId: pending.id } };
+  return { status: states.some(state => state.ready === true) ? 'ready' : 'checking', mode, verificationRequired };
+}
+
+async function retireDedicatedHost(owner, { stateFile, url, port, signal }) {
+  const browser = await connectDedicatedBrowser(url, { signal });
   try {
-    const stateFile = path.join(CONTROL, 'browser.json');
-    let state;
-    try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { /* 首次运行没有状态。 */ }
-    const plan = await dedicatedHostPlan(state, { profile: PROFILE, port: PORT, endpointReady: await version() });
-    if (plan === 'unverified') throw Object.assign(new Error('专用浏览器宿主启动时间暂时无法核实，请稍后重试或运行一键自检；未重复打开窗口。'), { code: 'BROWSER_HOST_IDENTITY_UNVERIFIED' });
-    if (plan === 'foreign') throw new Error('9227 端口不属于本工具的专用浏览器，请先释放端口。');
-    if (plan === 'connect') return `http://127.0.0.1:${PORT}`;
-    let hostPid = state?.pid;
-    if (plan === 'launch') {
-      const output = openSync(path.join(CONTROL, 'browser-host.log'), 'a');
-      try {
-        const child = spawn(resolveNodeExecutable(), [path.join(ROOT, 'browser-host.mjs'), PROFILE, CONTROL, String(PORT)], {
-          detached: true, windowsHide: true, stdio: ['ignore', output, output],
-        });
-        hostPid = child.pid;
-        child.unref();
-      } finally { closeSync(output); }
+    const mode = owner.mode || 'visible';
+    if (typeof owner.instanceId !== 'string' || owner.headless !== (mode === 'background') || await ownedBrowserExecutionMode(browser, owner, signal) !== mode) {
+      throw new Error('无法核对当前专用浏览器，未关闭浏览器。');
     }
-    const deadline = Date.now() + 25_000;
-    while (Date.now() < deadline) {
+    const session = await browser.newBrowserCDPSession();
+    try {
       aborted(signal);
-      await wait(250, signal);
-      try { state = JSON.parse(readFileSync(stateFile, 'utf8')); } catch { state = null; }
-      const readiness = dedicatedHostReadiness(state, { pid: hostPid, profile: PROFILE, port: PORT });
-      if (readiness === 'failed') throw new Error('专用浏览器启动失败；请正常关闭仍使用 cli-profile 的旧专用窗口后重试。');
-      if (readiness === 'foreign') throw new Error('专用浏览器宿主归属无法核对，未连接该端口。');
-      if (readiness === 'ready' && await version()) return `http://127.0.0.1:${PORT}`;
+      const current = optionalRecord(stateFile);
+      if (current?.instanceId !== owner.instanceId || current.pid !== owner.pid || current.ready !== true
+        || current.port !== port || !sameBrowserProfile(current.profile, owner.profile)) throw new Error('专用浏览器已经改变，请重试。');
+      try { await session.send('Browser.close'); } catch (error) { if (browser.isConnected()) throw error; }
+    } finally { await session.detach().catch(() => {}); }
+  } finally { await browser.close().catch(() => {}); }
+  const deadline = Date.now() + 6000;
+  do {
+    aborted(signal);
+    if (!alive(owner.pid) && !await version(port)) return;
+    await wait(100, signal);
+  } while (Date.now() < deadline);
+  throw new Error('正在等待旧专用浏览器退出，请稍后重试。');
+}
+
+async function readyBrowserHost(state, { plan, mode, profile, directory, port, stateFile, signal }) {
+  if (plan === 'connect') return state;
+  let hostPid = state?.pid;
+  if (plan === 'launch') {
+    const output = openSync(path.join(directory, 'browser-host.log'), 'a');
+    try {
+      const child = spawn(resolveNodeExecutable(), [path.join(ROOT, 'browser-host.mjs'), profile, directory, String(port), mode], {
+        detached: true, windowsHide: true, stdio: ['ignore', output, output],
+      });
+      hostPid = child.pid;
+      child.unref();
+    } finally { closeSync(output); }
+  }
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    await wait(250, signal);
+    state = optionalRecord(stateFile);
+    const readiness = dedicatedHostReadiness(state, { pid: hostPid, profile, port });
+    if (readiness === 'failed') throw new Error('专用浏览器启动失败；请检查旧专用窗口是否已经退出。');
+    if (readiness === 'foreign') throw new Error('专用浏览器宿主归属无法核对，未连接该端口。');
+    if (readiness === 'ready' && await version(port)) return state;
+  }
+  throw new Error('专用浏览器启动超时，请查看本机 browser-host.log。');
+}
+
+async function endpoint(signal, { profile = PROFILE, directory = CONTROL, port = PORT, exchange = false, authorizeBackgroundLaunch } = {}) {
+  const release = await lock('launch', signal, directory);
+  try {
+    const stateFile = path.join(directory, 'browser.json'), url = `http://127.0.0.1:${port}`;
+    const browserMode = new BrowserMode({ controlDir: directory });
+    const mode = browserMode.policy().mode;
+    const requireBackground = current => {
+      if (current !== 'background') throw Object.assign(new Error('专用浏览器已设为有窗口模式。'), { code: 'BROWSER_NOT_RUNNING' });
+    };
+    if (authorizeBackgroundLaunch) requireBackground(mode);
+    let restart = exchange;
+    for (;;) {
+      aborted(signal);
+      const state = optionalRecord(stateFile);
+      const plan = await dedicatedHostPlan(state, { profile, port, endpointReady: await version(port) });
+      if (plan === 'unverified') throw Object.assign(new Error('专用浏览器宿主启动时间暂时无法核实，请稍后重试或运行一键自检；未重复打开窗口。'), { code: 'BROWSER_HOST_IDENTITY_UNVERIFIED' });
+      if (plan === 'foreign') throw new Error(`${port} 端口不属于本工具的专用浏览器，请先释放端口。`);
+      if (authorizeBackgroundLaunch && plan === 'launch') {
+        await authorizeBackgroundLaunch();
+        aborted(signal);
+        requireBackground(browserMode.policy().mode);
+      }
+      const owner = await readyBrowserHost(state, { plan, mode, profile, directory, port, stateFile, signal });
+      if ((owner.mode || 'visible') === mode) return url;
+      if (!restart) throw Object.assign(new Error('专用浏览器运行方式已更改，请在观看方式里应用当前设置。'), { code: 'BROWSER_MODE_RESTART_REQUIRED' });
+      await retireDedicatedHost(owner, { stateFile, url, port, signal });
+      restart = false;
     }
-    throw new Error('专用浏览器启动超时，请查看本机 browser-host.log。');
   } finally { release(); }
 }
 
@@ -325,7 +482,7 @@ export function readPageState() {
   const element = videoElements[0]?.element;
   const text = [...document.querySelectorAll('body *')].filter(e => e.childElementCount === 0 && visible(e) && !e.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]')).map(e => clean(e.innerText || e.textContent)).filter(Boolean).join('\n').slice(-9000);
   const loginRequired = /扫码登录|验证码登录|登录后即可|手机扫码登录/.test(text);
-  const verificationRequired = [...document.querySelectorAll('#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"]')].some(visible) || /请完成下方验证|请完成验证|安全验证|拖动滑块/.test(text);
+  const verificationRequired = document.title?.trim() === '验证码中间页' || [...document.querySelectorAll('#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"]')].some(visible) || /请完成下方验证|请完成验证|安全验证|拖动滑块/.test(text);
   let video = null, activeContainer = null, videoIdentityConflict = false;
   if (element) {
     let container = element.closest('[data-e2e="feed-active-video"],[data-e2e="video-detail"]');
@@ -519,10 +676,10 @@ export async function createBackgroundPage(browser, context, {signal, authorizeP
 }
 
 export class BrowserController {
-  constructor({ source = 'api', memory, videoLimits, personaMemory, controlDirectory = CONTROL } = {}) {
+  constructor({ source = 'api', memory, videoLimits, personaMemory, controlDirectory = CONTROL, browserProfile = PROFILE, browserPort = PORT } = {}) {
     if (!['api','dsh','verification','api-chat','dsh-chat'].includes(source)) throw new TypeError('不支持这个浏览器入口。');
-    if(!path.isAbsolute(controlDirectory))throw new TypeError('浏览器控制目录须为绝对路径。');
-    this.controlDirectory=controlDirectory;
+    if(!path.isAbsolute(controlDirectory) || !path.isAbsolute(browserProfile) || !Number.isInteger(browserPort) || browserPort < 1024 || browserPort > 65535)throw new TypeError('专用浏览器目录或端口无效。');
+    Object.assign(this, { controlDirectory, browserProfile, browserPort });
     this.source = source; this.memory = memory; this.personaMemory = personaMemory; this.browser = null; this.page = null;
     this.queue = Promise.resolve();
     this.videoLimits = videoLimits;
@@ -548,6 +705,10 @@ export class BrowserController {
   }
   async pauseForLimitsOnce() {
     if (!['api','dsh'].includes(this.source)) return { paused:0, existingPage:false };
+    if (this.source === 'api' && this.limits().stateDir) {
+      const manual = optionalRecord(path.join(this.limits().stateDir, 'watch-manual.lock'));
+      if (manual?.kind === PRIVATE_VIDEO_TASK && alive(manual.pid)) return { paused: 0, existingPage: true };
+    }
     let accountingError;
     try { this.limits().settleWatching?.(this.source); } catch(error) { if(error.code!=='VIDEO_CONTROL_BUSY')accountingError=error; }
     const connection=this.browser;
@@ -555,8 +716,8 @@ export class BrowserController {
       if(!connection?.isConnected()) {
         let owner;
         try { owner=JSON.parse(readFileSync(path.join(this.controlDirectory,'browser.json'),'utf8')); } catch { return {paused:0,existingPage:false}; }
-        if(!sameBrowserProfile(owner.profile,PROFILE) || owner.port!==PORT || !owner.ready || !alive(owner.pid) || !await version()) return {paused:0,existingPage:false};
-        return await pauseExistingVideoPages({ endpoint:`http://127.0.0.1:${PORT}`,source:this.source });
+        if(!sameBrowserProfile(owner.profile,this.browserProfile) || owner.port!==this.browserPort || !owner.ready || !alive(owner.pid) || !await version(this.browserPort)) return {paused:0,existingPage:false};
+        return await pauseExistingVideoPages({ endpoint:`http://127.0.0.1:${this.browserPort}`,source:this.source });
       }
       let paused=0,existingPage=false;
       for(const candidate of connection.contexts().flatMap(context=>context.pages())) {
@@ -575,16 +736,73 @@ export class BrowserController {
       if(accountingError)throw accountingError;
     }
   }
-  store() { return this.memory ??= new MemoryStore(resolveRuntimePaths().memoryDbPath); }
-  async observeSharedWork(input) {
-    const { AutonomousWatch } = await import('./autonomous-watch.mjs?v=10');
-    const release = await lock('chat-shared-video', input.signal, this.controlDirectory);
+  async releaseFinishedWatchMedia({ allowUnload = false, failedFeed = false } = {}) {
+    if (!['api', 'dsh'].includes(this.source) || PRIVATE_VIDEO_VIEWERS.has(this) || !this.limits().stateDir) return;
+    const signal = AbortSignal.timeout(3500);
+    const unlock = await lock(browserPageLock(this.source), signal, this.controlDirectory);
     try {
-      return await observeChatSharedWork({ ...input, videoLimits: this.limits(),
-        createInspector: () => new BrowserController({ source: 'api', videoLimits: this.limits(), controlDirectory: this.controlDirectory }),
+      const manual = optionalRecord(path.join(this.limits().stateDir, 'watch-manual.lock'));
+      if (manual && alive(manual.pid)) return;
+      const owner = optionalRecord(path.join(this.controlDirectory, 'browser.json'));
+      if (!owner?.ready || owner.mode !== 'background' || owner.headless !== true) return;
+      const version = await browserVersion(this.browserPort);
+      if (!/\bHeadless(?:Chrome|Edg)\//.test(version?.['User-Agent'] ?? '')) return;
+      if (await dedicatedHostPlan(owner, { profile: this.browserProfile, port: this.browserPort, endpointReady: true }) !== 'connect') return;
+      const label = JSON.stringify(browserPageLabel(this.source));
+      const endpoint = `http://127.0.0.1:${this.browserPort}`;
+      const pages = await evaluateDedicatedPages({ endpoint, expression: `window.name === ${label}`, signal });
+      if (pages.some(result => result.status !== 'fulfilled')) return;
+      const matches = pages.filter(result => result.value.value === true);
+      if (matches.length !== 1) return;
+      const { id, url } = matches[0].value;
+      const address = new URL(url);
+      const recommendation = address.origin === 'https://www.douyin.com'
+        && ['/', '/recommend', '/recommend/', '/jingxuan', '/jingxuan/'].includes(address.pathname)
+        && !address.searchParams.has('modal_id');
+      const unload = (allowUnload && this.limits().state().allowed === false) || (failedFeed && recommendation);
+      const expression = `(() => {
+        if (window.name !== ${label} || location.href !== ${JSON.stringify(url)}) return;
+        (${releaseRetiredFeedBuffers.toString()})({ label: ${label} });
+        if (!${unload}) return;
+        const state = (${readPageState.toString()})();
+        const openDialog = [...document.querySelectorAll('dialog[open],[role="dialog"],[aria-modal="true"]')].some(element => {
+          const box = element.getBoundingClientRect(), style = getComputedStyle(element);
+          return box.width > 0 && box.height > 0 && style.visibility === 'visible' && style.display !== 'none'
+            && !element.closest('[aria-hidden="true"],[inert]');
+        });
+        if (state.verificationRequired || state.loginRequired || state.privateChatVisible || state.unsupportedPage || openDialog) return;
+        const drafts = [...document.querySelectorAll('input,textarea,[contenteditable="true"]')].some(element =>
+          element.files?.length || (!['button','submit','reset','checkbox','radio'].includes(element.type)
+            && Boolean(String(element.isContentEditable ? element.textContent : element.value ?? '').trim())));
+        if (drafts || [...document.querySelectorAll('video')].some(video => !video.paused)) return;
+        location.replace('about:blank');
+      })()`;
+      await evaluateDedicatedPages({
+        endpoint, expression, select: target => target.id === id, signal,
+      });
+    } finally { unlock(); }
+  }
+  store() { return this.memory ??= new MemoryStore(resolveRuntimePaths().memoryDbPath); }
+  async withSharedWorkViewer(signal, useViewer) {
+    const { AutonomousWatch } = await import('./autonomous-watch.mjs?v=10');
+    const release = await lock('chat-shared-video', signal, this.controlDirectory);
+    try {
+      return await useViewer({ signal, videoLimits: this.limits(),
+        createInspector: () => new BrowserController({ source: 'api', videoLimits: this.limits(), controlDirectory: this.controlDirectory, browserProfile: this.browserProfile, browserPort: this.browserPort }),
         createWatch: controller => new AutonomousWatch({ controller, config: {}, videoLimits: this.limits(), personaMemory: this.getPersonaMemory(), stateDir: this.limits().stateDir, source: 'api' }),
       });
     } finally { release(); }
+  }
+  observeSharedWork(input) {
+    return this.withSharedWorkViewer(input.signal, controls => observeChatSharedWork({ ...input, ...controls }));
+  }
+  resolveSharedVideoCard(openCard, { signal, privateVideoAccess } = {}) {
+    return this.withSharedWorkViewer(signal, controls => withChatSharedViewer({ ...controls, privateVideoAccess }, (inspector, check) =>
+      inspector.withPage(page => openCard(page, check), { signal, launch: false, authorizePrepare: check })));
+  }
+  async readPublicComments({ videoId, limit, signal } = {}) {
+    const { readPublicCommentsFromPage } = await import('./comment-browser.mjs?v=18');
+    return this.withPage(page => readPublicCommentsFromPage(page, { videoId, limit, signal }), { signal, launch: false, create: false });
   }
   getPersonaMemory() {
     if (!this.personaMemory) {
@@ -593,9 +811,18 @@ export class BrowserController {
     }
     return this.personaMemory;
   }
+  bindChatMemory(service, personaMemory = this.getPersonaMemory()) {
+    service.agent.personaMemory = personaMemory;
+    service.agent.getMemoryStore = () => this.store();
+    const host = this.source === 'dsh' ? 'dsh' : 'desktop';
+    service.agent.createConversationMemory = ({ scopeToken, messages }) => {
+      const contact = memoryContactFromToken(scopeToken);
+      return createRuntimeConversationMemory({ store: this.store(), contact, messages, host, isAuthorized: () => service.isMemoryScopeAuthorized(contact) });
+    };
+  }
   getChatService() {
     this.chatPromise??=Promise.all([import('./chat-browser.mjs?v=18'),import('./chat-service.mjs?v=18'),import('./usage-ledger.mjs')])
-      .then(([{ChatBrowser},{ChatService},{UsageLedger}])=>{const stateDir=this.limits().stateDir,source=this.source==='dsh'?'dsh':'api';const service=new ChatService({stateDir,browser:new ChatBrowser({source:source==='dsh'?'dsh-chat':'api-chat'}),onPrepared:options=>this.releaseIdlePreparePage(options),observeSharedWork:input=>this.observeSharedWork(input),videoLimits:this.limits()});service.agent.personaMemory=this.getPersonaMemory();service.agent.getMemoryStore=()=>this.store();service.agent.createConversationMemory=({scopeToken,messages})=>{const contact=memoryContactFromToken(scopeToken);return createRuntimeConversationMemory({store:this.store(),contact,messages,host:source==='dsh'?'dsh':'desktop',isAuthorized:()=>service.isMemoryScopeAuthorized(contact)});};service.agent.usageLedger=new UsageLedger({stateDir});service.agent.source=source;return service;})
+      .then(([{ChatBrowser},{ChatService},{UsageLedger}])=>{const stateDir=this.limits().stateDir,source=this.source==='dsh'?'dsh':'api';const service=new ChatService({stateDir,browser:this.createChatBrowser?.() || new ChatBrowser({source:source==='dsh'?'dsh-chat':'api-chat'}),onPrepared:options=>this.releaseIdlePreparePage(options),observeSharedWork:input=>this.observeSharedWork(input),videoLimits:this.limits()});this.bindChatMemory(service);service.agent.usageLedger=new UsageLedger({stateDir});service.agent.source=source;return service;})
       .catch(error=>{this.chatPromise=null;throw error;});
     return this.chatPromise;
   }
@@ -610,6 +837,44 @@ export class BrowserController {
   getComments() {
     this.commentsPromise ??= import('./autonomous-comments.mjs?v=10').then(({ AutonomousComments }) => new AutonomousComments({ controller: this, personaMemory: this.getPersonaMemory(), videoLimits: this.limits(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.commentsPromise = null; throw error; });
     return this.commentsPromise;
+  }
+  getBrowserMode() { return this.browserMode ??= new BrowserMode({ controlDir: this.controlDirectory }); }
+  async configureBrowserMode(input, { watchService, friendInteractions, signal = AbortSignal.timeout(60_000) } = {}) {
+    const requested = validateBrowserMode(input), mode = this.getBrowserMode();
+    const releaseMode = await lock('browser-mode-change', signal, this.controlDirectory);
+    try {
+      const previous = mode.state();
+      if (previous.mode === requested && previous.recordedMode === requested) return previous;
+      const exchange = previous.recordedMode !== requested;
+      const apply = async (_chat, prepareReply) => {
+        let releaseWatch;
+        try {
+          if (exchange && watchService) {
+            while (watchService.state().phase === 'sharing' || watchService.getCommentService?.()?.state().busy) await wait(100, signal);
+            if (watchService.state().running) {
+              await watchService.stop({ explicit: true });
+              while (watchService.state().running) await wait(100, signal);
+            }
+            releaseWatch = watchService.claimManual('browser-mode');
+          }
+          aborted(signal);
+          const opened = await this.openBrowser({ signal, modeChange: requested, exchange });
+          if (mode.state().recordedMode !== requested) throw new Error('专用浏览器实际运行方式未确认。');
+          const reply = await prepareReply?.(signal);
+          await opened?.revealWindow?.();
+          return { ...mode.state(), opened: opened?.opened === true, ...(reply ? { reply } : {}) };
+        } finally { await releaseWatch?.(); }
+      };
+      if (friendInteractions) return await friendInteractions.withChatPaused(apply, {
+        timeoutMs: 15_000, reason: 'browser-mode-change', resume: 'preserve', prepareForBrowser: true,
+      });
+      return await apply();
+    } finally { releaseMode(); }
+  }
+  executionMode() { return browserExecutionMode(this.browser); }
+  getReactions({ personaMemory } = {}) {
+    this.reactionsPromise ??= import('./video-reactions.mjs').then(({ VideoReactions }) => new VideoReactions({ controller: this, react: this.reactToVideo?.bind(this), personaMemory: personaMemory ?? this.getPersonaMemory(), videoLimits: this.limits(), stateDir: this.limits().stateDir, source: this.source === 'dsh' ? 'dsh' : 'api' })).catch(error => { this.reactionsPromise = null; throw error; });
+    return this.reactionsPromise;
   }
   getReport() {
     this.reportPromise ??= import('./daily-report.mjs?v=10').then(({ DailyReport }) => new DailyReport({ personaMemory: this.getPersonaMemory() })).catch(error => { this.reportPromise = null; throw error; });
@@ -628,11 +893,27 @@ export class BrowserController {
     if (this.browser?.isConnected()) return this.browser;
     let owner;
     try { owner = JSON.parse(readFileSync(path.join(this.controlDirectory, 'browser.json'), 'utf8')); } catch { return null; }
-    if (!sameBrowserProfile(owner.profile, PROFILE) || owner.port !== PORT || !owner.ready || !alive(owner.pid) || !await version()) return null;
+    if (!sameBrowserProfile(owner.profile, this.browserProfile) || owner.port !== this.browserPort || !owner.ready || !alive(owner.pid) || !await version(this.browserPort)) return null;
     // 保存静默设置只重新连接已经存在的专用浏览器，不启动窗口或新建标签。
-    this.browser = await connectDedicatedBrowser(`http://127.0.0.1:${PORT}`, { signal });
+    this.browser = await connectDedicatedBrowser(`http://127.0.0.1:${this.browserPort}`, { signal });
     this.page = null;
     return this.browser;
+  }
+  async launchBrowser(signal, { exchange = false, authorizeBackgroundLaunch } = {}) {
+    const url = await endpoint(signal, { profile: this.browserProfile, directory: this.controlDirectory, port: this.browserPort, exchange, authorizeBackgroundLaunch });
+    await this.browser?.close().catch(() => {});
+    this.browser = await connectDedicatedBrowser(url, { signal });
+    this.page = null;
+    return this.browser;
+  }
+  startBackgroundBrowser({ signal, authorizePrepare }) {
+    const operation = this.queue.catch(() => {}).then(async () => {
+      await authorizePrepare();
+      aborted(signal);
+      return this.browser?.isConnected() ? this.browser : this.launchBrowser(signal, { authorizeBackgroundLaunch: authorizePrepare });
+    });
+    this.queue = operation;
+    return operation;
   }
   releaseIdlePreparePage({signal,authorizePrepare}={}) {
     const operation=this.queue.catch(()=>{}).then(async()=>{
@@ -650,17 +931,45 @@ export class BrowserController {
     this.queue=operation;return operation;
   }
 
-  openBrowser({ signal } = {}) {
+  openBrowser({ signal, modeChange, exchange = false } = {}) {
     const operation = this.queue.catch(() => {}).then(async () => {
-      const release = await lock('browser-launcher', signal,this.controlDirectory);
+      const releases = [];
       try {
+        if (exchange) {
+          releases.push(await lock(browserPageLock('api'), signal, this.controlDirectory));
+          releases.push(await lock(browserPageLock('api-chat'), signal, this.controlDirectory));
+        }
+        releases.push(await lock('browser-launcher', signal, this.controlDirectory));
+        const mode = this.getBrowserMode(), previous = mode.state();
+        if (modeChange) mode.configure({ mode: modeChange }, { explicit: true });
+        else if (previous.mode === 'background') throw Object.assign(new Error('已选择无界面后台运行；显示登录或验证窗口前，需要暂停任务并切换浏览器运行方式。'), { code: 'BACKGROUND_BROWSER_NEEDS_VISIBLE' });
+        let existing;
+        try {
+          existing = modeChange ? await this.launchBrowser(signal, { exchange }) : await this.connectExistingBrowser({ signal });
+          if (modeChange) {
+            const owner = optionalRecord(path.join(this.controlDirectory, 'browser.json'));
+            if (owner?.ready !== true || owner.port !== this.browserPort || !sameBrowserProfile(owner.profile, this.browserProfile)
+              || await ownedBrowserExecutionMode(existing, owner, signal) !== modeChange) throw new Error('专用浏览器实际运行方式未确认。');
+          }
+        } catch (error) {
+          if (modeChange) mode.configure({ mode: mode.state().recordedMode || previous.mode }, { explicit: true });
+          throw error;
+        }
+        if (modeChange === 'background') return { opened: false };
+        if (!modeChange && await browserExecutionMode(existing) === 'background') throw Object.assign(new Error('当前是无界面后台模式；登录或验证需要先暂停任务，切换为显示浏览器并正常重启专用浏览器。'), { code: 'BACKGROUND_BROWSER_NEEDS_VISIBLE' });
         this.browserLauncher ??= new BrowserLauncher({
           preferExistingWatchPage:true, preferredSource:this.source,
-          getBrowser: async currentSignal => { if (!this.browser?.isConnected()) { this.browser = await connectDedicatedBrowser(await endpoint(currentSignal), { signal: currentSignal }); this.page = null; } return this.browser; },
+          getBrowser: currentSignal => this.browser?.isConnected() ? this.browser : this.launchBrowser(currentSignal),
           getWatchState: () => { const worker = optionalRecord(path.join(this.limits().stateDir, 'watch-loop.lock')); if (!worker) return null; if (!Number.isSafeInteger(worker.pid) || worker.pid < 1 || !['api', 'dsh'].includes(worker.source) || typeof worker.runId !== 'string') throw new Error('自主观看锁无法核对，未打开或改动入口页。'); return alive(worker.pid) ? worker : null; },
         });
-        return await this.browserLauncher.open({ signal });
-      } finally { release(); }
+        if (modeChange !== 'visible') return await this.browserLauncher.open({ signal });
+        let browsingPage;
+        const opened = await this.browserLauncher.open({ signal, showPage: page => { browsingPage = page; } });
+        return { ...opened, revealWindow: async () => {
+          aborted(signal);
+          await (await this.getWatchMode()).revealWindow(browsingPage);
+        } };
+      } finally { for (const release of releases.reverse()) release(); }
     });
     this.queue = operation; return operation;
   }
@@ -683,7 +992,7 @@ export class BrowserController {
     if(!this.browser?.isConnected()){
       if (!launch) {
         if (!await this.connectExistingBrowser({ signal })) throw Object.assign(new Error('专用浏览器未运行，未自动打开。'), { code: 'BROWSER_NOT_RUNNING' });
-      } else { this.browser=await connectDedicatedBrowser(await endpoint(signal),{signal});this.page=null; }
+      } else { await this.launchBrowser(signal); }
     }
     const releaseClaim=await lock('tab-claim',signal,this.controlDirectory);
     try {
@@ -708,8 +1017,34 @@ export class BrowserController {
     if(this.page.url()==='about:blank') {
       if (!create) throw Object.assign(new Error('消息页未打开，未在后台导航空白标签。'), { code: 'CHAT_PAGE_NOT_OPEN' });
       if (authorizePrepare) { await authorizePrepare(); aborted(signal); }
-      if(this.source.endsWith('-chat')){await this.page.goto(RECOMMEND,{waitUntil:'domcontentloaded'});await this.page.evaluate(name=>{window.name=name;},label);await this.page.locator('[data-e2e="im-entry"]').waitFor({state:'visible',timeout:15_000});}
-      else await this.navigate(RECOMMEND,signal);
+      if (this.source.endsWith('-chat')) {
+        const markPage = () => this.evaluatePage(name => { window.name = name; }, label, signal);
+        const accountActionRequired = async () => {
+          const state = await this.evaluatePage(readPageState, undefined, signal);
+          return state.loginRequired || state.verificationRequired;
+        };
+        const openChatHome = async (url, timeout) => {
+          await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+          await markPage();
+          if (!await accountActionRequired()) {
+            await this.page.locator('[data-e2e="im-entry"]').waitFor({ state: 'visible', timeout });
+          }
+        };
+        try {
+          if (await browserExecutionMode(this.browser) === 'background') {
+            try { await openChatHome(BACKGROUND_CHAT_HOME, 6500); }
+            catch (error) {
+              aborted(signal);
+              if (error.name !== 'TimeoutError' || !eligiblePage(this.page)) throw error;
+              if (!await accountActionRequired()) await openChatHome(RECOMMEND, 15_000);
+            }
+          } else await openChatHome(RECOMMEND, 15_000);
+        } catch (error) {
+          aborted(signal);
+          if (error.name !== 'TimeoutError' || !await accountActionRequired().catch(() => false)) throw error;
+          await markPage();
+        }
+      } else await this.navigate(RECOMMEND, signal);
     }
     aborted(signal);
     return this.page;
@@ -759,7 +1094,7 @@ export class BrowserController {
   }
   async state({ record = true } = {}) {
     const state = await this.evaluatePage(readPageState);
-    if (['api','dsh'].includes(this.source)) this.limits().notePlayback?.(this.source,state);
+    if (['api','dsh'].includes(this.source) && !PRIVATE_VIDEO_VIEWERS.has(this)) this.limits().notePlayback?.(this.source,state);
     if (record && state.video?.id) {
       try { this.store().recordVideo(state, this.source); } catch { state.memoryWarning = '视频状态已读取，记忆记录暂不可用。'; }
     }
@@ -800,7 +1135,8 @@ export class BrowserController {
       signal?.throwIfAborted();
       return name === 'douyin_diagnostics' ? this.diagnosticsService.run() : this.diagnosticsService.repair(args, { signal });
     }
-    if (name === 'douyin_chat_observe') return this.getChatService().then(chat => { aborted(signal); return chat.observeMessage(args.recipientId, args.messageId, { signal }); });
+    if (name === 'douyin_chat_observe') return this.getChatService().then(chat => { aborted(signal); return chat.observeMessage(args.recipientId, args.messageId, { signal, includeComments: args.includeComments === true }); });
+    if (name === 'douyin_read_comments') return this.readPublicComments({ limit: args.limit, signal });
     const operation = this.queue.catch(()=>{}).then(async()=>{
       let releaseNativeLease;
       try {
@@ -897,7 +1233,16 @@ export class BrowserController {
         if(advanceImage)return this.advanceImagePage(signal,{expectedVideoId,expectedImageKey});
         if(enterLive)return this.openLiveRoom(signal,{expectedLiveRoomId});
         if(exitLive)return this.exitLiveRoom(signal,{expectedLiveRoomId});
-        if (name==='douyin_next'||name==='douyin_previous') return await this.switchVideo(name==='douyin_next'?1:-1,signal,{recordLearning:!autonomousRunId,expectedVideoId,expectedLiveRoomId,expectedLivePreviewKey});
+        if (name==='douyin_next'||name==='douyin_previous') {
+          const switched = await this.switchVideo(name==='douyin_next'?1:-1,signal,{recordLearning:!autonomousRunId,expectedVideoId,expectedLiveRoomId,expectedLivePreviewKey});
+          if (name === 'douyin_next' && autonomousRunId && switched.switchConfirm === 'stable' && switched.before?.id
+            && await browserExecutionMode(this.browser) === 'background') {
+            await this.page.evaluate(releaseRetiredFeedBuffers, {
+              label: browserPageLabel(this.source), previousVideoId: switched.before.id,
+            }).catch(() => {});
+          }
+          return switched;
+        }
         if (name==='douyin_play'||name==='douyin_pause') {
           await (await this.currentVideo()).evaluate(async(video, play)=>{ if(play) await video.play();else video.pause(); },name==='douyin_play');
           if (name==='douyin_play') await wait(600,signal);
@@ -1090,7 +1435,7 @@ export class BrowserController {
       if(arrowCount>1)return denied(before,'switch-control-ambiguous');
       control=arrowCount===1?arrow.first():null;
     }
-    const sameGeometry=(left,right)=>Boolean(left&&right&&['x','y','width','height'].every(key=>Math.abs(left[key]-right[key])<=0.5));
+    const sameGeometry=(left,right)=>Boolean(left&&right&&['x','y','width','height','clickX','clickY'].every(key=>Math.abs(left[key]-right[key])<=0.5));
     const readPoint=async()=>{
       if(control){
         if(await this.page.locator(controlSelector).count()!==1||!await control.isVisible()||!await control.isEnabled())return null;
@@ -1104,25 +1449,40 @@ export class BrowserController {
       const box=before.video?.viewport||before.imagePost?.viewport||before.livePreview?.viewport;
       if(!box||box.width<2||box.height<2)return null;
       return this.page.evaluate(rect=>{
-        const x=rect.x+rect.width/2,y=rect.y+rect.height/2,hit=document.elementFromPoint(x,y);
-        if(x<0||y<0||x>=innerWidth||y>=innerHeight||!hit||hit.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"],#captcha_container')||!hit.closest('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"],[data-e2e="video-detail"],[data-e2e="player-container"]'))return null;
-        return{...rect,clickX:x,clickY:y};
+        const points = [[0.5, 0.5], [0.5, 0.35], [0.5, 0.65], [0.35, 0.5], [0.65, 0.5]];
+        for (const [horizontal, vertical] of points) {
+          const x = rect.x + rect.width * horizontal, y = rect.y + rect.height * vertical;
+          if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
+          const hit = document.elementFromPoint(x, y);
+          if (hit && !hit.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"],#captcha_container') &&
+            hit.closest('[data-e2e="feed-active-video"],[data-e2e="feed-live-card"],[data-e2e="feed-live"],[data-e2e="video-detail"],[data-e2e="player-container"]')) return { ...rect, clickX: x, clickY: y };
+        }
+        return null;
       },box);
     };
-    try{
-      const installed=await this.page.evaluate(inspectSwitchInput,{currentToken:token,expectedIdentity:beforeIdentity,selector:controlSelector});
-      if(installed===false)return denied(before,'switch-control-changed');
-      let stablePoint,previousPoint,geometrySamples=0;
+    const waitForPoint = async () => {
+      let previousPoint, geometrySamples = 0;
       const deadline=performance.now()+4000;
       while(performance.now()<deadline){
-        if(!await checkPendingInput())return inputDenied;
+        if(!await checkPendingInput())return null;
         const point=await readPoint();geometrySamples=sameGeometry(point,previousPoint)?geometrySamples+1:point?1:0;previousPoint=point;
-        if(geometrySamples>=3){stablePoint=point;break;}
+        if(geometrySamples>=3)return point;
         await wait(75,signal);
       }
-      if(!stablePoint)return denied(before,'switch-control-not-interactable');
+      return null;
+    };
+    try{
+      let stablePoint = await waitForPoint();
+      if (!stablePoint && !inputDenied && control && isRecommendationAddress(before.url)) {
+        // 箭头未通过检查时还没有输入，可以在同一作品上核对滚轮位置。
+        control = null; controlSelector = null;
+        stablePoint = await waitForPoint();
+      }
+      if(!stablePoint)return inputDenied||denied(before,'switch-control-not-interactable');
       if(!await checkPendingInput())return inputDenied;
       const finalPoint=await readPoint();if(!sameGeometry(stablePoint,finalPoint))return denied(before,'switch-control-changed');
+      const installed=await this.page.evaluate(inspectSwitchInput,{currentToken:token,expectedIdentity:beforeIdentity,selector:controlSelector});
+      if(installed===false)return denied(before,'switch-control-changed');
       aborted(signal);
       const armInput=()=>this.page.evaluate(currentToken=>{const entry=window.__deepseekVideoSwitchInputs?.[currentToken];if(!entry)return false;entry.armed=true;entry.timer=setTimeout(()=>{entry.expired=true;},1500);return true;},token);
       if(control){
@@ -1467,7 +1827,7 @@ export class BrowserController {
     }catch(error){errors.push(error);}
     await this.queue.catch(()=>{});
     try{await this.browser?.close();}catch(error){errors.push(error);}
-    for(const [pending,method] of [[this.sparkPromise,'close'],[this.commentsPromise,'close'],[this.commenterPromise,'close'],[this.chatPromise,'close'],[this.forwarderPromise,'close']]) {
+    for(const [pending,method] of [[this.sparkPromise,'close'],[this.reactionsPromise,'close'],[this.commentsPromise,'close'],[this.commenterPromise,'close'],[this.chatPromise,'close'],[this.forwarderPromise,'close']]) {
       if(pending)try{await pending.then(service=>service[method]?.());}catch(error){errors.push(error);}
     }
     try{this.memory?.close();}catch(error){errors.push(error);}finally{this.browser=null;this.page=null;this.memory=null;}

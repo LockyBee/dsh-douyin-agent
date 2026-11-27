@@ -7,7 +7,15 @@ import { resolveRuntimePaths, resolveNodeExecutable } from './runtime-paths.mjs'
 import { probeEdgeInstallation, sanitizeBrowserFailure } from './browser-host.mjs';
 
 const execute = promisify(execFile);
-const VERSION = '1.4.7';
+export function readProductVersion(base = new URL('./', import.meta.url)) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(new URL('package.json', base), 'utf8'));
+    if (!['dsh-douyin-browser-local', 'douyin-api-runtime'].includes(manifest.name)) return 'unknown';
+    const value = manifest.name === 'douyin-api-runtime' ? JSON.parse(fs.readFileSync(new URL('public/build-info.json', base), 'utf8')).version : manifest.version;
+    return typeof value === 'string' && value.length <= 100 && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value) ? value : 'unknown';
+  } catch { return 'unknown'; }
+}
+const VERSION = readProductVersion();
 const REPAIR = 'reapply_silent';
 const resolution = (kind, steps = [], action) => ({ kind, steps, ...(action ? { action } : {}) });
 const automatic = () => resolution('automatic', ['重新连接已核对归属的现有专用浏览器，重新应用已开启的静默设置，再回读窗口和媒体状态。'], REPAIR);
@@ -112,6 +120,7 @@ export async function runDiagnostics({ source = 'api', modelConfigured = false, 
   await check('silent_window', '静默窗口实际状态', () => {
     if (!live) return { warning: true, code: 'SILENT_UNKNOWN', message: '未取得实时窗口状态。', resolution: resolution('user', ['先处理专用浏览器连接检查，再自检。']) };
     if (!live.silent) return { code: 'SILENT_DISABLED', message: '静默观看未开启，保留当前窗口状态。' };
+    if (live.executionMode === 'background') return live.loginRequired || live.verificationRequired ? { warning: true, code: 'BACKGROUND_NEEDS_VISIBLE', message: '后台页面需要本人登录或验证，请暂停任务后切换为显示浏览器。' } : { code: 'SILENT_WINDOW_BACKGROUND', message: '已核对浏览器以无界面模式运行，没有需要最小化的可见窗口。' };
     if (!live.windows.length) return { warning: true, code: 'SILENT_NO_WINDOW', message: '静默已开启，但尚无受管窗口可验证。', resolution: resolution('user', ['先打开抖音，再重新自检。']) };
     const blocked = live.windows.some(window => !window.manageable), visible = live.windows.filter(window => window.state !== 'minimized');
     if (blocked) return { warning: true, code: 'SILENT_WINDOW_BLOCKED', message: '存在非受管同窗页面、登录验证或全屏状态，不能自动隐藏窗口。', resolution: resolution('user', ['完成登录或验证、退出全屏，并将非受管标签移出专用窗口，然后自检。']) };
@@ -170,7 +179,7 @@ export class DiagnosticsService {
       const after = await this.run();
       const unresolved = after.checks.some(item => ['silent_window', 'silent_media'].includes(item.id) && item.status === 'fail');
       const media = after.checks.find(item => item.id === 'silent_media');
-      const verified = applied && !unresolved && after.checks.find(item => item.id === 'silent_window')?.code === 'SILENT_WINDOW_MINIMIZED' && (media?.status === 'pass' || media?.code === 'MEDIA_NOT_PRESENT');
+      const verified = applied && !unresolved && ['SILENT_WINDOW_MINIMIZED', 'SILENT_WINDOW_BACKGROUND'].includes(after.checks.find(item => item.id === 'silent_window')?.code) && (media?.status === 'pass' || media?.code === 'MEDIA_NOT_PRESENT');
       return { protocol: 'diagnostics-repair-v1', action: input.action, status: verified ? 'repaired' : 'unresolved',
         message: verified ? '已重新应用原静默设置，并回读确认窗口和可检查的媒体状态。' : '未能确认修复完成，请查看修复后的报告；不会自动循环重试。', before, after };
     } finally { this.busy = false; }

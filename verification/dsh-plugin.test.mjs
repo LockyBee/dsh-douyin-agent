@@ -459,7 +459,8 @@ test('真实动态包沙箱通过 Loader 热加载原生插件并可停止释放
   const runner = new DynamicCordisRunnerService(ctx, { vmTimeoutMs: 5000 });
   const agent = { id: '插件热加载测试' };
   try {
-    const host = await readFile(new URL('../plugin-hotload.js', import.meta.url), 'utf8');
+    const host = (await readFile(new URL('../plugin-hotload.js', import.meta.url), 'utf8'))
+      .replaceAll('file:///D:/codex%E5%88%86%E5%B1%80/dsh%E9%85%8D%E7%BD%AE/douyin-browser/dsh-plugin.mjs', new URL('../dsh-plugin.mjs', import.meta.url).href);
     const defined = runner.define({ sessionId: agent.id, plugin: { kind: 'new', idPrefix: 'douyin' }, name: '抖音插件热加载测试', purpose: '验证当前版本动态包调用 Loader 的实际能力。', code: { host } });
     const result = await runner.run(agent, defined.pluginId, defined.packageId, 'run', new AbortController().signal);
     assert.equal(result.ok, true, JSON.stringify(result));

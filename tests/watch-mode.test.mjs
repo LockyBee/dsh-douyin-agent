@@ -35,7 +35,7 @@ function syntheticWindow() {
 
 test('两入口共用静默许可且默认关闭，设置不接受模型扩权字段或损坏状态', t => {
   const f = fixture(t), dsh = new WatchMode({ stateDir: f.directory, source: 'dsh' });
-  assert.equal(f.mode.state().silent, false); assert.equal(f.mode.state().capabilities.headless, false);
+  assert.equal(f.mode.state().silent, false); assert.equal(f.mode.state().capabilities.headless, true);
   assert.throws(() => f.mode.configure({ silent: true }), /明确/);
   assert.throws(() => f.mode.configure({ silent: true, play: true }, { explicit: true }), /只接收/);
   f.mode.configure({ silent: true }, { explicit: true }); assert.equal(dsh.state().silent, true);

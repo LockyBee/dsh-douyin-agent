@@ -6,7 +6,8 @@ window.__ModuleLoader__.load({
     const { createElement: h, useEffect, useRef, useState } = React;
     const Button = primitives.Button, Input = primitives.Input || 'input';
     const PREFIX = '/api/douyin-browser';
-    const routes = new Set(['/interactions/configure', '/state', '/diagnostics', '/diagnostics/repair', '/watch/schedule', '/watch/options', '/video/configure', '/video/start', '/video/stop', '/browser/open', '/persona/configure', '/model/configure', '/mode/configure', '/watch/start', '/watch/stop', '/spark/configure', '/spark/start', '/spark/stop', '/spark/resolve', '/comments/configure', '/comments/resolve', '/share/configure', '/share/resolve', '/chat/contacts', '/chat/configure', '/chat/start', '/chat/stop', '/chat/prepare', '/chat/resolve', '/chat/unanswered', '/chat/unanswered/resolve', '/media/configure', '/media/credentials', '/reports/generate']);
+    const verificationRoute = '/browser/verification';
+    const routes = new Set(['/interactions/configure', '/state', '/diagnostics', '/diagnostics/repair', '/watch/schedule', '/watch/options', '/video/configure', '/video/private-schedule', '/video/start', '/video/stop', '/browser/open', '/browser/mode', verificationRoute, verificationRoute + '/frame', verificationRoute + '/input', '/persona/configure', '/model/configure', '/mode/configure', '/watch/start', '/watch/stop', '/spark/configure', '/spark/start', '/spark/stop', '/spark/resolve', '/comments/configure', '/comments/resolve', '/reactions/configure', '/share/configure', '/share/resolve', '/chat/contacts', '/chat/configure', '/chat/start', '/chat/stop', '/chat/prepare', '/chat/resolve', '/chat/unanswered', '/chat/unanswered/resolve', '/media/configure', '/media/credentials', '/reports/generate']);
     const column = { display: 'flex', flexDirection: 'column', gap: 12 };
     const row = { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' };
     const muted = { color: 'var(--dsw-alias-label-tertiary)', fontSize: 13, margin: 0 };
@@ -17,7 +18,10 @@ window.__ModuleLoader__.load({
     const OPERATIONS = {
       '/bootstrap': '连接本机服务', '/state': '刷新运行状态', '/interactions/state': '读取好友在线状态', '/interactions/configure': '设置好友互动',
       '/browser/open': '打开抖音', '/watch/state': '读取自主观看状态', '/watch/schedule': '设置自动观看', '/watch/options': '保存观看主题', '/watch/start': '开始自主观看', '/watch/stop': '停止自主观看',
+      '/browser/mode': '切换后台观看',
+      [verificationRoute]: '辅助验证', [verificationRoute + '/frame']: '读取验证画面', [verificationRoute + '/input']: '操作验证画面',
       '/video/status': '读取观看时段与用量', '/video/configure': '保存观看时段与额度', '/video/start': '开始观看', '/video/stop': '结束观看',
+      '/video/private-schedule': '保存私信视频时段',
       '/chat/state': '读取自动回复状态', '/chat/contacts': '读取当前会话列表', '/chat/configure': '保存许可名单', '/chat/start': '启动自动回复', '/chat/stop': '停止自动回复', '/chat/prepare': '准备回复通道', '/chat/resolve': '解除会话暂停', '/chat/unanswered': '读取遗留待处理消息', '/chat/unanswered/resolve': '标记遗留待处理消息',
       '/share/state': '读取分享状态', '/share/configure': '设置自主分享', '/share/resolve': '核对分享结果', '/comments/state': '读取评论状态', '/comments/configure': '保存评论设置', '/comments/resolve': '核对评论结果',
       '/mode/state': '读取静默观看设置', '/mode/configure': '保存静默观看设置', '/media/state': '读取音频设置', '/media/configure': '保存音频设置', '/media/credentials': '保存音频密钥',
@@ -48,6 +52,7 @@ window.__ModuleLoader__.load({
     }
 
     function operationLabel(name) {
+      if (name === 'browserMode') return OPERATIONS['/browser/mode'];
       return ({ browserOpen:'打开抖音', browser:'打开抖音', refresh:'刷新连接', task:'提交对话任务', stop:'停止对话任务', settings:'保存模型设置', clearKey:'移除模型密钥', openMemory:'打开记忆文件夹', memory:'检索共享记忆', watchSchedule:'设置自动观看', schedule:'设置自动观看', interactions:'设置好友互动', chatList:'读取当前会话列表', chatPrepare:'准备回复通道', forwardList:'读取转发会话', forward:'转发作品', personaReload:'载入最新人格', diagnostics:'一键自检或修复', reportGenerate:'生成观看日报', reportRead:'读取观看日报' })[name] || (/^resolve-|^chatResolve:/.test(name) ? '解除会话暂停' : name.startsWith('key:') ? '保存音频密钥' : '本机操作');
     }
 
@@ -65,7 +70,8 @@ window.__ModuleLoader__.load({
           if (!fetcher && typeof rpc?.call !== 'function') throw new Error('当前 DSH 页面没有可用的插件设置通信接口。请更新插件后完全退出并重开 DSH；若仍失败，请核对 DSH 版本与来源。可点击“刷新插件状态”重试。');
           if (input !== undefined && !token) throw new Error('请先刷新原生设置页，核实当前状态。');
           if (route === '/chat/unanswered' && !token) throw new Error('请先刷新原生设置页，核实当前状态。');
-          const operation = requestOperation(route, input), write = input !== undefined, timeoutMs = route === '/state' ? 20_000 : 65_000;
+          const operation = requestOperation(route, input), write = input !== undefined;
+          const timeoutMs = route.startsWith(verificationRoute) ? 12_000 : route === '/state' ? 20_000 : 65_000;
           if (write && writing.has(route)) throw Object.assign(new Error(`${operation}正在处理，请等待当前请求完成。`), { operation, code: 'UI_OPERATION_BUSY' });
           if (write) writing.add(route);
           const signal = AbortSignal.timeout(timeoutMs);
@@ -88,6 +94,192 @@ window.__ModuleLoader__.load({
           finally { if (write) writing.delete(route); }
         },
       };
+    }
+
+    const verificationMessages = {
+      ready: '当前抖音页面已就绪。',
+      required: '抖音仍需要验证或登录。',
+      checking: '页面还在加载，请稍后检查。',
+      'browser-unavailable': '专用浏览器尚未连接，请先打开抖音。',
+      'session-changed': '专用浏览器已切换，请重新打开辅助验证。',
+    };
+    const verificationKeys = new Set(['Backspace', 'Tab', 'Enter', 'Escape', 'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown', 'Delete']);
+
+    function VerificationView({ api, session, onFinish, onFailure }) {
+      const [frame, setFrame] = useState(null);
+      const requests = useRef({ alive: false, sending: false, pointer: null, queue: [] });
+      const callbacks = useRef(null);
+      callbacks.current = { onFinish, onFailure };
+      useEffect(() => {
+        const view = requests.current;
+        view.alive = true;
+        let timer;
+        async function refreshFrame() {
+          if (!view.alive) return;
+          if (document.visibilityState !== 'hidden') {
+            try {
+              const result = await api.request(verificationRoute + '/frame', { session });
+              if (!view.alive) return;
+              if (result.status !== 'opened' && result.status !== 'refreshing') {
+                callbacks.current.onFinish(result);
+                return;
+              }
+              setFrame(result.frame || null);
+            } catch (error) {
+              if (view.alive) callbacks.current.onFailure(error);
+              return;
+            }
+          }
+          if (view.alive) timer = setTimeout(() => { void refreshFrame(); }, 650);
+        }
+        void refreshFrame();
+        return () => { view.alive = false; view.queue.length = 0; clearTimeout(timer); };
+      }, [api, session]);
+
+      function queue(event) {
+        const view = requests.current;
+        if (!frame || !view.alive) return;
+        if (event.type === 'move' && view.queue.at(-1)?.event.type === 'move') view.queue.pop();
+        if (view.queue.length >= 32) return;
+        view.queue.push({ session, view: frame.view, event });
+        if (view.sending) return;
+        view.sending = true;
+        void (async () => {
+          try {
+            while (view.alive && view.queue.length) {
+              const result = await api.request(verificationRoute + '/input', view.queue.shift());
+              if (view.alive && result.status !== 'opened') {
+                callbacks.current.onFinish(result);
+                return;
+              }
+            }
+          } catch (error) {
+            if (view.alive) callbacks.current.onFailure(error);
+          } finally { view.sending = false; }
+        })();
+      }
+
+      function pointer(event, type) {
+        if (!event.isTrusted) return;
+        const view = requests.current, image = event.currentTarget;
+        if (type === 'press') {
+          if (event.button !== 0 || view.pointer !== null || !image.complete || !image.naturalWidth) return;
+          event.preventDefault();
+          image.focus();
+          image.setPointerCapture(event.pointerId);
+          view.pointer = event.pointerId;
+        } else if (type !== 'wheel') {
+          if (view.pointer !== event.pointerId) return;
+          if (type === 'release') view.pointer = null;
+        }
+        const rect = image.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
+        const relative = value => Math.min(0.999999, Math.max(0, value));
+        queue({
+          type, x: relative((event.clientX - rect.left) / rect.width), y: relative((event.clientY - rect.top) / rect.height),
+          ...(type === 'wheel' ? { delta: Math.min(1600, Math.max(-1600, event.deltaY)) } : {}),
+        });
+      }
+
+      if (!frame) return h('p', { role: 'status', style: muted }, '正在读取验证画面…');
+      return h('img', {
+        key: frame.view, src: `data:image/jpeg;base64,${frame.data}`, alt: '当前抖音验证画面', tabIndex: 0,
+        draggable: false, style: { display: 'block', width: '100%', borderRadius: 8, touchAction: 'none', userSelect: 'none' },
+        onPointerDown: event => pointer(event, 'press'),
+        onPointerMove: event => pointer(event, 'move'),
+        onPointerUp: event => pointer(event, 'release'),
+        onPointerCancel: event => pointer(event, 'release'),
+        onWheel: event => pointer(event, 'wheel'),
+        onKeyDown: event => {
+          if (!event.isTrusted || event.ctrlKey || event.altKey || event.metaKey || event.nativeEvent.isComposing) return;
+          const key = event.key;
+          if (verificationKeys.has(key)) { event.preventDefault(); queue({ type: 'key', key }); }
+          else if ([...key].length === 1) { event.preventDefault(); queue({ type: 'text', text: key }); }
+        },
+      });
+    }
+
+    function VerificationSettings({ api, ready, running, available }) {
+      const [state, setState] = useState(null), [session, setSession] = useState(null);
+      const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState('');
+      const alive = useRef(true), busyRef = useRef(false), activeSession = useRef(null);
+
+      function setCurrentSession(value) {
+        activeSession.current = value;
+        setSession(value);
+      }
+      useEffect(() => {
+        alive.current = true;
+        return () => {
+          alive.current = false;
+          if (activeSession.current) void api.request(verificationRoute, { action: 'close', session: activeSession.current }).catch(() => {});
+        };
+      }, [api]);
+
+      async function control(action, quiet = false) {
+        if (!available || !ready || busyRef.current) return;
+        if (quiet && document.visibilityState === 'hidden') return;
+        const id = activeSession.current;
+        busyRef.current = true;
+        setBusy(true);
+        if (!quiet) { setError(''); setMessage(''); }
+        try {
+          const result = await api.request(verificationRoute, { action, ...(action === 'close' ? { session: id } : {}) });
+          if (!alive.current) {
+            if (result.session) void api.request(verificationRoute, { action: 'close', session: result.session }).catch(() => {});
+            return;
+          }
+          if (action === 'close') { setCurrentSession(null); return; }
+          setState(result);
+          if (result.session) setCurrentSession(result.session);
+          else if (result.status !== 'required') setCurrentSession(null);
+          if (!quiet) setMessage(verificationMessages[result.status] || '');
+        } catch (failure) {
+          if (alive.current && !quiet) setError(failure.message);
+        } finally {
+          busyRef.current = false;
+          if (alive.current) setBusy(false);
+        }
+      }
+
+      useEffect(() => {
+        if (!available || !ready || !running || session) return;
+        const check = () => { void control('check', true); };
+        check();
+        const timer = setInterval(check, 15_000);
+        return () => clearInterval(timer);
+      }, [available, ready, running, session]);
+
+      if (!available) return null;
+      const required = running && state?.required === true;
+      const actionButton = (label, action) => h(Button, {
+        type: 'button', size: 'sm', variant: 'outline', disabled: !ready || busy, onClick: () => { void control(action); },
+      }, label);
+      return h('div', { style: { ...column, gap: 8 } },
+        h('div', { style: row },
+          h(Button, {
+            type: 'button', size: 'sm', variant: 'outline', disabled: !ready || busy || Boolean(session),
+            title: required ? '抖音需要安全验证' : undefined, onClick: () => { void control('open'); },
+          }, '辅助验证', required && h('span', { 'aria-hidden': true, style: { display: 'inline-block', marginLeft: 6, width: 7, height: 7, borderRadius: '50%', background: '#fa6a72' } })),
+          (session || required || message) && actionButton('检查验证', 'check')),
+        error && h('p', { role: 'alert', style: muted }, error),
+        message && h('p', { role: 'status', style: muted }, message),
+        session && h('section', { role: 'region', 'aria-label': '抖音辅助验证画面', style: { ...column, gap: 8 } },
+          h('div', { style: row }, h('span', null, '请在下方画面手动验证。'), actionButton('关闭验证画面', 'close')),
+          h(VerificationView, {
+            key: session, api, session,
+            onFinish: result => {
+              setState(result);
+              setCurrentSession(null);
+              setMessage(verificationMessages[result.status] || '');
+            },
+            onFailure: failure => {
+              setError(failure.message);
+              const id = activeSession.current;
+              setCurrentSession(null);
+              if (id) void api.request(verificationRoute, { action: 'close', session: id }).catch(() => {});
+            },
+          })));
     }
 
     function useAutosave({ value, initial, read, encode, write, canonical = (_result, payload) => payload, available = true }) {
@@ -126,6 +318,15 @@ window.__ModuleLoader__.load({
       const existingAuthorization = useRef(false); const alive = useRef(true), refreshing = useRef(null), refreshAgain = useRef(false), locks = useRef(new Set()), submitted = useRef(new Set()), keyValues = useRef(credentials);
       const active = value => value?.running || value?.starting || value?.busy || value?.worker?.alive;
       const operationActive = active(state?.watch) || state?.chat?.starting || state?.chat?.busy || state?.share?.busy;
+      const watch = state?.watch, schedule = state?.schedule;
+      const watchError = !active(watch) && !['limited', 'stopped'].includes(watch?.status) ? watch?.lastError : '';
+      const scheduleError = schedule?.lastError;
+      const olderScheduleError = schedule?.last?.status === 'failed' && schedule.last.error === scheduleError
+        && (active(watch) || Date.parse(watch?.updatedAt) > Date.parse(schedule.last.completedAt));
+      const stopError = (!olderScheduleError && scheduleError) || watchError;
+      const watchRecovery = stopError && (stopError === watchError && watch?.recovery || { action: 'diagnostics', message: stopError });
+      const canStartWatch = typeof schedule?.policy?.enabled === 'boolean' && typeof watch?.running === 'boolean' && state?.model?.configured
+        && !active(watch) && !schedule?.busy;
       async function refresh(fresh = false) {
         if (refreshing.current) { if (fresh) refreshAgain.current = true; return refreshing.current; }
         const work = (async () => {
@@ -149,15 +350,27 @@ window.__ModuleLoader__.load({
       const readVideo = snapshot => { const policy = snapshot?.policy || {}, minutes = Object.hasOwn(policy, 'dailyMinutes') ? policy.dailyMinutes : Object.hasOwn(policy, 'sessionMinutes') ? policy.sessionMinutes : 10, requests = Object.hasOwn(policy, 'dailyRequests') ? policy.dailyRequests : 30; return { windows: (policy.windows || ['00:00-24:00']).join('\n'), weekendAll: policy.weekendWindows?.join() === '00:00-24:00', dailyMinutes: minutes ?? '', unlimitedMinutes: minutes === null, dailyRequests: requests ?? '', unlimitedRequests: requests === null }; };
       const encodeVideo = value => { const windows = list(value.windows); if (!windows.length || windows.some(item => !/^\d{2}:\d{2}-\d{2}:\d{2}$/.test(item))) throw new Error('时段请填写完整的 HH:MM-HH:MM。'); return { windows, weekendWindows: value.weekendAll ? ['00:00-24:00'] : null, dailyMinutes: value.unlimitedMinutes ? null : positive(value.dailyMinutes, '每日观看分钟数'), dailyRequests: value.unlimitedRequests ? null : positive(value.dailyRequests, '每日模型请求次数') }; };
       const video = useAutosave({ value: state?.video, initial: readVideo(null), read: readVideo, encode: encodeVideo, write: write('/video/configure'), canonical: (saved, payload) => saved?.policy ? encodeVideo(readVideo(saved)) : payload, available: ready });
+      const privateVideo = useAutosave({
+        value: state?.video?.privateVideoSchedule, initial: { mode: 'all-day' },
+        read: value => ({ mode: value.mode ?? '' }), encode: value => value,
+        write: write('/video/private-schedule'), available: ready && Boolean(state?.video?.privateVideoSchedule),
+      });
       const readTopics = value => ({ mode: value?.policy?.mode || 'recommend', topics: (value?.policy?.topics || []).join('\n'), exclude: (value?.policy?.exclude || []).join('\n') });
       const topics = useAutosave({ value: state?.watchOptions, initial: readTopics(null), read: readTopics, encode: value => ({ mode: value.mode, topics: list(value.topics), exclude: list(value.exclude) }), write: write('/watch/options'), canonical: (saved, payload) => saved?.policy ? { mode: saved.policy.mode, topics: saved.policy.topics || [], exclude: saved.policy.exclude || [] } : payload, available: ready });
       const mode = useAutosave({ value: state?.mode, initial: { silent: false }, read: value => ({ silent: value?.silent === true }), encode: value => value, write: write('/mode/configure'), canonical: (saved, payload) => typeof saved?.silent === 'boolean' ? { silent: saved.silent } : payload, available: ready });
+      const reactions = useAutosave({ value: state?.reactions, initial: { like: false, favorite: false }, read: value => value.policy, encode: value => ({ like: value.like === true, favorite: value.favorite === true }), write: write('/reactions/configure'), canonical: saved => saved.policy, available: ready && !!state?.reactions });
       const comments = useAutosave({ value: state?.comments, initial: { enabled: false, dailyLimit: 3, perSessionLimit: 1 }, read: value => ({ enabled: value.enabled === true, dailyLimit: value.policy?.dailyLimit ?? 3, perSessionLimit: value.policy?.perSessionLimit ?? 1 }), encode: value => ({ enabled: value.enabled, dailyLimit: positive(value.dailyLimit, '每日评论次数'), perSessionLimit: positive(value.perSessionLimit, '每次观看评论次数') }), write: write('/comments/configure'), canonical: (saved, payload) => saved?.policy ? { enabled: saved.enabled === true, dailyLimit: saved.policy.dailyLimit, perSessionLimit: saved.policy.perSessionLimit } : payload, available: ready });
       const media = useAutosave({ value: state?.media, initial: { enabled: false, backend: 'local-whisper' }, read: value => ({ enabled: value.enabled === true, backend: value.backend || 'local-whisper' }), encode: value => value, write: write('/media/configure'), available: ready });
       const readChat = value => ({ recipientIds: (value?.policy?.allowlist || []).map(item => item.id), allowConversationOnly: existingAuthorization.current || (value?.policy?.allowlist || []).some(item => ['existing-conversation', 'existing-group'].includes(item.authorizationKind)), groupMentionNamesText: (value?.policy?.groupMentionNames || ['大肥鱼']).join('\n') });
       const encodeChat = value => ({ recipientIds: value.recipientIds, allowConversationOnly: value.allowConversationOnly, groupMentionNames: list(value.groupMentionNamesText) });
       const chat = useAutosave({ value: state?.chat, initial: readChat(null), read: readChat, encode: encodeChat, write: write('/chat/configure'), canonical: (saved, payload) => saved?.policy ? encodeChat(readChat(saved)) : payload, available: ready });
       const shownContacts = [...new Map([...(state?.chat?.policy?.allowlist || []).map(item => ({ ...item, notListed: Boolean(contacts) && !contacts.some(found => found.id === item.id) })), ...(contacts || [])].map(item => [item.id, item])).values()];
+      const showAuthorization = contacts?.some(item => item.isGroup !== false || item.relationshipStatus === 'unavailable' ||
+        item.relationshipStatus === 'unverified' && item.manualAuthorizationEligible === true);
+      const canSelectContact = item => typeof item.isGroup === 'boolean' && (
+        item.isGroup === false && item.followed === true ||
+        chat.draft.allowConversationOnly && (item.manualAuthorizationEligible ?? (item.relationshipStatus !== 'unverified'))
+      );
       async function perform(key, action) {
         if (!ready || locks.current.has(key)) return; locks.current.add(key); setBusy(new Set(locks.current)); setNotice('');
         setOperationErrors(old => { const next = { ...old }; delete next[key]; return next; });
@@ -180,32 +393,62 @@ window.__ModuleLoader__.load({
       }
       const friendEnabled = state?.interactions?.policy?.enabled === true, watchEnabled = state?.schedule?.policy?.enabled === true;
       const presence = ready ? state?.interactions?.presence : null, replyPresence = presence?.reply || presence, watchState = presence?.watch, presenceLabel = replyPresence?.label || '状态待核实', presenceReason = replyPresence?.reason || '正在读取好友回复服务状态。', watchLabel = watchState?.active ? watchState.label : '';
+      const browserMode = state?.browserMode;
+      const backgroundWatching = (browserMode?.running ? browserMode.recordedMode : browserMode?.mode) === 'background';
       return h('div', { style: { ...column, maxWidth: 900, paddingBottom: 32 } },
         h('h2', null, '大肥鱼抖音助手'), !ready && h('p', { role: 'status' }, '正在核实插件状态。'), connectionError && h('p', { role: 'alert' }, connectionError),
         ...Object.entries(operationErrors).map(([key, failure]) => h('div', { key, role: 'alert', style: row }, h('span', null, `${failure.requestError ? '上次操作：' : ''}${failure.message}${failure.requestError && ready ? failure.unconfirmed ? ' 本机服务当前已连接；请核对上述操作是否生效。' : ' 本机服务当前已连接。' : ''}`), h('button', { type: 'button', 'aria-label': `清除${operationLabel(key)}提示`, onClick: () => setOperationErrors(old => { const next = { ...old }; delete next[key]; return next; }) }, '×'))), notice && h('p', { role: 'status' }, notice),
-        h('div', { role: 'status', 'aria-live': 'polite', style: { ...row, position: 'sticky', top: 0, zIndex: 5, background: 'var(--dsw-alias-bg-base, #fff)', padding: '8px 0' }, title: [presenceReason, watchState?.active ? watchState.reason : ''].filter(Boolean).join(' ') }, h('span', { 'aria-label': '好友互动状态', title: presenceReason, style: { border: '1px solid currentColor', borderRadius: 20, padding: '6px 12px', whiteSpace: 'nowrap' } }, `${replyPresence?.online === true ? '●' : '○'} ${presenceLabel}`), watchState?.active && h('small', { role: 'status', 'aria-label': '自主观看状态', title: watchState.reason, style: muted }, `◉ ${watchLabel}`), (['attention', 'preparing'].includes(replyPresence?.status) || watchState?.active && replyPresence?.online !== true) && h('small', { role: replyPresence?.status === 'attention' ? 'alert' : 'status', style: muted }, presenceReason)),
+        h('div', { role: 'status', 'aria-live': 'polite', style: { ...column, gap: 6 } },
+          h('div', { style: row },
+            h('span', { 'aria-label': '好友互动状态', title: presenceReason, style: { border: '1px solid currentColor', borderRadius: 20, padding: '6px 12px' } }, `${replyPresence?.online === true ? '●' : '○'} ${presenceLabel}`),
+            watchState?.active && h('small', { 'aria-label': '自主观看状态', title: watchState.reason, style: muted }, `◉ ${watchLabel}`)),
+          (['attention', 'preparing'].includes(replyPresence?.status) || watchState?.active && replyPresence?.online !== true)
+            && h('p', { role: replyPresence?.status === 'attention' ? 'alert' : undefined, style: muted }, presenceReason)),
         h('div', { style: row }, button('刷新插件状态', 'refresh', () => { void refresh(); }, false, false), button('打开抖音', 'browser', () => { void perform('browser', () => api.request('/browser/open', {})); })),
+        h(VerificationSettings, { api, ready, running: browserMode?.running, available: state?.verificationAvailable === true }),
         h('div', { role: 'tablist', 'aria-label': '抖音设置分类', style: row }, ...Object.keys(fallbackCategories).map(name => h(Button, { key: name, role: 'tab', type: 'button', size: 'sm', variant: category === name ? 'primary' : 'outline', 'aria-selected': category === name, onClick: () => setCategory(name) }, name))),
         category === '基础设置' && h('div', null,
           section('DSH 模型', select('模型提供商', model.draft.provider, [['', '请选择 DSH 提供商'], ...(state?.model?.providers || []).map(item => [item.id, item.name || item.id])], provider => model.edit({ provider, model: '' }, { immediate: true }), operationActive), select('模型名称', model.draft.model, [['', '请选择模型'], ...(state?.model?.models || []).filter(item => item.provider === model.draft.provider).map(item => [item.id, item.name || item.id])], value => model.edit({ model: value }, { immediate: true }), operationActive), status(model), note(state?.model?.configured ? '模型已配置。' : '请选择已配置的 DSH 模型。')),
           section('人格与兴趣', area('大肥鱼人格正文', persona, 'content', 14, true, operationActive), status(persona), persona.status.kind === 'error' && button('载入最新人格（替换草稿）', 'personaReload', () => { void perform('personaReload', async () => { const latest = await refresh(true); if (!latest?.persona?.revision) throw new Error('未读到最新人格，原草稿已保留。'); persona.edit({ content: latest.persona.manualText || '', expectedRevision: latest.persona.revision }, { blurOnly: true }); return latest.persona; }); }), note('离开输入框后保存。插件与软件共用人格，未保存草稿不会被轮询覆盖。'), note(state?.persona?.personaFolder))),
         category === '视频观看' && h('div', null,
           section('视频观看', toggle('允许自动观看', watchEnabled, enabled => { void perform('schedule', () => api.request('/watch/schedule', { enabled })); }, typeof state?.schedule?.policy?.enabled !== 'boolean' || busy.has('schedule')), note('在允许时段内自动观看，离开时段或用完每日预算会停止。DSH 需保持运行。'),
-            h('div', { style: row }, button('开始自主观看', 'schedule', () => { void perform('schedule', () => api.request('/watch/schedule', { enabled: true })); }, typeof state?.schedule?.policy?.enabled !== 'boolean' || typeof state?.watch?.running !== 'boolean' || !state?.model?.configured || active(state?.watch) || state?.schedule?.busy), button('暂停观看', 'schedule', () => { void perform('schedule', () => api.request('/watch/schedule', { enabled: false })); }, typeof state?.schedule?.policy?.enabled !== 'boolean' || typeof state?.watch?.running !== 'boolean' || !watchEnabled && !active(state?.watch) && !state?.schedule?.busy)),
+            h('div', { style: row }, !watchRecovery && button('开始自主观看', 'schedule', () => { void perform('schedule', () => api.request('/watch/schedule', { enabled: true })); }, !canStartWatch), button('暂停观看', 'schedule', () => { void perform('schedule', () => api.request('/watch/schedule', { enabled: false })); }, typeof state?.schedule?.policy?.enabled !== 'boolean' || typeof state?.watch?.running !== 'boolean' || !watchEnabled && !active(state?.watch) && !state?.schedule?.busy)),
+            watchRecovery && h('div', { style: column, role: 'group', 'aria-label': '恢复自主观看' },
+              h('p', { role: 'alert', style: muted }, watchRecovery.message),
+              watchRecovery.action === 'verify' && note(state?.verificationAvailable
+                ? (schedule?.verificationAutoResume && watchEnabled
+                  ? '点上方「辅助验证」。通过后，在允许时段和额度内自动恢复。'
+                  : '在页面上方点「辅助验证」，完成后继续观看。')
+                : '在专用浏览器完成登录或验证，然后继续观看。'),
+              h('div', { style: row },
+                (watchRecovery.action === 'browser' || watchRecovery.action === 'verify' && !state?.verificationAvailable) && button('打开抖音', 'browser', () => { void perform('browser', () => api.request('/browser/open', {})); }),
+                watchRecovery.action === 'review-comments'
+                  ? button('查看评论记录', 'reviewComments', () => setCategory('公开评论'), false, false)
+                  : button('继续观看', 'schedule', () => { void perform('schedule', () => api.request('/watch/schedule', { enabled: true })); }, !canStartWatch || state?.video?.allowed !== true),
+                button('打开自检', 'showDiagnostics', () => setCategory('自检与用量'), false, false))),
             note('不在允许时段会等待；按钮与开关共用设置，每日已用时长和模型次数不会重置。'),
             h('div', { style: row }, button('谷时段（DeepSeek）', 'valley', () => video.edit({ windows: '00:00-09:00\n12:00-14:00\n18:00-24:00', weekendAll: true }, { immediate: true })), button('全天', 'all', () => video.edit({ windows: '00:00-24:00', weekendAll: false }, { immediate: true })), button('晚间 20–22 点', 'evening', () => video.edit({ windows: '20:00-22:00', weekendAll: false }, { immediate: true }))), toggle('周末全天允许', video.draft.weekendAll, value => video.edit({ weekendAll: value }, { immediate: true })), area('每日允许视频时段（北京时间）', video, 'windows'),
-            h('details', null, h('summary', null, '高级选项'), toggle('不限每日观看时长', video.draft.unlimitedMinutes, value => video.edit({ unlimitedMinutes: value }, { immediate: true })), field('每日观看上限（分钟）', video, 'dailyMinutes', { type: 'number', min: 1, value: video.draft.unlimitedMinutes ? '' : video.draft.dailyMinutes, placeholder: video.draft.unlimitedMinutes ? '不限；输入分钟数可设置上限' : '正整数分钟数', onChange: event => video.edit({ dailyMinutes: event.target.value, ...(event.target.value !== '' ? { unlimitedMinutes: false } : {}) }) }), toggle('不限每日模型请求次数', video.draft.unlimitedRequests, value => video.edit({ unlimitedRequests: value }, { immediate: true })), field('每日观看模型请求上限', video, 'dailyRequests', { type: 'number', min: 1, value: video.draft.unlimitedRequests ? '' : video.draft.dailyRequests, placeholder: video.draft.unlimitedRequests ? '不限；输入次数可设置上限' : '正整数次数', onChange: event => video.edit({ dailyRequests: event.target.value, ...(event.target.value !== '' ? { unlimitedRequests: false } : {}) }) })), status(video), note(`今日已观看 ${Math.floor(state?.video?.daily?.usedSeconds || 0)} 秒 · 已请求 ${state?.video?.daily?.requests || 0} 次模型。`), note(state?.video?.reason), note(state?.schedule?.lastError), state?.watch?.lastError && h('p', { role: 'status' }, `上次自主观看停止原因：${state.watch.lastError}`)),
+            h('details', null, h('summary', null, '高级选项'), toggle('不限每日观看时长', video.draft.unlimitedMinutes, value => video.edit({ unlimitedMinutes: value }, { immediate: true })), field('每日观看上限（分钟）', video, 'dailyMinutes', { type: 'number', min: 1, value: video.draft.unlimitedMinutes ? '' : video.draft.dailyMinutes, placeholder: video.draft.unlimitedMinutes ? '不限；输入分钟数可设置上限' : '正整数分钟数', onChange: event => video.edit({ dailyMinutes: event.target.value, ...(event.target.value !== '' ? { unlimitedMinutes: false } : {}) }) }), toggle('不限每日模型请求次数', video.draft.unlimitedRequests, value => video.edit({ unlimitedRequests: value }, { immediate: true })), field('每日观看模型请求上限', video, 'dailyRequests', { type: 'number', min: 1, value: video.draft.unlimitedRequests ? '' : video.draft.dailyRequests, placeholder: video.draft.unlimitedRequests ? '不限；输入次数可设置上限' : '正整数次数', onChange: event => video.edit({ dailyRequests: event.target.value, ...(event.target.value !== '' ? { unlimitedRequests: false } : {}) }) })), status(video), note(`今日自主观看 ${Math.floor(state?.video?.daily?.usedSeconds || 0)} 秒 · 模型请求 ${state?.video?.daily?.requests || 0} 次。`), note(`今日私信视频 ${Math.floor(state?.video?.daily?.privateVideoSeconds || 0)} 秒。`), note(state?.video?.reason),
+            state?.video?.privateVideoSchedule && select('私信分享视频时段', privateVideo.draft.mode, [
+              ...(!privateVideo.draft.mode ? [['', '请选择观看时段']] : []),
+              ['all-day', '全天'], ['follow-watch-hours', '跟随自主观看时段'],
+            ], mode => privateVideo.edit({ mode }, { immediate: true })), status(privateVideo)),
           section('观看主题', select('观看方式', topics.draft.mode, [['recommend', '自主挑选推荐'], ['topic', '围绕指定主题观看']], value => topics.edit({ mode: value }, { immediate: true })), area('想看的主题，每行一个', topics, 'topics'), area('排除关键词，每行一个', topics, 'exclude'), status(topics)),
-          section('静默观看', toggle('静默观看', mode.draft.silent, value => mode.edit({ silent: value }, { immediate: true })), status(mode), note(state?.mode?.application?.message || state?.mode?.note))),
+          section('观看方式',
+            browserMode && toggle('后台观看（无窗口）', backgroundWatching, enabled => {
+              void perform('browserMode', () => api.request('/browser/mode', { mode: enabled ? 'background' : 'visible' }));
+            }, busy.has('browserMode')),
+            busy.has('browserMode') && note('正在切换专用浏览器…'),
+            toggle('静默观看', mode.draft.silent, value => mode.edit({ silent: value }, { immediate: true })), status(mode), note(state?.mode?.application?.message || state?.mode?.note))),
         category === '好友互动' && section('好友互动', toggle('允许好友互动', friendEnabled, enabled => { void perform('interactions', () => api.request('/interactions/configure', { enabled })); }, typeof state?.interactions?.policy?.enabled !== 'boolean' || busy.has('interactions')), note('只与下方许可的好友和群聊互动，不设人数和次数上限。模型和名单就绪后自动准备回复；观看中可自主分享。群聊仅在被 @ 或叫到响应昵称时回复。'), note(state?.interactions?.friend?.message), state?.interactions?.friend?.lastError && h('p', { role: 'alert' }, state.interactions.friend.lastError),
           state?.interactions?.friend?.waitReason && note(`${state.interactions.friend.preparing ? '正在准备：' : '等待准备：'}${state.interactions.friend.waitReason}${state.interactions.friend.lastErrorCode ? `（${state.interactions.friend.lastErrorCode}）` : ''}${state.interactions.friend.nextRetryAt ? ` · 下次自动检查 ${new Date(state.interactions.friend.nextRetryAt).toLocaleString('zh-CN', { hour12: false })}` : ''}`),
           state?.interactions?.friend?.waitReason && h('div', { style: row }, h(Button, { type: 'button', size: 'sm', variant: 'outline', disabled: !ready || busy.has('chatPrepare') || state.interactions.friend.canPrepare === false, onClick: () => { void perform('chatPrepare', () => api.request('/chat/prepare', {})); } }, busy.has('chatPrepare') || state.interactions.friend.preparing ? '正在准备…' : '准备回复通道/重新连接并重试')),
           button('读取联系人与群聊', 'chatList', () => { void perform('chatList', async () => { const result = await api.request('/chat/contacts', {}); if (result.blocked || result.loginRequired || result.verificationRequired || !Array.isArray(result.contacts)) throw new Error('请在专用浏览器完成登录或验证。'); setContacts(result.contacts); setDiscovery(result.listDiscovery || null); return result; }); }, chat.status.kind === 'saving'),
           note('读取范围是抖音网页版当前会话，不代表全部关注好友或所有群。要授权群聊，请先让群会话出现在抖音消息列表，再刷新。'), contacts && note(`本次读取：个人 ${contacts.filter(item => item.isGroup === false).length} 个 · 群聊 ${contacts.filter(item => item.isGroup === true).length} 个。${discovery?.scannedToEnd === false ? ` 当前列表尚未完整读取。${discovery.reason || ''}` : ''}`),
-          contacts?.some(item => item.relationshipStatus === 'unavailable' || item.isGroup === true || typeof item.isGroup !== 'boolean') && toggle('授权已核对的现有会话', chat.draft.allowConversationOnly, value => { existingAuthorization.current = value; chat.edit({ allowConversationOnly: value, ...(!value ? { recipientIds: chat.draft.recipientIds.filter(id => shownContacts.some(item => item.id === id && item.followed === true && item.isGroup === false)) } : {}) }, value ? { blurOnly: true } : { immediate: true }); }),
-          ...[false, true, null].flatMap(kind => { const items = shownContacts.filter(item => item.isGroup === kind || kind === null && typeof item.isGroup !== 'boolean'); return items.length ? [note(kind === false ? '个人会话' : kind === true ? '群聊（仅被 @ 或叫到响应昵称时回复）' : '旧记录类型待核对（暂不可选）'), ...items.map(item => h('label', { key: item.id, style: row }, h('input', { type: 'checkbox', 'aria-label': `许可联系人 ${item.name || item.displayName || '联系人'}`, checked: chat.draft.recipientIds.includes(item.id), disabled: !ready || !chat.draft.recipientIds.includes(item.id) && (item.notListed || !(item.followed === true && item.isGroup === false || chat.draft.allowConversationOnly === true && typeof item.isGroup === 'boolean')), onChange: event => chat.edit({ recipientIds: event.target.checked ? [...chat.draft.recipientIds, item.id] : chat.draft.recipientIds.filter(id => id !== item.id) }, { immediate: true }) }), item.name || item.displayName || '许可会话'))] : []; }),
+          showAuthorization && toggle('授权已核对的现有会话', chat.draft.allowConversationOnly, value => { existingAuthorization.current = value; chat.edit({ allowConversationOnly: value, ...(!value ? { recipientIds: chat.draft.recipientIds.filter(id => shownContacts.some(item => item.id === id && item.followed === true && item.isGroup === false)) } : {}) }, value ? { blurOnly: true } : { immediate: true }); }),
+          ...[false, true, null].flatMap(kind => { const items = shownContacts.filter(item => item.isGroup === kind || kind === null && typeof item.isGroup !== 'boolean'); return items.length ? [note(kind === false ? '个人会话' : kind === true ? '群聊（仅被 @ 或叫到响应昵称时回复）' : '旧记录类型待核对（暂不可选）'), ...items.map(item => h('label', { key: item.id, style: row }, h('input', { type: 'checkbox', 'aria-label': `许可联系人 ${item.name || item.displayName || '联系人'}`, checked: chat.draft.recipientIds.includes(item.id), disabled: !ready || !chat.draft.recipientIds.includes(item.id) && (item.notListed || !canSelectContact(item)), onChange: event => chat.edit({ recipientIds: event.target.checked ? [...chat.draft.recipientIds, item.id] : chat.draft.recipientIds.filter(id => id !== item.id) }, { immediate: true }) }), item.name || item.displayName || '许可会话'))] : []; }),
           area('群聊响应昵称（逗号或换行分隔）', chat, 'groupMentionNamesText', 2, true), status(chat), note(`今日回复模型请求 ${state?.chat?.daily?.requests || 0} 次 · 今日分享 ${state?.share?.daily?.attempts || 0} 次。未确认发送会暂停，不自动重发。`), ...(state?.chat?.contacts || []).filter(item => item.identityReviewRequired === true || item.recovery?.requiresUserAction === true || /登录|验证码|未授权|许可.*(?:不足|失效|撤销)|身份.*(?:变化|不一致|未通过|不明|不足)/.test(item.reason || '') || ['paused', 'delivery-uncertain'].includes(item.status) && !(item.recovery?.autoPendingCount > 0 || item.recovery?.autoRetryCount > 0)).map(item => h('div', { key: item.id }, note(item.reason || '该会话暂缓处理，状态会继续更新。'), item.identityReviewRequired === true && note('请重新读取联系人并确认许可名单；身份未通过前不会发送。'))), ...(state?.share?.unavailableRecipients || []).map(item => note(`暂不能自主分享：${item.name || '许可会话'} · ${item.reason}`)), ...reviewList('share'), h('details', null, h('summary', null, '回复处理记录'), h('pre', { style: { whiteSpace: 'pre-wrap' } }, JSON.stringify({ recovery: state?.chat?.recovery, contacts: (state?.chat?.contacts || []).map(item => ({ id: item.id, status: item.status, reason: item.reason, recovery: item.recovery, pending: Boolean(item.pending), unanswered: item.unanswered?.length || 0 })), events: state?.chat?.events || [] }, null, 2))), h('details', null, h('summary', null, '最近分享记录'), ...(state?.share?.recent || []).slice().reverse().map(item => h('div', { key: item.operationId }, note(`作品 ${item.videoId} · ${state?.share?.inProgress && state.share.activity?.operationId === item.operationId ? '正在分享' : ({ confirmed: '已确认送达', 'not-sent': '未发出', uncertain: '送达未确认', reserved: '已预留，待核对', clicking: '处理中，待核对', 'resolved-confirmed': '人工已确认送达', 'resolved-not-sent': '人工已确认未送达' }[item.status] || item.status)}`), shareFailureMessage(item) && note(`原因：${shareFailureMessage(item)}`))))),
-        category === '公开评论' && section('自主公开视频评论', toggle('允许自主发布评论', comments.draft.enabled, value => comments.edit({ enabled: value }, { immediate: true })), field('评论每日尝试上限', comments, 'dailyLimit', { type: 'number', min: 1 }), field('评论每次观看尝试上限', comments, 'perSessionLimit', { type: 'number', min: 1 }), status(comments), note(`今日已尝试 ${state?.comments?.daily?.attempts || 0} 次。`), ...reviewList('comments')),
+        category === '公开评论' && section('自主点赞、收藏与评论', toggle('允许自主点赞', reactions.draft.like, value => reactions.edit({ like: value }, { immediate: true })), toggle('允许自主收藏', reactions.draft.favorite, value => reactions.edit({ favorite: value }, { immediate: true })), status(reactions), toggle('允许自主发布评论', comments.draft.enabled, value => comments.edit({ enabled: value }, { immediate: true })), field('评论每日尝试上限', comments, 'dailyLimit', { type: 'number', min: 1 }), field('评论每次观看尝试上限', comments, 'perSessionLimit', { type: 'number', min: 1 }), status(comments), note(`今日已尝试 ${state?.comments?.daily?.attempts || 0} 次。`), ...reviewList('comments')),
         category === '音频与密钥' && section('可选音频', toggle('读取视频声音', media.draft.enabled, value => media.edit({ enabled: value }, { immediate: true })), select('音频后端', media.draft.backend, [['local-whisper', '本机 Whisper'], ['mimo', 'MiMo'], ['minimax', 'MiniMax']], value => media.edit({ backend: value }, { immediate: true })), status(media), note('Key 离开输入框后保存；保存 Key 不会开启音频或下载模型。'), credentialForm('mimo', 'MiMo'), credentialForm('minimax', 'MiniMax')),
         category === '观看日报' && section('观看日报', note(state?.reports?.folder), button('生成今天日报', 'reportGenerate', () => { void perform('reportGenerate', async () => { const value = await api.request('/reports/generate', {}); setReport(value); return value; }); }), h('label', { style: column }, '日报日期', h('input', { type: 'date', 'aria-label': '日报日期', style: formControl, value: reportDate, onChange: event => setReportDate(event.target.value) })), button('读取所选日报', 'reportRead', () => { void perform('reportRead', async () => { if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) throw new Error('请选择有效日期。'); const value = await api.request(`/reports/read?date=${reportDate}`); setReport(value); return value; }); }), report && h('pre', { 'aria-label': '日报内容', style: { whiteSpace: 'pre-wrap' } }, report.markdown || '暂无内容')),
         category === '自检与用量' && section('自检与用量', button('一键自检', 'diagnostics', () => { void perform('diagnostics', async () => { const value = await api.request('/diagnostics', {}); setDiagnostics(value); setRepairResult(''); return value; }); }), diagnostics && h('div', { style: column }, ...(diagnostics.checks || []).map(item => h('div', { key: item.id }, note(`${({ pass: '通过', warning: '待核对', fail: '未通过' })[item.status]} · ${item.label}：${item.message} [${item.code || ''}]`), ...(item.resolution?.steps || []).map(step => note(step)))), ...(diagnostics.repairableActions || []).map(action => button(`修复：${action.label}`, 'diagnostics', () => { void perform('diagnostics', async () => { const value = await api.request('/diagnostics/repair', { reportId: diagnostics.reportId, action: action.id }); setDiagnostics(value.after); setRepairResult(value.message); return value; }); })), note(repairResult), h('details', null, h('summary', null, '查看或复制诊断报告'), h('textarea', { 'aria-label': '诊断报告', readOnly: true, rows: 12, style: formControl, value: JSON.stringify(diagnostics, null, 2) }))), h('h3', null, '今日用量'), note(`模型响应 ${state?.usage?.today?.requests || 0} 次 · 已报告 ${state?.usage?.today?.totalTokens || 0} Token`), note(`输入 ${state?.usage?.today?.promptTokens || 0} · 输出 ${state?.usage?.today?.completionTokens || 0} · 缓存命中 ${state?.usage?.today?.cacheReportedRequests ? state.usage.today.cachedTokens : '未报告'} · 用量未知 ${state?.usage?.today?.unknownRequests || 0} 次`), state?.usage?.inFlight > 0 && note(`请求中 ${state.usage.inFlight} 次，Token 等模型返回后记录。`), ...(state?.usage?.groups || []).map(item => note(`${item.model} · ${item.requests} 次响应 · ${item.totalTokens} Token`)), note(state?.usage?.note))

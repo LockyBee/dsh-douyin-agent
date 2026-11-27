@@ -13,7 +13,7 @@ const [{ Context }, { WebServer }, connectionModule] = await Promise.all([
 ]);
 
 async function fixture(t, web = true) {
-  const ctx = new Context(), settings = { minutes: 10, writes: 0 };
+  const ctx = new Context(), settings = { minutes: 10, writes: 0, friendEnabled: false };
   t.after(async () => { await ctx.fiber.dispose(); });
   const records = new Map();
   ctx.provide('credentials', { async modifyRecord(key, callback) { const next = await callback(records.get(key)); if (next !== undefined) records.set(key, next); return records.get(key); } });
@@ -21,9 +21,29 @@ async function fixture(t, web = true) {
   if (web) await ctx.plugin(connectionModule).await();
   else new connectionModule.HostConnectionService(ctx, [], {});
   const state = () => ({}), service = () => ({ state });
+  const browserMode = { mode: 'visible', recordedMode: 'visible', running: true, restartRequired: false };
+  const limits = {
+    state,
+    savePolicy(input) { settings.writes++; settings.minutes = input.sessionMinutes; return { saved: true }; },
+    savePrivateVideoSchedule(input, options) { assert.equal(options.explicit, true); settings.writes++; return { mode: input.mode }; },
+  };
+  const controller = {
+    limits: () => limits, getPersonaMemory: () => ({ snapshot: state }),
+    getBrowserMode: () => ({ state: () => browserMode }),
+    async configureBrowserMode(input) { settings.writes++; browserMode.mode = input.mode; browserMode.recordedMode = input.mode; return browserMode; },
+  };
   const route = createNativeSettingsRoute({
-    getController: async () => ({ limits: () => ({ state, savePolicy(input) { settings.writes++; settings.minutes = input.sessionMinutes; return { saved: true }; } }), getPersonaMemory: () => ({ snapshot: state }) }),
-    getSpark: service, getComments: service, getReport: service, getMode: service, getWatch: service, modelSettings: { state },
+    getController: async () => controller,
+    getVerification: async () => ({ control(input) { assert.deepEqual(input, { action: 'check' }); return { status: 'required', mode: 'background', required: true }; } }),
+    getFriends: async () => ({
+      state: () => ({ policy: { enabled: settings.friendEnabled } }),
+      configure(input, { explicit }) {
+        assert.equal(explicit, true);
+        settings.friendEnabled = input.enabled;
+        settings.writes++;
+      },
+    }),
+    getSpark: service, getComments: service, getReport: service, getMode: service, getWatch: service, getChat: service, getShare: service, modelSettings: { state },
   });
   const binding = bindNativeSettingsRoutes(ctx, () => route); await binding.ready();
   t.after(async () => { await binding.dispose(); await ctx.fiber.dispose(); });
@@ -35,8 +55,34 @@ test('真实 Connection 在没有 WebServer 时仍能读取和保存设置，保
   const carrier = connection.createSharedFetchHandler('/api');
   const request = (route, input, token) => carrier.fetch(new Request('http://127.0.0.1/api/douyin-browser' + route, { ...(input === undefined ? {} : { method: 'POST', body: JSON.stringify(input) }), headers: { 'content-type': 'application/json', ...(token ? { 'x-douyin-settings-token': token } : {}) } }), connection.browserPeer ?? connection.operator);
   const state = await (await request('/state')).json(); assert.ok(state.token);
+  assert.equal(state.verificationAvailable, true);
+  assert.equal((await request('/browser/verification', { action: 'check' })).status, 403);
+  const verification = await request('/browser/verification', { action: 'check' }, state.token);
+  assert.equal(verification.status, 200);
+  assert.deepEqual(await verification.json(), { status: 'required', mode: 'background', required: true });
+  assert.equal(state.browserMode.recordedMode, 'visible');
   assert.equal((await request('/video/configure', { sessionMinutes: 7 })).status, 403); assert.equal(f.settings.writes, 0);
   assert.equal((await request('/video/configure', { sessionMinutes: 7 }, state.token)).status, 200); assert.equal(f.settings.minutes, 7);
+  const privateVideo = { mode: 'follow-watch-hours' };
+  assert.equal((await request('/video/private-schedule', privateVideo)).status, 403);
+  assert.equal(f.settings.writes, 1);
+  const savedPrivateVideo = await request('/video/private-schedule', privateVideo, state.token);
+  assert.equal(savedPrivateVideo.status, 200);
+  assert.deepEqual(await savedPrivateVideo.json(), privateVideo);
+  assert.equal(f.settings.writes, 2);
+  assert.equal((await request('/browser/mode', { mode: 'background' })).status, 403);
+  assert.equal((await request('/browser/mode', { mode: 'background' }, state.token)).status, 200);
+  assert.equal((await (await request('/state')).json()).browserMode.recordedMode, 'background');
+  assert.equal(f.settings.writes, 3);
+  assert.equal((await request('/interactions/configure', { enabled: true })).status, 403);
+  assert.equal(f.settings.writes, 3);
+  for (const enabled of [true, false]) {
+    const saved = await request('/interactions/configure', { enabled }, state.token);
+    assert.equal(saved.status, 200);
+    assert.equal((await saved.json()).policy.enabled, enabled);
+    assert.equal((await (await request('/state')).json()).interactions.policy.enabled, enabled);
+  }
+  assert.equal(f.settings.writes, 5);
   await f.binding.dispose(); assert.equal((await request('/state')).status, 404);
 });
 
@@ -55,6 +101,8 @@ test('真实 WebServer 与 Connection RPC 完整往返，未认证调用被拒�
   const initial = await call({ path: '/state' }); assert.equal(initial.status, 200);
   assert.equal((await call({ path: '/video/configure', input: { sessionMinutes: 8 }, token: initial.body.token })).status, 200);
   assert.equal(f.settings.minutes, 8);
+  assert.equal((await call({ path: '/interactions/configure', input: { enabled: true }, token: initial.body.token })).status, 200);
+  assert.equal((await call({ path: '/state' })).body.interactions.policy.enabled, true);
 });
 
 test('桥接拒绝跨源、非所有者、未知接口和超长输入，预先取消不执行操作', { timeout: 15_000 }, async t => {

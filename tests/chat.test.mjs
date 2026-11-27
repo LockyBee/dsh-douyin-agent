@@ -54,7 +54,7 @@ test('最终发送锁内出现未知行也复用缓存，过期缓存不发送',
   for (const expired of [false, true]) {
     const f = fixture(t); const read = f.browser.readConversation; let generated = false, reads = 0, calls = 0;
     f.agent.reply = async () => { generated = true; calls++; return { text: '合成缓存回复' }; };
-    f.browser.readConversation = async (...args) => { if (generated && ++reads === 2) f.messages.push({ id: 'unknown-lock', sender: 'unknown', text: '' }); return read(...args); };
+    f.browser.readConversation = async (...args) => { if (generated && ++reads === 1) f.messages.push({ id: 'unknown-lock', sender: 'unknown', text: '' }); return read(...args); };
     await prepare(f); f.messages.push(message('fresh-lock', '新的合成消息')); await f.service.poll();
     assert.equal(f.sent.length, 0); assert.equal(calls, 1); assert.equal(f.service.state().contacts[0].pending.phase, 'snapshot-wait');
     await f.service.poll(); assert.equal(calls, 1);
@@ -84,6 +84,70 @@ test('列表重绘未取得快照时保留水位并等待，下次可靠新消�
   assert.equal(f.sent.length, 1); assert.equal(f.inputs.length, 1);
 });
 
+test('普通文字生成后只在发送锁内重新读取一次会话', async t => {
+  const f = fixture(t);
+  await prepare(f);
+  const read = f.browser.readConversation;
+  let reads = 0;
+  f.browser.readConversation = (...args) => { reads++; return read(...args); };
+  f.messages.push(message('short-text', '合成短消息'));
+  await f.service.poll();
+  assert.equal(reads, 2);
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.sent.length, 1);
+  const event = f.service.events.find(row => row.type === 'reply.sent');
+  assert.ok(Number.isFinite(event.timing.modelMs) && Number.isFinite(event.timing.deliveryMs));
+});
+
+test('模型首次超时后核对原消息自动再试，恢复后只发送一次', async t => {
+  const f = fixture(t);
+  let attempts = 0;
+  const agent = new ChatAgent({
+    config, timeoutMs: 1000,
+    replyProvider: async () => ++attempts === 1 ? new Promise(() => {}) : { text: '合成恢复回复' },
+  });
+  f.agent.reply = input => agent.reply(input);
+  await prepare(f);
+  f.messages.push(message('timeout-retry', '需要回复的合成消息'));
+  await f.service.poll();
+  const deadline = Date.now() + 3000;
+  while (!f.sent.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(attempts, 2);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.service.events.filter(row => row.type === 'reply.model_retry').length, 1);
+  assert.ok(f.service.events.some(row => row.type === 'reply.model_retry' && row.code === 'CHAT_MODEL_TIMEOUT'));
+  await f.service.poll();
+  assert.equal(f.sent.length, 1);
+});
+
+test('同一许可会话补句时中止旧生成，重新核对并合并回复', async t => {
+  const f = fixture(t);
+  const started = Promise.withResolvers();
+  let calls = 0;
+  f.agent.reply = async ({ messages, signal }) => {
+    calls++;
+    if (calls > 1) {
+      assert.ok(messages.some(item => item.id === 'first-part'));
+      assert.ok(messages.some(item => item.id === 'follow-up'));
+      return { text: '合成合并回复' };
+    }
+    started.resolve();
+    await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  };
+  await prepare(f);
+  f.messages.push(message('first-part', '合成消息第一句'));
+  const polling = f.service.poll();
+  await started.promise;
+  f.messages.push(message('follow-up', '合成补句'));
+  assert.equal(f.service.notifyIncoming(contact.id), true);
+  await polling;
+  const deadline = Date.now() + 3000;
+  while (!f.sent.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(calls, 2);
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.service.events.find(row => row.type === 'reply.model_retry')?.code, 'CHAT_MODEL_NEW_INCOMING');
+});
+
 test('单个许可群身份不符只暂停该群，保留全部许可和历史，已核实好友继续接收', async t => {
   const f = fixture(t), group = { id: 'conv:' + 'a'.repeat(64), name: '合成许可群', isGroup: true, followed: null, authorizationKind: 'manual', verifiedAt: new Date().toISOString() };
   let groupReads = 0;
@@ -110,11 +174,52 @@ test('未知启动故障不冒充单个身份暂停或运行成功', async t => 
   assert.equal(f.service.state().running, false);
 });
 
+test('启动时一条许可会话疏漏或换绑，其他会话先上线，重新核对只建立旧消息基线', async t => {
+  for (const failure of ['missing-row', 'changed-header']) {
+    const f = fixture(t);
+    const unavailable = { ...contact, id: `conv:${'3'.repeat(64)}`, identityHash: '3'.repeat(64), name: '合成暂不可用会话' };
+    const history = [message('before-baseline', '合成旧消息')];
+    let recovered = false, reads = 0;
+    const read = f.browser.readConversation;
+    f.browser.listContacts = async () => ({ contacts: recovered || failure === 'changed-header' ? [contact, unavailable] : [contact] });
+    f.browser.readConversation = async (id, options) => {
+      if (id === contact.id) return read(id, options);
+      assert.equal(id, unavailable.id);
+      reads++;
+      const actual = { ...unavailable };
+      if (!recovered && failure === 'changed-header') actual.identityBinding = `binding:${'4'.repeat(64)}`;
+      return { conversation: { id }, contact: actual, messages: history.slice() };
+    };
+    fs.writeFileSync(f.service.policyFile, JSON.stringify({
+      version: 1, enabled: false,
+      allowlist: [unavailable, contact].map(value => ({ ...value, verifiedAt: new Date().toISOString() })),
+    }));
+    await f.service.start({ schedule: false });
+    assert.equal(f.service.state().running, true);
+    assert.equal(f.service.state().policy.allowlist[0].identityBinding, unavailable.identityBinding);
+    assert.equal(f.service.state().contacts.find(row => row.id === unavailable.id).status, 'paused');
+    assert.equal(reads, failure === 'missing-row' ? 0 : 1);
+    f.messages.push(message('healthy-new', '合成正常会话新消息'));
+    await f.service.poll();
+    assert.deepEqual(f.sent.map(row => row.id), [contact.id]);
+
+    recovered = true;
+    f.service.watermarks.contacts[unavailable.id].autoBacklog.nextRetryAt = new Date(0).toISOString();
+    await f.service.poll();
+    assert.equal(f.service.state().contacts.find(row => row.id === unavailable.id).status, 'ready');
+    assert.deepEqual(f.sent.map(row => row.id), [contact.id]);
+    history.push(message('recovered-new', '合成恢复后新消息'));
+    await f.service.poll();
+    await f.service.poll();
+    assert.deepEqual(f.sent.map(row => row.id), [contact.id, unavailable.id]);
+  }
+});
+
 test('浏览器确认尚未点击时保留零点击审计，证据不足只自动等待', async t => {
   const f = fixture(t, { browser: { sendMessage: async () => { f.sent.push({ attempted: true }); return { confirmed: false, deliveryUncertain: false, failureStage: 'trial', failureCode: 'CHAT_SEND_INPUT_UNAVAILABLE' }; } } });
   await prepare(f); f.messages.push(message('new-before-click', '合成未点击检查')); await f.service.poll();
   const row = f.service.state().contacts[0]; assert.equal(row.status, 'paused'); assert.equal(row.pending.phase, 'not-sent'); assert.match(row.reason, /未点击发送/); assert.equal(f.sent.length, 1); assert.equal(f.inputs.length, 1);
-  await f.service.poll();assert.equal(f.service.state().contacts[0].status,'ready');assert.equal(f.service.state().recovery.autoPendingCount,1);assert.equal(f.sent.length,1);
+  await f.service.poll();assert.equal(f.service.state().contacts[0].status,'ready');assert.equal(f.service.state().recovery.waitingEvidenceCount,1);assert.equal(f.service.state().recovery.autoPendingCount,0);assert.equal(f.sent.length,1);
 });
 
 test('新表情只截取指定消息再交模型，重复轮询不重复发送',async t=>{
@@ -184,7 +289,7 @@ test('发送未确认后自动读回，重启和重复轮询均不盲目重发',
   const f = fixture(t, { browser: { sendMessage: async () => ({ confirmed: false, deliveryUncertain: true }) } });
   await prepare(f); f.messages.push(message('new', '新问题')); await f.service.poll(); await f.service.poll();
   assert.equal(f.inputs.length, 1); assert.equal(f.service.state().contacts[0].status, 'ready'); assert.ok(f.service.watermarks.contacts[contact.id].unanswered.some(item=>item.phase==='sending'||item.phase==='delivery-uncertain'));
-  f.service.stop(); await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.inputs.length,1); assert.equal(f.service.state().recovery.pendingManualCount,0); assert.ok(f.service.state().recovery.autoPendingCount>0); assert.equal(f.service.outbound.history(contact.id).length,0);
+  f.service.stop(); await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.inputs.length,1); assert.equal(f.service.state().recovery.pendingManualCount,0); assert.equal(f.service.state().recovery.waitingEvidenceCount,1); assert.equal(f.service.state().recovery.autoPendingCount,0); assert.equal(f.service.outbound.history(contact.id).length,0);
   f.service.stop(); f.service.resumeContact(contact.id); await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.inputs.length, 1);
 });
 test('旧每日上限不再限制请求，超过200次后仍计数并正常回复', async (t) => {
@@ -310,6 +415,7 @@ test('两个真实 Node 入口同时恢复死 worker 时仅一个取得新锁，
   const script = `import {ChatService} from ${JSON.stringify(moduleUrl)};const contact=${JSON.stringify(contact)};const service=new ChatService({config:${JSON.stringify(config)},stateDir:${JSON.stringify(f.directory)},agent:{replyTokens:512,reply:async()=>({text:'合成回复'})},browser:{listContacts:async()=>({contacts:[contact]}),readConversation:async(id)=>({conversation:{id},contact:{...contact},messages:[]}),sendMessage:async()=>{throw new Error('本测试禁止发送')}}});process.on('message',async command=>{if(command==='start'){try{await service.start({schedule:false});process.send({ok:true,pid:process.pid,runId:service.runId})}catch(error){process.send({ok:false,message:error.message})}}else{await service.close();process.exit(0)}});process.send({ready:true});`;
   for (let round = 0; round < 4; round++) {
     fs.writeFileSync(path.join(f.directory, 'chat-loop.lock'), JSON.stringify({ pid: dead.pid, runId: `dead-fixture-${round}`, heartbeatAt: '2000-01-01T00:00:00Z', status: 'running' }));
+    fs.writeFileSync(path.join(f.directory, 'chat-control.guard'), JSON.stringify({ pid: dead.pid, token: 'db0ebb88-0df6-4689-a8b9-5fb95a0f35b1' }));
     const children = Array.from({ length: 2 }, () => spawn(process.execPath, ['--input-type=module', '-e', script], { windowsHide: true, stdio: ['ignore','ignore','pipe','ipc'] }));
     try {
       await Promise.all(children.map((child) => once(child, 'message')));
@@ -324,7 +430,7 @@ test('两个真实 Node 入口同时恢复死 worker 时仅一个取得新锁，
     assert.equal(fs.existsSync(path.join(f.directory, 'chat-control.guard')), false);
   }
 });
-test('坏的或死进程控制 guard 不被自动清理，保持拒绝启动和原有白名单', async (t) => {
+test('损坏或归属无效的控制锁保留，拒绝启动并保留白名单', async (t) => {
   const f = fixture(t); await f.service.configure({ recipientIds: [contact.id] }); const file = path.join(f.directory, 'chat-control.guard');
   for (const content of ['损坏的控制锁', JSON.stringify({ pid: 0, token: 'dead-fixture-token' })]) { fs.writeFileSync(file, content); await assert.rejects(f.service.start({ schedule: false }), /控制锁/); assert.equal(fs.readFileSync(file, 'utf8'), content); assert.equal(JSON.parse(fs.readFileSync(path.join(f.directory, 'chat-policy.json'), 'utf8')).allowlist[0].id, contact.id); fs.unlinkSync(file); }
 });

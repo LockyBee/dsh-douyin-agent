@@ -41,7 +41,9 @@ export async function prepareApiRuntime({seedDir,userData,manifestFile}){
   const rootStat=await fs.lstat(runtimeRoot);if(!rootStat.isDirectory()||rootStat.isSymbolicLink())throw new Error('软件运行目录不能使用链接。');
   const rootReal=await fs.realpath(runtimeRoot),userReal=await fs.realpath(userData);if(path.dirname(rootReal)!==userReal)throw new Error('软件运行目录实际位置越界。');
   const runtime=path.join(runtimeRoot,manifest.runtimeId.slice(0,20)),ready=path.join(runtime,'.runtime-ready.json');
-  const required=['conversation-memory.mjs','memory-history.mjs','memory-policy.mjs','memory-retrieval.mjs','qq-history-reader.mjs','owner-qq-context.mjs','tone-router.mjs','tone-examples.json','runtime-conversation-memory.mjs','conversation-history-store.mjs','friend-interactions.mjs','friend-interactions-guard.mjs','receipt-baseline.mjs','api-worker.mjs','app.mjs','api-agent.mjs','core.mjs','runtime-paths.mjs','persona-memory.mjs','autonomous-watch.mjs','browser-launcher.mjs','autonomous-share.mjs','task-limits.mjs','outbound-send.mjs','spark-service.mjs','spark-agent.mjs','autonomous-comments.mjs','comment-browser.mjs','public-comment-agent.mjs','daily-report.mjs','watch-mode.mjs','media/index.mjs','media/key-store.mjs','public/index.html','node_modules/playwright-core/package.json','node_modules/yaml/package.json'];
+  const required=['conversation-memory.mjs','memory-budget.mjs','memory-history.mjs','memory-policy.mjs','memory-retrieval.mjs','qq-history-reader.mjs','owner-qq-context.mjs','tone-router.mjs','tone-examples.json','runtime-conversation-memory.mjs','conversation-history-store.mjs','friend-interactions.mjs','friend-interactions-guard.mjs','receipt-baseline.mjs','api-worker.mjs','app.mjs','api-agent.mjs','core.mjs','runtime-paths.mjs','persona-memory.mjs','persona-evidence-journal.mjs','autonomous-watch.mjs','browser-mode.mjs','browser-launcher.mjs','autonomous-share.mjs','task-limits.mjs','outbound-send.mjs','spark-service.mjs','spark-agent.mjs','comment-novelty.mjs','video-reactions.mjs','reaction-browser.mjs','autonomous-comments.mjs','comment-browser.mjs','public-comment-agent.mjs','daily-report.mjs','watch-mode.mjs','media/index.mjs','media/key-store.mjs','media/pdf-text-worker.mjs','media/vendor/pdf/pdfjs.mjs','public/index.html','node_modules/playwright-core/package.json','node_modules/yaml/package.json'];
+  required.push('yunsur-mcp.mjs','yunsur-video.mjs','yunsur-chat.mjs','yunsur-background.mjs','yunsur-media.mjs','yunsur-share.mjs','yunsur-interactions.mjs','yunsur-live.mjs','yunsur-hls.mjs','yunsur-attachments.mjs','atomic-file.mjs');
+  required.push('media/pdf-text-worker.mjs', 'media/vendor/pdf/pdfjs.mjs');
   const requiredFiles=async directory=>{for(const file of required){const stat=await fs.lstat(path.join(directory,file));if(!stat.isFile()||stat.isSymbolicLink())throw new Error('软件运行资源缺失或类型错误。');}};
   if(await exists(ready)){
     const stat=await fs.lstat(ready);if(!stat.isFile()||stat.isSymbolicLink())throw new Error('就绪标记不能使用链接。');
@@ -84,7 +86,7 @@ export async function ensureSharedLocation({ env = process.env, home = homedir()
     catch (error) { if (error.code !== 'EEXIST') throw error; record = JSON.parse(await fs.readFile(file, 'utf8')); }
   }
   if (!record || record.version !== 1 || Array.isArray(record) || typeof record.stateDir !== 'string') throw new Error('共享位置记录无效，未创建另一套状态。');
-  for (const field of [...Object.keys(locationFields), 'memoryDir', 'memoryDbPath']) if (record[field] !== undefined) absolute(record[field], field);
+  for (const field of [...Object.keys(locationFields), 'memoryDir', 'memoryDbPath', 'personaFile']) if (record[field] !== undefined) absolute(record[field], field);
   const registeredDb = record.memoryDbPath || (record.memoryDir ? path.join(record.memoryDir, 'shared.sqlite') : null);
   if (env.DEEPSEEK_SHARED_MEMORY_DB && registeredDb && absolute(env.DEEPSEEK_SHARED_MEMORY_DB, '共享记忆数据库') !== path.normalize(registeredDb)) throw new Error('显式数据库路径与已登记的共享记忆不一致；已保留原记录，未创建另一套记忆。');
   const paths = resolve({ env: { ...env, DOUYIN_RUNTIME_LOCATION_FILE: file }, home });
@@ -97,6 +99,7 @@ export async function ensureSharedLocation({ env = process.env, home = homedir()
     finally { await fs.rm(temporary, { force: true }); }
   }
   const domainEnv = { DOUYIN_RUNTIME_LOCATION_FILE: file, DEEPSEEK_SHARED_MEMORY_DB: paths.memoryDbPath };
+  if (paths.personaFile) domainEnv.DOUYIN_PERSONA_FILE = paths.personaFile;
   for (const [field, key] of Object.entries(locationFields)) domainEnv[key] = env[key] || paths[field];
   return { paths, env: domainEnv };
 }

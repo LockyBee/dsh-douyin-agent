@@ -20,6 +20,7 @@ class Page {
     this.videos=this.address==='about:blank'?[]:[new Media(),new Media(),new Media()];
     const element=overrides=>({getBoundingClientRect:()=>({left:0,top:0,right:100,bottom:20,width:100,height:20}),childElementCount:0,textContent:'',...overrides});
     const document={
+      get title(){return page.flags.title||'';},
       body:{get textContent(){return page.flags.bodyText||'';}},hasFocus:()=>page.focused,
       addEventListener:(type,fn)=>add(docEvents,type,fn),removeEventListener:(type,fn)=>remove(docEvents,type,fn),
       querySelectorAll(selector){
@@ -53,6 +54,18 @@ function fixture(pages=[new Page()]) {
   return{pages,context,browser,launcher};
 }
 async function prepared(){const f=fixture();await f.launcher.open();f.page=f.pages[0];f.page.focused=false;return f;}
+
+test('验证码中间页只有标题时也不接管或回收准备页', async () => {
+  const { launcher, browser, page } = await prepared();
+  page.flags.title = '验证码中间页';
+  const before = { ...page.calls };
+  assert.equal(await launcher.adoptPreparedPage(browser, 'deepseek-douyin-api'), null);
+  assert.deepEqual(await launcher.closeIdlePreparedPage(browser, { authorizeClose: async () => {} }), {
+    closed: false, reasonCode: 'PREPARE_NOT_IDLE',
+  });
+  assert.equal(page.name, PREPARE_PAGE_NAME);
+  assert.deepEqual(page.calls, before);
+});
 
 test('同一客户端将未触碰准备页接成作品页，不建页不导航不关闭并撤销暂停监听',async()=>{
   const {launcher,browser,page,pages}=await prepared(),before={...page.calls};

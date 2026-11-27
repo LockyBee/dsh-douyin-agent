@@ -29,6 +29,8 @@ function Harness(){const[state,setState]=useState(null),[busy,setBusy]=useState(
   const group = { id: 'conv:' + 'b'.repeat(64), name: '合成待选群', followed: null, isGroup: true, identityVerified: true, identityBinding: 'binding:' + 'b'.repeat(64), identityVersion: 2, identityKind: 'rendered-group', identityHash: 'b'.repeat(64), relationshipStatus: 'unavailable', verifiedAt: '2026-10-24T00:00:00.000Z' };
   const unknown = { id: 'conv:' + 'c'.repeat(64), name: '合成未知类型', isGroup: null };
   const weak = { id: 'conv:' + 'e'.repeat(64), name: '合成缺少稳定身份', isGroup: false, followed: true, identityVerified: true, identityBinding: 'binding:' + 'e'.repeat(64) };
+  const unchecked = { ...person, id: 'conv:' + 'f'.repeat(64), identityHash: 'f'.repeat(64), identityBinding: 'binding:' + 'f'.repeat(64),
+    name: '合成尚未查询关注关系', relationshipStatus: 'unverified', manualAuthorizationEligible: true };
   let listedContacts = [group, unknown, weak];
   const value = { chat: { running: true, policy: { allowlist: [person], groupMentionNames: ['大肥鱼'] }, contacts: [{ id: person.id, status: 'paused', reason: '合成需要核对' }] }, interactions: { policy: { enabled: true }, friend: {}, presence: { status: 'attention', online: false, label: '回复未就绪', reason: '合成许可联系人需要核对' } }, share: { daily: { attempts: 0 }, needsReview: [] } };
   value.configured = true; value.video = { policy: { windows: ['00:00-24:00'], dailyMinutes: 10, dailyRequests: 30 }, daily: { usedSeconds: 12, requests: 2 } }; value.schedule = { policy: { enabled: false } }; value.watch = { running: false, status: 'stopped' };
@@ -42,7 +44,7 @@ function Harness(){const[state,setState]=useState(null),[busy,setBusy]=useState(
     if (route === '/api/chat/contacts') return reply({ contacts: listedContacts, listDiscovery: { source: 'current-conversation-list', scannedToEnd: false, reason: '合成预算已到。' } });
     if (route === '/api/watch/schedule') { value.schedule.policy.enabled = input.enabled; value.watch.running = input.enabled && allowStart; value.watch.status = value.watch.running ? 'running' : 'stopped'; return reply(value.schedule); }
     if (route === '/api/chat/configure') {
-      value.chat.policy.allowlist = input.recipientIds.map(id => id === person.id ? person : { ...group, authorizationKind: 'existing-group' }); value.chat.policy.groupMentionNames = input.groupMentionNames;
+      value.chat.policy.allowlist = input.recipientIds.map(id => id === person.id ? person : id === unchecked.id ? unchecked : { ...group, authorizationKind: 'existing-group' }); value.chat.policy.groupMentionNames = input.groupMentionNames;
       if (!saveRelease) { saveRelease = () => reply(value.chat); return; } return reply(value.chat);
     }
     if (route === '/api/chat/resolve') { resolveRelease = () => { value.chat.contacts[0].status = 'ready'; value.interactions.presence = { status: 'watching', online: true, label: '在线 · 看视频中', reason: '合成后端确认全部许可已就绪' }; reply(value.chat); }; return; }
@@ -63,7 +65,9 @@ function Harness(){const[state,setState]=useState(null),[busy,setBusy]=useState(
   await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).click();
   const selectedPerson = page.getByRole('checkbox', { name: '许可联系人 合成已许可个人', exact: true }); assert.equal(await selectedPerson.isChecked(), true); assert.equal(await selectedPerson.locator('..').locator('small').count(), 0, '名单只显示勾选项和昵称');
   const weakChoice = page.getByRole('checkbox', { name: '许可联系人 合成缺少稳定身份', exact: true }); assert.equal(await weakChoice.isDisabled(), false); assert.equal(await weakChoice.isChecked(), false); assert.equal(await weakChoice.locator('..').locator('small').count(), 0, '名单只显示勾选项和昵称');
-  await page.getByText('当前列表尚未完整读取。', { exact: false }).waitFor(); assert.equal(calls.some(item => item.route === '/api/chat/configure'), false);
+  const incompleteList = page.getByText('会话列表未读完整。', { exact: true });
+  await incompleteList.waitFor(); assert.equal(await incompleteList.getAttribute('title'), '合成预算已到。');
+  assert.equal(calls.some(item => item.route === '/api/chat/configure'), false);
   const groupChoice = page.getByRole('checkbox', { name: '许可联系人 合成待选群', exact: true });
   if (!await page.getByRole('checkbox', { name: '授权已核对的现有会话', exact: true }).isChecked()) await page.getByRole('checkbox', { name: '授权已核对的现有会话', exact: true }).check();
   assert.equal(calls.some(item => item.route === '/api/chat/configure'), false);
@@ -81,5 +85,22 @@ function Harness(){const[state,setState]=useState(null),[busy,setBusy]=useState(
   value.chat.contacts[0].status = 'ready'; value.interactions.presence = { status: 'watching', online: true, label: '在线 · 看视频中', reason: '合成后端确认全部许可已就绪' };
   await presence.filter({ hasText: '在线 · 看视频中' }).waitFor();
   assert.equal(await page.getByRole('button', { name: '查看遗留待处理消息', exact: true }).count(), 0);
+  value.chat.policy.allowlist = [];
+  listedContacts = [unchecked, { ...weak, name: '合成未核对身份', followed: null, relationshipStatus: 'unverified', manualAuthorizationEligible: false }];
+  await page.reload();
+  const savesBeforeConfirmation = calls.filter(item => item.route === '/api/chat/configure').length;
+  await page.getByRole('button', { name: '读取联系人与群聊', exact: true }).click();
+  const uncheckedChoice = page.getByRole('checkbox', { name: '许可联系人 合成尚未查询关注关系', exact: true });
+  await uncheckedChoice.waitFor();
+  assert.equal(await uncheckedChoice.isDisabled(), true);
+  await page.getByRole('checkbox', { name: '授权已核对的现有会话', exact: true }).check();
+  assert.equal(await uncheckedChoice.isEnabled(), true);
+  assert.equal(await page.getByRole('checkbox', { name: '许可联系人 合成未核对身份', exact: true }).isDisabled(), true);
+  assert.equal(calls.filter(item => item.route === '/api/chat/configure').length, savesBeforeConfirmation);
+  await uncheckedChoice.check();
+  await until(() => value.chat.policy.allowlist[0]?.id === unchecked.id);
+  const submission = calls.filter(item => item.route === '/api/chat/configure').at(-1);
+  assert.deepEqual(submission.input.recipientIds, [unchecked.id]);
+  assert.equal(submission.input.allowConversationOnly, true);
   assert.equal(calls.filter(item => item.route === '/api/chat/resolve').length, 0); assert.deepEqual(errors, []);
 });

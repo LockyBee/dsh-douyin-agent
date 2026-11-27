@@ -5,16 +5,31 @@ import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import { BrowserController } from './core.mjs?v=9';
-import { messageFingerprint, messageContent, messageWatermark, compareMessageWatermark } from './chat-message.mjs';
+import { browserPageLabel } from './browser-pages.mjs';
+import { messageFingerprint, messageContent, messageWatermark, compareMessageWatermark, checkPrivateVideoAccess } from './chat-message.mjs';
 import { MessageIdentityTracker } from './message-tracker.mjs';
 import { matchesAuthorizedContact, hasStableConversationIdentity } from './contact-authorization.mjs';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { imageFileType, UPLOAD_STAGING_CONTRACT, readUploadStagingContractDom, readImageUploadPreviewDom, installImageDispatchGuardDom } from './chat-output.mjs';
+import { messageAttachment, readMessageAttachment } from './yunsur-attachments.mjs';
 export { MessageIdentityTracker } from './message-tracker.mjs';
 
 const HOME = 'https://www.douyin.com/?recommend=1&from_nav=1';
 const hash = value => createHash('sha256').update(value).digest('hex');
 const stop = signal => signal?.throwIfAborted();
+const mediaUnavailable = message => Object.assign(new Error(message), { code: 'CHAT_MEDIA_UNAVAILABLE' });
+const mediaChanged = message => Object.assign(new Error(message), { code: 'CHAT_MEDIA_MESSAGE_CHANGED' });
+const accountBlocked = message => Object.assign(new Error(message), { code: 'CHAT_ACCOUNT_ACTION_REQUIRED', needsUserAction: true });
+const cardFingerprint = message => messageFingerprint({ ...message, media: { ...message.media, videoId: undefined, url: undefined } });
+
+function linkedSharedVideo(message, flags) {
+  if (message.media.identityConflict === true) throw new Error('分享卡片的公开链接与原生作品身份有冲突，未打开。');
+  if (!message.media.url) return null;
+  const target = new URL(message.media.url);
+  const id = /^\/video\/(\d{1,64})\/?$/.exec(target.pathname)?.[1];
+  if (message.media.url.length > 300 || target.origin !== 'https://www.douyin.com' || target.username || target.password || !id || message.media.videoId !== id) throw new Error('分享卡片公开链接与作品编号不一致，未打开。');
+  return { ...flags, opened: false, videoId: id, url: 'https://www.douyin.com/video/' + id, source: message.media.publicUrlSource || 'dom-link', isPhotoGallery: message.media.isPhotoGallery };
+}
 const AUDIO_LIMIT = 25 * 1024 * 1024;
 const publicAudioAddress = address => !/^(?:0\.|10\.|127\.|169\.254\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|192\.0\.|192\.0\.2\.|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|198\.(?:18|19|51)\.|203\.0\.113\.|22[4-9]\.|2[3-5]\d\.)/.test(address);
 function voiceAudioResponse(url, { signal } = {}) {
@@ -48,7 +63,8 @@ function chatAudioFormat(bytes) {
   if (bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return { mimeType: 'audio/aac', extension: 'aac' };
   return null;
 }
-const readableDraft = value => value.replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g, '').trim();
+const draftFormatting = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
+const readableDraft = value => value.replace(draftFormatting, '').trim();
 const localDay = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
 const contactIdentityKey = row => row.nativeId ? `native:${row.nativeId}` : row.identityKey ? `rendered:${row.identityKey}` : row.conversationType === 'direct' && row.profileUrl ? `user:${row.profileUrl}` : null;
 const sameConversationIdentity = (current, contact) => Boolean(current && contact && current.identityUnavailable !== true && !current.identityConflict && !contact.identityConflict
@@ -194,7 +210,10 @@ export async function readContactDom() {
     let profileUrl = null;
     const name = row.querySelector('.conversationConversationItemtitle,[data-e2e="conversation-name"]');
     const link = name?.closest('a[href]') || name?.querySelector('a[href]') || row.querySelector('a[data-e2e="conversation-user"][href]');
-    try { const url = new URL(link?.getAttribute('href'), location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) profileUrl = url.origin + url.pathname; } catch {}
+    const href = link?.getAttribute('href')?.trim();
+    if (href) {
+      try { const url = new URL(href, location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) profileUrl = url.origin + url.pathname; } catch {}
+    }
     const relationshipLabel = clean(row.querySelector('[data-e2e="follow-status"],[data-e2e="relationship"]')?.textContent);
     const displayName = clean(name?.textContent);
     const groupAvatar = row.querySelector('[class*="GroupAvatar"],[data-e2e="group-avatar"]');
@@ -247,6 +266,7 @@ export function readConversationListDom() {
 }
 
 export function readChatBlockers() {
+  if (document.title?.trim() === '验证码中间页') return { loginRequired: false, verificationRequired: true };
   const visible = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight && s.visibility !== 'hidden' && s.display !== 'none'; };
   const labels = [...document.querySelectorAll('body *')].filter(e => !e.childElementCount && visible(e) && !e.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]'));
   return {
@@ -314,7 +334,9 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
   for (const field of ['conversationType', 'type']) { const type = own(conversation, field); if (typeof type === 'string' && ['direct', 'single', 'personal', 'group'].includes(type.toLowerCase())) types.add(type.toLowerCase() === 'group' ? 'group' : 'direct'); }
   let profileUrl = null;
   for (const link of header?.querySelectorAll('a[href]') ?? []) {
-    try { const url = new URL(link.getAttribute('href'), location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) { if (profileUrl && profileUrl !== url.origin + url.pathname) types.add('conflict'); profileUrl = url.origin + url.pathname; } } catch {}
+    const href = link.getAttribute('href')?.trim();
+    if (!href) continue;
+    try { const url = new URL(href, location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) { if (profileUrl && profileUrl !== url.origin + url.pathname) types.add('conflict'); profileUrl = url.origin + url.pathname; } } catch {}
   }
   for (const declared of [header?.getAttribute('data-conversation-type'), root?.getAttribute('data-conversation-type')]) if (declared && ['direct', 'single', 'personal', 'group'].includes(declared)) types.add(declared === 'group' ? 'group' : 'direct');
   if (declaredGroup || identities.has('group')) types.add('group');
@@ -540,6 +562,28 @@ export async function readConversationDom({ expectedKey, expectedType, expectedR
     let modelTimestamp = null;
     if (modelBound) { try { const time = Date.prototype.getTime.call(dataField(model, 'createdAt')); if (Number.isFinite(time) && time >= Date.UTC(2000, 0, 1) && time <= Date.now() + 60_000) modelTimestamp = new Date(time).toISOString(); } catch {} }
     const nativeServerMessageBound = modelBound && typeof serverId === 'string' && /^[1-9]\d{0,63}$/.test(serverId) && nativeId === serverId;
+    if (nativeServerMessageBound && direction === 'incoming' && ['file', 'video-attachment'].includes(media?.type)) {
+      const stringValue = value => typeof value === 'string' && value.length <= 8192 ? value : undefined;
+      const resource = value => stringValue(value) ?? (value && typeof value === 'object' ? {
+        url: stringValue(own(value, 'url')), uri: stringValue(own(value, 'uri')),
+        url_list: Array.isArray(own(value, 'url_list'))
+          ? Array.from({ length: 8 }, (_, index) => stringValue(own(own(value, 'url_list'), String(index)))).filter(Boolean) : undefined,
+      } : undefined);
+      const keys = media.type === 'file' ? ['download_url', 'file_url', 'resource_url', 'uri', 'url']
+        : ['video_url', 'play_addr', 'play_url', 'download_url'];
+      const fields = Object.fromEntries(keys.map(key => [key, resource(own(parsed, key))]));
+      if (media.type === 'file') {
+        for (const key of ['name', 'file_name', 'format', 'mime_type', 'md5']) fields[key] = stringValue(own(parsed, key));
+        const bytes = own(parsed, 'data_size');
+        fields.data_size = Number.isSafeInteger(bytes) ? bytes : stringValue(bytes);
+      } else {
+        const video = own(parsed, 'video');
+        const address = resource(video);
+        fields.video = { ...(typeof address === 'string' ? { url: address } : address), ...Object.fromEntries(['play_addr', 'play_url', 'download_url', 'resource_url', 'tkey']
+          .map(key => [key, resource(own(video, key))])) };
+      }
+      media.attachmentFields = fields;
+    }
     const separator = '[role=separator],[data-e2e=message-time-divider],[data-e2e=message-loading],[data-e2e=history-start]';
     if (direction === 'unknown' && !text && !reference && media?.type === 'unknown' && !nativeId && !nativeServerMessageBound && order === null && (node.matches(separator) || box.matches(separator)) && !node.querySelector('img,video,audio,a[href],[contenteditable]')) continue;
     const ownTimestamp = box.getAttribute('data-sent-at') || box.getAttribute('data-timestamp') || node.getAttribute('data-sent-at') || modelTimestamp;
@@ -633,7 +677,9 @@ export async function readChatIdentityDom() {
   for (const field of ['conversationType', 'type']) { const type = own(conversation, field); if (typeof type === 'string' && ['direct', 'single', 'personal', 'group'].includes(type.toLowerCase())) types.add(type.toLowerCase() === 'group' ? 'group' : 'direct'); }
   let profileUrl = null;
   for (const link of header?.querySelectorAll('a[href]') ?? []) {
-    try { const url = new URL(link.getAttribute('href'), location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) { if (profileUrl && profileUrl !== url.origin + url.pathname) types.add('conflict'); profileUrl = url.origin + url.pathname; } } catch {}
+    const href = link.getAttribute('href')?.trim();
+    if (!href) continue;
+    try { const url = new URL(href, location.href); if (url.protocol === 'https:' && url.hostname === 'www.douyin.com' && /^\/user\/[^/?#]+\/?$/.test(url.pathname)) { if (profileUrl && profileUrl !== url.origin + url.pathname) types.add('conflict'); profileUrl = url.origin + url.pathname; } } catch {}
   }
   for (const declared of [header?.getAttribute('data-conversation-type'), root?.getAttribute('data-conversation-type')]) if (declared && ['direct', 'single', 'personal', 'group'].includes(declared)) types.add(declared === 'group' ? 'group' : 'direct');
   if (isGroup || identities.has('group')) types.add('group');
@@ -663,7 +709,7 @@ export async function readChatIdentityDom() {
 }
 
 export class ChatBrowser {
-  constructor({ source = 'api-chat', controller, voiceCaptureDir = resolveRuntimePaths().mediaCaptureDir, fetchImpl = voiceAudioResponse, uploadContractHash = UPLOAD_STAGING_CONTRACT } = {}) {
+  constructor({ source = 'api-chat', controller, voiceCaptureDir = resolveRuntimePaths().mediaCaptureDir, fetchImpl = voiceAudioResponse, uploadContractHash = UPLOAD_STAGING_CONTRACT, downloadAttachment } = {}) {
     if (!['api-chat', 'dsh-chat'].includes(source)) throw new TypeError('私信入口须为 api-chat 或 dsh-chat。');
     if (!path.isAbsolute(voiceCaptureDir)) throw new TypeError('消息音频临时目录须为绝对路径。');
     this.controller = controller ?? new BrowserController({ source });
@@ -675,6 +721,7 @@ export class ChatBrowser {
     this.uploadContractHash = uploadContractHash; this.unsentImageDeliveries = new WeakMap();
     this.chatPageAttemptAt = 0;
     this.voiceCaptureDir = path.resolve(voiceCaptureDir); this.voiceCaptures = new Map(); this.fetchImpl = fetchImpl;
+    this.downloadAttachment = downloadAttachment;
     this.incomingBinding = `__deepseekIncoming_${randomUUID().replaceAll('-', '')}`;
     this.incomingPages = new WeakSet(); this.incomingHandlers = new Map(); this.incomingCleanup = new Set();
   }
@@ -682,6 +729,7 @@ export class ChatBrowser {
     return this.controller.withPage(callback, { signal, launch, create, ...(authorizePrepare ? { authorizePrepare } : {}) });
   }
   async isForeground(page) {
+    if (await this.controller.executionMode?.() === 'background') return false;
     const focused = await page.evaluate(() => document.visibilityState === 'visible' && document.hasFocus()).catch(() => false);
     if (!focused) return false;
     let session;
@@ -759,25 +807,51 @@ export class ChatBrowser {
     } catch (error) { await cleanup(); throw error; }
   }
   async dialog(page, signal, { open = false } = {}) {
-    stop(signal);
-    const flags = await page.evaluate(readChatBlockers);
-    if (flags.loginRequired || flags.verificationRequired) return { ...flags, blocked: true };
+    const status = async () => {
+      stop(signal);
+      const flags = await page.evaluate(readChatBlockers);
+      return { ...flags, blocked: flags.loginRequired || flags.verificationRequired };
+    };
+    const initial = await status();
+    if (initial.blocked) return initial;
     const dialog = page.locator('[data-e2e="im-dialog"]');
     if (!open && !await dialog.isVisible().catch(() => false)) throw Object.assign(new Error('消息页未打开，未在后台打开消息面板。'), { code: 'CHAT_PAGE_NOT_OPEN' });
-    await page.evaluate(() => {
-      // 本次只暂停背景作品，不留下阻止后续播放的文档监听。
-      for (const video of document.querySelectorAll('video')) if (!video.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]')) video.pause();
-    });
+    const discardPreview = await this.controller.executionMode?.() === 'background';
+    await page.evaluate(discardPreview => {
+      // 保留消息列表里的附件播放器。
+      for (const video of document.querySelectorAll('video')) {
+        if (video.closest('[data-e2e="im-dialog"],[data-e2e="conversation-item"]')) continue;
+        video.pause();
+        if (!discardPreview) continue;
+        const sources = [...video.querySelectorAll('source[src]')];
+        if (!video.srcObject && !video.hasAttribute('src') && !sources.length) continue;
+        video.srcObject = null;
+        video.removeAttribute('src');
+        for (const source of sources) source.removeAttribute('src');
+        video.load();
+      }
+    }, discardPreview);
     if (!await dialog.isVisible().catch(() => false)) {
       if (!open) throw Object.assign(new Error('消息页未打开，未在后台打开消息面板。'), { code: 'CHAT_PAGE_NOT_OPEN' });
       const entry = page.locator('[data-e2e="im-entry"]');
-      try { await entry.waitFor({ state: 'visible', timeout: 20_000 }); }
-      catch { throw new Error('没有找到抖音消息入口。'); }
-      await entry.click();
-      await page.locator('[data-e2e="im-dialog"]').waitFor({ state: 'visible' });
+      let entryReady = false;
+      try {
+        await entry.waitFor({ state: 'visible', timeout: 20_000 });
+        entryReady = true;
+        const latest = await status();
+        if (latest.blocked) return latest;
+        stop(signal);
+        await this.clickNavigation(page, entry, signal);
+        await dialog.waitFor({ state: 'visible' });
+      } catch (error) {
+        stop(signal);
+        const latest = await status().catch(() => null);
+        if (latest?.blocked) return latest;
+        if (!entryReady) throw new Error('没有找到抖音消息入口。', { cause: error });
+        throw error;
+      }
     }
-    stop(signal);
-    return { ...flags, blocked: false };
+    return status();
   }
   async gotoWithRetry(page, url, signal, attempts = 2) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -837,22 +911,27 @@ export class ChatBrowser {
     if (this.chatPageAttemptAt && now - this.chatPageAttemptAt < 10000) return;
     this.chatPageAttemptAt = now;
     if (!/^https:\/\/(?:www\.)?douyin\.com(?:[/:]|$)/.test(page.url())) return;
+    const currentEntry = page.locator('[data-e2e="im-entry"]').filter({ visible: true });
+    if (await currentEntry.count() === 1) {
+      await this.dialog(page, signal, { open: true });
+      return;
+    }
     if (await this.gotoWithRetry(page, HOME, signal)) {
       await page.waitForTimeout(400);
       const entry = page.locator('[data-e2e="im-entry"]').first();
-      if (await entry.count() === 1) await entry.click({ timeout: 3000 }).catch(() => {});
+      if (await entry.count() === 1) await this.clickNavigation(page, entry, signal).catch(() => {});
       await dialog.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
     }
     await this.dialog(page, signal);
   }
-  async contactList(page, signal, { enumerate = false, locateId, ensurePage = false } = {}) {
+  async contactList(page, signal, { enumerate = false, locateId, ensurePage = false, preparedDialog } = {}) {
     if (ensurePage) await this.ensureChatPage(page, signal);
-    const flags = await this.dialog(page, signal, { open: ensurePage });
+    const flags = preparedDialog ?? await this.dialog(page, signal, { open: ensurePage });
+    if (flags.blocked) return { ...flags, contacts: [] };
     if (!await page.locator('[data-e2e="im-dialog"]').first().isVisible().catch(() => false)) {
       if (!ensurePage) throw Object.assign(new Error('消息页未打开，未读取私信。'), { code: 'CHAT_PAGE_NOT_OPEN' });
       throw new Error('专用浏览器消息页未打开，请点“打开抖音”进入消息页后重试。');
     }
-    if (flags.blocked) return { ...flags, contacts: [] };
     await page.locator('[data-e2e="im-dialog"] [data-e2e="conversation-item"]').first().waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
     const collected = new Map(), started = Date.now(); let visibleRows = [], scannedToEnd = false, reason = '', found = false;
     const capture = async () => {
@@ -904,9 +983,27 @@ export class ChatBrowser {
         await capture();
       }
     }
-    const rows = [...collected.values()];
-    const identities = rows.map(contactOpaqueId);
-    if (new Set(identities).size !== identities.length || rows.some(row => !row.displayName || (!contactIdentityKey(row) && !row.avatar))) throw new Error('联系人身份不完整或存在歧义，已停止读取会话。');
+    const markVisibleRows = () => page.evaluate(mapping => {
+      const nodes = [...document.querySelectorAll('[data-e2e="im-dialog"] [data-e2e="conversation-item"]')];
+      if (nodes.length !== mapping.length) return false;
+      for (const [index, expected] of mapping.entries()) {
+        const element = nodes[index], name = element.querySelector('.conversationConversationItemtitle,[data-e2e="conversation-name"]')?.textContent.replace(/\s+/g, ' ').trim();
+        const native = element.getAttribute('data-conversation-id') || element.getAttribute('data-conversation-short-id') || null;
+        if (name !== expected.displayName || native !== expected.nativeId) return false;
+      }
+      for (const [index, expected] of mapping.entries()) nodes[index].setAttribute('data-deepseek-chat-id', expected.id);
+      return true;
+    }, visibleRows.map(row => ({ id: contactOpaqueId(row), displayName: row.displayName, nativeId: row.nativeId })));
+    let rows, identities;
+    for (let attempt = 0; ; attempt++) {
+      rows = [...collected.values()];
+      identities = rows.map(contactOpaqueId);
+      if (new Set(identities).size !== identities.length || rows.some(row => !row.displayName || (!contactIdentityKey(row) && !row.avatar))) throw new Error('联系人身份不完整或存在歧义，已停止读取会话。');
+      if (await markVisibleRows()) break;
+      if (attempt || enumerate || locateId) throw Object.assign(new Error('会话列表正在更新，稍后自动检查。'), { code: 'CHAT_CONTACT_LIST_CHANGED' });
+      collected.clear();
+      await capture();
+    }
     const contacts = [];
     this.contacts.clear();
     for (const [index, row] of rows.entries()) {
@@ -923,23 +1020,20 @@ export class ChatBrowser {
       this.contacts.set(id, { ...contact, avatar: row.avatar, nativeId: row.nativeId, identityKey: row.identityKey, profileUrl: row.profileUrl, identityConflict: row.identityConflict });
       contacts.push(contact);
     }
-    await page.evaluate(mapping => {
-      const nodes = [...document.querySelectorAll('[data-e2e="im-dialog"] [data-e2e="conversation-item"]')];
-      if (nodes.length !== mapping.length) throw new Error('标记会话前虚拟列表窗口已经改变。');
-      for (const [index, expected] of mapping.entries()) {
-        const element = nodes[index], name = element.querySelector('.conversationConversationItemtitle,[data-e2e="conversation-name"]')?.textContent.replace(/\s+/g, ' ').trim();
-        const native = element.getAttribute('data-conversation-id') || element.getAttribute('data-conversation-short-id') || null;
-        if (name !== expected.displayName || native !== expected.nativeId) throw new Error('标记会话前列表身份已经改变。');
-      }
-      for (const [index, expected] of mapping.entries()) nodes[index].setAttribute('data-deepseek-chat-id', expected.id);
-    }, visibleRows.map(row => ({ id: contactOpaqueId(row), displayName: row.displayName, nativeId: row.nativeId })));
     return { ...flags, contacts, relationshipDiscovery: this.relationshipDiscovery, listDiscovery: { source: 'current-conversation-list', scannedToEnd, count: contacts.length, note: `已读取当前消息列表的 ${contacts.length} 个会话；不代表全部关注好友或所有群聊。`, ...(reason ? { reason } : {}) } };
   }
-  async assertAutomaticPrepareSafe(signal, authorizePrepare) {
+  canStartBackgroundBrowser() {
+    return typeof this.controller.startBackgroundBrowser === 'function' && this.controller.getBrowserMode().policy().mode === 'background';
+  }
+  isDisconnected() { return this.controller.browser?.isConnected?.() === false; }
+  async assertAutomaticPrepareSafe(signal, authorizePrepare, allowForegroundBrowsing, startBackgroundBrowser = false) {
     stop(signal);
     if (typeof authorizePrepare !== 'function') throw Object.assign(new Error('自动准备缺少可信授权检查，未创建页面。'), { code: 'CHAT_PREPARE_UNSUPPORTED' });
     await authorizePrepare(); stop(signal);
-    const browser = await this.controller.connectExistingBrowser?.({ signal });
+    let browser = await this.controller.connectExistingBrowser?.({ signal });
+    if (!browser?.isConnected?.() && startBackgroundBrowser && this.canStartBackgroundBrowser()) {
+      browser = await this.controller.startBackgroundBrowser({ signal, authorizePrepare });
+    }
     if (!browser?.isConnected?.()) throw Object.assign(new Error('专用浏览器未运行，未自动打开回复页。'), { code: 'BROWSER_NOT_RUNNING' });
     const context = browser.contexts()[0];
     if (!context) throw new Error('没有读到专用浏览器上下文，未自动准备。');
@@ -948,33 +1042,47 @@ export class ChatBrowser {
       const address = page.url();
       let origin; try { origin = new URL(address).origin; } catch { origin = null; }
       if (address !== 'about:blank' && origin !== 'https://www.douyin.com') throw Object.assign(new Error('专用浏览器有页面已离开抖音，未自动读取内容或创建回复页。'), { code: 'CHAT_PAGE_LEFT_DOUYIN' });
-      if (await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，稍后自动准备回复通道。'), { code: 'CHAT_FOREGROUND' });
+      const foreground = await this.isForeground(page);
+      const foregroundError = () => Object.assign(new Error('专用浏览器在前台，稍后自动准备回复通道。'), { code: 'CHAT_FOREGROUND' });
+      if (foreground && !allowForegroundBrowsing) throw foregroundError();
       stop(signal);
-      const name = await page.evaluate(() => window.name);
+      const { name, verificationInterstitial } = await page.evaluate(() => ({
+        name: window.name, verificationInterstitial: document.title?.trim() === '验证码中间页',
+      }));
+      if (foreground && !/^deepseek-douyin-(?:launcher|api|dsh)$/.test(name)) throw foregroundError();
       if (address === 'about:blank') {
-        if (name) throw Object.assign(new Error('具名受管页面停留在空白页，未自动导航或创建回复页。'), { code: 'CHAT_PAGE_LEFT_DOUYIN' });
+        const idleWatch = /^deepseek-douyin-(?:api|dsh)$/.test(name)
+          && await page.evaluate(() => !document.body?.hasChildNodes());
+        if (name && !idleWatch) throw Object.assign(new Error('具名受管页面停留在空白页，未自动导航或创建回复页。'), { code: 'CHAT_PAGE_LEFT_DOUYIN' });
         continue;
       }
-      if (!/^deepseek-douyin-(?:launcher|api|dsh|api-chat|dsh-chat)$/.test(name)) continue;
+      if (!verificationInterstitial && !/^deepseek-douyin-(?:launcher|api|dsh|api-chat|dsh-chat)$/.test(name)) continue;
       const flags = await page.evaluate(readChatBlockers);
-      if (flags.blocked || flags.loginRequired || flags.verificationRequired) throw Object.assign(new Error('专用浏览器需要登录或验证，未自动准备回复通道。'), { code: 'CHAT_LOGIN_REQUIRED', needsUserAction: true });
-      if (name.endsWith('-chat') && await page.evaluate(() => [...document.querySelectorAll('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable="true"],[data-e2e="im-dialog"] [data-e2e="msg-input"] textarea,[data-e2e="im-dialog"] [data-e2e="msg-input"] input')].some(element => String(element.value ?? element.innerText ?? element.textContent ?? '').trim()))) throw Object.assign(new Error('专用聊天页保留了草稿，未自动导航或切换。'), { code: 'CHAT_DRAFT_PRESENT' });
+      if (verificationInterstitial || flags.blocked || flags.loginRequired || flags.verificationRequired) throw Object.assign(new Error('专用浏览器需要登录或验证，未自动准备回复通道。'), { code: 'CHAT_LOGIN_REQUIRED', needsUserAction: true });
+      if (name.endsWith('-chat') && await page.evaluate(formatting => {
+        const pattern = new RegExp(formatting, 'g');
+        const editors = document.querySelectorAll('[data-e2e="im-dialog"] [data-e2e="msg-input"] [contenteditable="true"],[data-e2e="im-dialog"] [data-e2e="msg-input"] textarea,[data-e2e="im-dialog"] [data-e2e="msg-input"] input');
+        return Array.from(editors).some(element => {
+          const text = String(element.value ?? element.innerText ?? element.textContent ?? '');
+          return text.replace(pattern, '').trim().length > 0 || Boolean(element.files?.length || element.querySelector('img,video,audio,[data-slate-void="true"]'));
+        });
+      }, draftFormatting.source)) throw Object.assign(new Error('专用聊天页保留了草稿，未自动导航或切换。'), { code: 'CHAT_DRAFT_PRESENT' });
     }
     await authorizePrepare(); stop(signal);
   }
 
-  async prepareChat({ signal, automatic = false, authorizePrepare } = {}) {
-    if (automatic) await this.assertAutomaticPrepareSafe(signal, authorizePrepare);
+  async prepareChat({ signal, automatic = false, authorizePrepare, allowForegroundBrowsing = false, startBackgroundBrowser = false } = {}) {
+    if (automatic) await this.assertAutomaticPrepareSafe(signal, authorizePrepare, allowForegroundBrowsing, startBackgroundBrowser);
     let page;
     try { page = await this.withPage(async current => current, { signal, launch: !automatic, create: false, ...(automatic ? { authorizePrepare } : {}) }); }
     catch (error) { if (!['CHAT_PAGE_NOT_OPEN', 'CHAT_PAGE_LEFT_DOUYIN'].includes(error.code)) throw error; }
     if (page && await this.isForeground(page)) throw Object.assign(new Error('专用浏览器在前台，未准备回复通道。'), { code: 'CHAT_FOREGROUND' });
     return this.withPage(async current => {
-      if (automatic) await this.assertAutomaticPrepareSafe(signal, authorizePrepare);
+      if (automatic) await this.assertAutomaticPrepareSafe(signal, authorizePrepare, allowForegroundBrowsing);
       if (await this.isForeground(current)) throw Object.assign(new Error('专用浏览器在前台，未准备回复通道。'), { code: 'CHAT_FOREGROUND' });
       const flags = await this.dialog(current, signal, { open: true });
       if (flags.blocked || flags.loginRequired || flags.verificationRequired) return { prepared: false, blocked: flags.blocked === true, loginRequired: flags.loginRequired === true, verificationRequired: flags.verificationRequired === true };
-      const list = await this.contactList(current, signal, { enumerate: false, ensurePage: true });
+      const list = await this.contactList(current, signal, { preparedDialog: flags });
       return { prepared: true, count: Array.isArray(list.contacts) ? list.contacts.length : 0 };
     }, { signal, launch: !automatic, create: true, ...(automatic ? { authorizePrepare } : {}) });
   }
@@ -1057,6 +1165,23 @@ export class ChatBrowser {
       if(stable<3)throw changed();
       const blockers=await page.evaluate(readChatBlockers);if(blockers.loginRequired||blockers.verificationRequired)throw changed();
       stop(signal);
+      if (await page.evaluate(() => document.visibilityState === 'hidden')) {
+        stop(signal);
+        inputStarted = true;
+        const opened = await element.evaluate((node, point) => {
+          const rect = node.getBoundingClientRect(), hit = document.elementFromPoint(point.x, point.y);
+          if (document.visibilityState !== 'hidden' || !node.isConnected || location.origin !== point.origin
+            || node.getAttribute('data-deepseek-chat-id') !== point.marker || node.matches(':disabled,[aria-disabled="true"]')
+            || !(hit === node || (hit && node.contains(hit)))
+            || !['left', 'top', 'width', 'height'].every(key => Math.abs(rect[key] - point[key]) <= 0.5)) return false;
+          node.click();
+          return true;
+        }, point);
+        inputSettled = true;
+        stop(signal);
+        if (!opened) throw changed();
+        return;
+      }
       await element.evaluate((node,{token,point})=>{
         const entries=window.__dafeiyuChatNavigation??=Object.create(null),entry={blocked:false,dispatched:false,expired:false};
         const types=['pointerdown','mousedown','mouseup','click'];
@@ -1180,21 +1305,31 @@ export class ChatBrowser {
     return current;
   }
   publicMessages(recipientId, rawRows) {
-    const currentVoiceRefs = new Set();
+    const currentResourceRefs = new Set();
     const rows = rawRows.map(row => {
       const { member, clientId, ...rest } = row;
       const identified = clientId ? { ...rest, clientMessageKey: hash(`${recipientId}\0${clientId}`) } : rest;
       const base = member ? { ...identified, memberId: member.nativeId ? `member:${hash(`${recipientId}\0${member.nativeId}`)}` : null, memberName: member.name || null, mentionedSelf: row.mentionedSelf === true } : identified;
       if (!row.media) return base;
-      const { images = [], audioSources = [], ...media } = row.media;
+      const { images = [], audioSources = [], attachmentFields, ...media } = row.media;
       const resources = [...images, ...audioSources].filter(image => image.src).map(image => {
         const ref = `media:${hash(image.src.startsWith('data:') ? image.src : (() => { try { return new URL(image.src).pathname; } catch { return image.src; } })())}`;
-        if(media.type==='voice'){currentVoiceRefs.add(ref);this.mediaResources.delete(ref);this.mediaResources.set(ref, { src: image.src, label: image.label ?? null, recipientId, type: media.type });}
+        if(media.type==='voice'){currentResourceRefs.add(ref);this.mediaResources.delete(ref);this.mediaResources.set(ref, { src: image.src, label: image.label ?? null, recipientId, type: media.type });}
         return { resourceRef: ref, label: image.label ?? null };
       });
+      const attachment = attachmentFields && messageAttachment(media.type, attachmentFields);
+      if (attachment?.readable) {
+        const resourcePaths = attachment.urls.map(url => { const parsed = new URL(url); return [parsed.host, parsed.pathname]; });
+        const ref = `media:${hash(JSON.stringify([recipientId, row.nativeId, media.type, resourcePaths,
+          attachment.filename, attachment.format, attachment.reportedBytes, attachment.checksum]))}`;
+        currentResourceRefs.add(ref);
+        this.mediaResources.delete(ref);
+        this.mediaResources.set(ref, { attachment, recipientId, type: media.type });
+        resources.push({ resourceRef: ref, label: attachment.filename || null });
+      }
       return { ...base, media: { ...media, ...(media.type === 'voice' ? { sourceCount: resources.length } : { imageCount: resources.length }), resources } };
     });
-    for(const [ref,resource] of this.mediaResources)if(resource.recipientId===recipientId&&!currentVoiceRefs.has(ref))this.mediaResources.delete(ref);
+    for(const [ref,resource] of this.mediaResources)if(resource.recipientId===recipientId&&!currentResourceRefs.has(ref))this.mediaResources.delete(ref);
     while(this.mediaResources.size>128)this.mediaResources.delete(this.mediaResources.keys().next().value);
     const identified = this.identities.identify(recipientId, rows);
     return identified.map(row => row.media?.type === 'shared-work' ? { ...row, media: { ...row.media,
@@ -1236,6 +1371,36 @@ export class ChatBrowser {
         messages, dayEvidence: { observedAt: raw.observedAt, latestEndVerified: raw.latestEndVerified, chronology: raw.chronology, historyStartVerified: raw.historyStartVerified, emptyTodayVerified: raw.emptyTodayVerified } };
     }, { signal, launch: !backgroundOnly, create: !backgroundOnly });
   }
+  canCaptureAttachment(message) {
+    const refs = message.media?.resources;
+    return refs?.length === 1 && this.mediaResources.get(refs[0].resourceRef)?.attachment?.type === message.media.type;
+  }
+  async captureAttachment(page, contact, message, signal) {
+    const base = { conversation: { id: contact.id }, messageId: message.id, media: message.media,
+      understandingScope: 'visible-message-metadata-only', frames: [], note: '没有从该附件读到可用的正文或正片画面。' };
+    const binding = this.mediaResources.get(message.media.resources?.[0]?.resourceRef);
+    if (!binding?.attachment || binding.recipientId !== contact.id || message.sender !== 'incoming') return base;
+    stop(signal);
+    await fs.promises.mkdir(this.voiceCaptureDir, { recursive: true });
+    const directory = await fs.promises.mkdtemp(path.join(this.voiceCaptureDir, 'chat-attachment-'));
+    let captured;
+    try { captured = await readMessageAttachment(binding.attachment, directory, { signal, download: this.downloadAttachment }); }
+    finally {
+      if (path.dirname(directory) === this.voiceCaptureDir && !((await fs.promises.lstat(directory)).isSymbolicLink())) {
+        await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      }
+    }
+    stop(signal);
+    const blockers = await page.evaluate(readChatBlockers);
+    if (blockers.loginRequired || blockers.verificationRequired) throw accountBlocked('附件读取期间需要登录或验证。');
+    await this.verifyContactBinding(page, contact);
+    const latest = await this.stableConversation(page, contact, signal);
+    const after = this.publicMessages(contact.id, latest.messages).find(item => item.id === message.id);
+    if (!after || after.memberId !== message.memberId || messageFingerprint(after) !== messageFingerprint(message)) {
+      throw mediaChanged('读取期间指定附件已变化，未使用本次内容。');
+    }
+    return captured ? { ...base, ...captured } : base;
+  }
   captureMessage(recipientId, messageId, { allowed = false, signal } = {}) {
     if (allowed !== true) return Promise.reject(new Error('查看画面需要这个指定联系人的明确授权。'));
     if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) return Promise.reject(new TypeError('需要已读取的精确消息 ID。'));
@@ -1245,13 +1410,15 @@ export class ChatBrowser {
       const raw = await this.stableConversation(page, contact, signal);
       const messages = this.publicMessages(recipientId, raw.messages);
       const message = messages.find(item => item.id === messageId);
-      if (!message?.media || message.unsupported || !['emoji', 'image', 'shared-work'].includes(message.media.type)) throw new Error('该消息没有已识别的图片、表情或分享作品画面。');
-      if (message.media.type === 'image' && message.media.imageReady !== true) throw new Error('这条图片仍在加载或未提供实际图像，未把占位符当作图片。');
+      if (!message?.media || message.unsupported) throw mediaChanged('指定附件已变化或不在当前会话。');
+      if (['file', 'video-attachment'].includes(message.media.type)) return this.captureAttachment(page, contact, message, signal);
+      if (!['emoji', 'image', 'shared-work'].includes(message.media.type)) throw mediaUnavailable('指定消息没有可采集的画面。');
+      if (message.media.type === 'image' && message.media.imageReady !== true) throw mediaUnavailable('这条图片未加载完整。');
       await this.markMessages(page, messages);
       const visualSelector = message.media.inline ? '[class*="MessageItemTextcontainer"],[data-e2e="message-text"]' : '.MessageItemEmojiemojiBox,.MessageItemShareAwemecontainer,[class*="MessageItemImagecontainer"],[class*="MessageItemImageimageBox"],[class*="MessageItemImageImageBox"],[data-e2e="message-image"],[data-e2e="message-emoji"],[data-e2e="message-sticker"],[class*="MessageItemSticker"],[data-e2e="shared-video-card"]';
       const quoteSelector = '[data-e2e="message-quote"],[data-e2e="message-reply-preview"],[class*="MessageItemReply"],[class*="MessageItemQuote"],[class*="QuoteMessage"]';
       const frame = page.locator(`[data-e2e="im-dialog"] [data-deepseek-message-id="${messageId}"]`).locator(`:is(${visualSelector}):not(:is(${quoteSelector}) *)`);
-      if (await frame.count() !== 1) throw new Error('没有唯一的指定消息画面。');
+      if (await frame.count() !== 1) throw mediaUnavailable('没有唯一的指定消息画面。');
       const current = await page.evaluate(readChatIdentityDom);
       const protectedScreen = await page.evaluate(readChatBlockers);
       if (protectedScreen.loginRequired || protectedScreen.verificationRequired) return { ...protectedScreen, frames: [], imageStatus: '登录或验证画面未采集。' };
@@ -1259,18 +1426,19 @@ export class ChatBrowser {
       stop(signal);
       const rectangle=await frame.boundingBox();
       const viewport=await page.evaluate(()=>({width:innerWidth,height:innerHeight}));
-      if(!rectangle) throw new Error('指定消息画面目前不可见，未采集。');
+      if(!rectangle) throw mediaUnavailable('指定消息画面目前不可见。');
       const clip={x:Math.max(0,rectangle.x),y:Math.max(0,rectangle.y),width:Math.min(viewport.width,rectangle.x+rectangle.width)-Math.max(0,rectangle.x),height:Math.min(viewport.height,rectangle.y+rectangle.height)-Math.max(0,rectangle.y)};
-      if(clip.width<2||clip.height<2) throw new Error('指定消息不在当前视口内，未采集其他区域。');
+      if(clip.width<2||clip.height<2) throw mediaUnavailable('指定消息不在当前视口内。');
       const unobstructed=await frame.evaluate(element=>{const r=element.getBoundingClientRect(),x=Math.max(1,Math.min(innerWidth-1,r.x+r.width/2)),y=Math.max(1,Math.min(innerHeight-1,r.y+r.height/2));return element.contains(document.elementFromPoint(x,y));});
-      if(!unobstructed) throw new Error('指定消息被其他界面遮挡，未采集。');
+      if(!unobstructed) throw mediaUnavailable('指定消息被其他界面遮挡。');
       // 倒转的虚拟列表不能依赖 locator 的自动滚动稳定等待；只截取当前消息的可见矩形。
       const data = await page.screenshot({ type:'jpeg',quality:70,clip,timeout:5000 });
       const frames = [{ mimeType: 'image/jpeg', data: data.toString('base64') }];
       if (message.media.animatedHint === true) {
         await new Promise(resolve => setTimeout(resolve, 300)); stop(signal);
         const protection = await page.evaluate(readChatBlockers), identity = await page.evaluate(readChatIdentityDom);
-        if (protection.loginRequired || protection.verificationRequired || !sameConversationIdentity(identity, contact)) throw new Error('动图采样期间会话或验证状态改变，画面已丢弃。');
+        if (protection.loginRequired || protection.verificationRequired) throw accountBlocked('动图采样期间需要登录或验证。');
+        if (!sameConversationIdentity(identity, contact)) throw mediaChanged('动图采样期间会话或验证状态改变，画面已丢弃。');
         const middle = this.publicMessages(recipientId, (await this.stableConversation(page, contact, signal)).messages).find(item => item.id === messageId);
         const bounds = await frame.boundingBox();
         if (!middle || messageFingerprint(middle) !== messageFingerprint(message) || !bounds || ['x','y','width','height'].some(key => Math.abs(bounds[key] - rectangle[key]) > 1) || !await frame.evaluate(element => { const r = element.getBoundingClientRect(); return element.contains(document.elementFromPoint(Math.max(1, Math.min(innerWidth - 1, r.x + r.width / 2)), Math.max(1, Math.min(innerHeight - 1, r.y + r.height / 2)))); })) throw new Error('动图采样期间指定消息变化或被遮挡，画面已丢弃。');
@@ -1297,13 +1465,14 @@ export class ChatBrowser {
     if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) return Promise.reject(new TypeError('需要已读取的精确消息 ID。'));
     return this.withPage(async page => {
       const { contact, flags } = await this.select(page, recipientId, signal);
-      if (flags.blocked) throw new Error('登录或验证尚未完成，未读取语音。');
+      if (flags.blocked) throw accountBlocked('登录或验证尚未完成，未读取语音。');
       await this.verifyContactBinding(page, contact);
       const raw = await this.stableConversation(page, contact, signal), messages = this.publicMessages(recipientId, raw.messages);
       const message = messages.find(item => item.id === messageId), seconds = message?.media?.durationSeconds;
-      if (message?.media?.type !== 'voice' || message.unsupported || !Number.isFinite(seconds) || seconds <= 0 || seconds > 120 || message.media.resources.length !== 1) throw new Error('该语音缺少唯一资源或可靠时长，或超过 120 秒，未采集。');
+      if (message?.media?.type !== 'voice' || message.unsupported) throw mediaChanged('指定语音已变化或不在当前会话。');
+      if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 120 || message.media.resources.length !== 1) throw mediaUnavailable('该语音缺少唯一资源或可靠时长，或超过 120 秒，未采集。');
       const source = this.mediaResources.get(message.media.resources[0].resourceRef);
-      if (!source || source.recipientId !== recipientId || source.type !== 'voice' || !allowedAudioUrl(source.src)) throw new Error('指定语音没有可核对的平台 HTTPS 资源，未采集。');
+      if (!source || source.recipientId !== recipientId || source.type !== 'voice' || !allowedAudioUrl(source.src)) throw mediaUnavailable('指定语音没有可核对的平台 HTTPS 资源，未采集。');
       stop(signal);
       const timeout = AbortSignal.timeout(20_000), bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
       let bytes;
@@ -1320,13 +1489,13 @@ export class ChatBrowser {
           }
         } finally { reader.releaseLock(); }
         bytes = Buffer.concat(chunks, size);
-      } catch { stop(signal); throw new Error('指定语音下载失败、超时或超过 25 MiB，未采集其他资源。'); }
+      } catch { stop(signal); throw mediaUnavailable('指定语音下载失败、超时或超过 25 MiB，未采集其他资源。'); }
       stop(signal);
       const format = chatAudioFormat(bytes);
-      if (!format) throw new Error('指定资源没有可识别的音频文件头，未交给转写。');
+      if (!format) throw mediaUnavailable('指定资源没有可识别的音频文件头，未交给转写。');
       await this.verifyContactBinding(page, contact);
       const protectedScreen = await page.evaluate(readChatBlockers);
-      if (protectedScreen.loginRequired || protectedScreen.verificationRequired) throw new Error('读取语音期间出现登录或验证，数据已丢弃。');
+      if (protectedScreen.loginRequired || protectedScreen.verificationRequired) throw accountBlocked('读取语音期间出现登录或验证，数据已丢弃。');
       const after = this.publicMessages(recipientId, (await this.stableConversation(page, contact, signal)).messages).find(item => item.id === messageId);
       if (!after || messageFingerprint(after) !== messageFingerprint(message)) throw new Error('读取语音期间指定消息发生变化，数据已丢弃。');
       fs.mkdirSync(this.voiceCaptureDir, { recursive: true });
@@ -1345,33 +1514,70 @@ export class ChatBrowser {
     this.voiceCaptures.delete(captureId);
     return true;
   }
-  openSharedVideo(recipientId, messageId, { allowed = false, signal } = {}) {
-    if (allowed !== true) return Promise.reject(new Error('打开分享作品需要这个指定联系人的明确授权。'));
-    if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) return Promise.reject(new TypeError('需要已读取的精确消息 ID。'));
-    return this.withPage(async page => {
+  async openSharedVideo(recipientId, messageId, { allowed = false, signal, privateVideoAccess } = {}) {
+    if (allowed !== true) throw new Error('打开分享作品需要这个指定联系人的明确授权。');
+    if (typeof messageId !== 'string' || !/^msg:[a-f0-9]{64}$/.test(messageId)) throw new TypeError('需要已读取的精确消息 ID。');
+    const selection = await this.withPage(async page => {
       const { contact, flags } = await this.select(page, recipientId, signal);
-      if (flags.blocked) return { ...flags, opened: false };
+      if (flags.blocked) return { result: { ...flags, opened: false } };
       const raw = await this.stableConversation(page, contact, signal);
       const messages = this.publicMessages(recipientId, raw.messages);
       const message = messages.find(item => item.id === messageId);
       if (message?.media?.type !== 'shared-work') throw new Error('该消息不是已识别的分享作品卡片。');
-      if (message.media.identityConflict === true) throw new Error('分享卡片的公开链接与原生作品身份有冲突，未打开。');
-      if (message.media.url) {
-        let target; try { target = new URL(message.media.url); } catch { throw new Error('分享卡片公开链接格式无效，未打开。'); }
-        const id = /^\/video\/(\d{1,64})\/?$/.exec(target.pathname)?.[1];
-        if (message.media.url.length > 300 || target.protocol !== 'https:' || target.hostname !== 'www.douyin.com' || target.username || target.password || target.port || !id || message.media.videoId !== id) throw new Error('分享卡片公开链接与作品编号不一致，未打开。');
-        return { ...flags, opened: false, videoId: id, url: 'https://www.douyin.com/video/' + id, source: message.media.publicUrlSource || 'dom-link', isPhotoGallery: message.media.isPhotoGallery };
-      }
-      await this.markMessages(page, messages);
+      const linked = linkedSharedVideo(message, flags);
+      if (linked) return { result: linked };
+      const fingerprint = cardFingerprint(message);
+      const matches = item => item.media?.type === 'shared-work' && !item.media.identityConflict && cardFingerprint(item) === fingerprint && (!message.nativeId || item.nativeId === message.nativeId);
+      if (messages.filter(matches).length !== 1) throw new Error('会话中有多张相同的分享卡片，未打开身份不明的作品。');
+      return { sourcePage: page, matches };
+    }, { signal });
+    if (selection.result) return selection.result;
+    const parentSource = this.controller.source?.startsWith('dsh') ? 'dsh' : 'api';
+    const check = () => {
+      stop(signal);
+      if (checkPrivateVideoAccess(privateVideoAccess)) return;
+      const permission = this.controller.limits().beforeAction(parentSource, 'douyin_open_video');
+      if (!permission.allowed) throw new Error(permission.reason || '当前时间不允许打开分享作品。');
+    };
+    check();
+    if (typeof this.controller.resolveSharedVideoCard !== 'function') throw new Error('专用视频页暂不可用，聊天页保留。');
+    return this.controller.resolveSharedVideoCard((viewer, allowed) => this.resolveCardInViewer(viewer, { ...selection, recipientId, signal, check: () => { allowed(); check(); } }), { signal, ...(privateVideoAccess ? { privateVideoAccess } : {}) });
+  }
+
+  async resolveCardInViewer(page, { sourcePage, matches, recipientId, signal, check }) {
+    const previous = new URL(page.url());
+    const ownsViewer = async () => !page.isClosed() && /^https:\/\/www\.douyin\.com(?:\/|$)/.test(page.url()) && await page.evaluate(() => window.name) === browserPageLabel('api');
+    if (page === sourcePage || previous.origin !== 'https://www.douyin.com' || !await ownsViewer()) throw new Error('没有独立且归属明确的专用视频页，未点击聊天卡片。');
+    const safeViewer = async () => {
+      const blockers = await page.evaluate(readChatBlockers);
+      return !blockers.loginRequired && !blockers.verificationRequired && !await page.evaluate(() => [...document.querySelectorAll('[contenteditable="true"],textarea,input[type="file"]')].some(input => Boolean(input.files?.length || String(input.value ?? input.textContent ?? '').replace(/[\u200b-\u200f\ufeff]/gi, '').trim())));
+    };
+    if (!await safeViewer()) throw new Error('专用视频页有草稿、登录或验证提示，未打开卡片。');
+    const replica = new ChatBrowser({ source: this.controller.source?.startsWith('dsh') ? 'dsh-chat' : 'api-chat', controller: this.controller, voiceCaptureDir: this.voiceCaptureDir });
+    let restore = false;
+    try {
+      check();
+      restore = true;
+      const entry = page.locator('[data-e2e="im-entry"],[data-e2e="im-dialog"]').filter({ visible: true });
+      if (!await entry.count() && !await replica.gotoWithRetry(page, HOME, signal)) throw new Error('视频页未能打开消息入口。');
+      const dialog = await replica.dialog(page, signal, { open: true });
+      if (dialog.blocked) return { ...dialog, opened: false };
+      const { contact, flags } = await replica.select(page, recipientId, signal);
+      if (flags.blocked) return { ...flags, opened: false };
+      const snapshot = await replica.stableConversation(page, contact, signal);
+      const messages = replica.publicMessages(recipientId, snapshot.messages);
+      const copies = messages.filter(matches);
+      if (copies.length !== 1) throw new Error('视频页未核对到同一会话中唯一的分享卡片。');
+      const message = copies[0], linked = linkedSharedVideo(message, flags);
+      if (linked) return linked;
+      await replica.markMessages(page, messages);
       const card = page.locator(`[data-e2e="im-dialog"] ${message.media.safeOpenSelector}`);
       if (await card.count() !== 1) throw new Error('没有唯一的指定分享卡片。');
       const beforeUrl = new URL(page.url());
       const beforeId = /^\/video\/(\d+)\/?$/.exec(beforeUrl.pathname)?.[1] || beforeUrl.searchParams.get('modal_id') || null;
+      check();
+      if (!await ownsViewer()) throw new Error('卡片所在的专用视频页已经改变。');
       const pop = page.waitForEvent('popup', { timeout: 2500 }).catch(() => null);
-      stop(signal);
-      const parentSource = this.controller.source?.startsWith('dsh') ? 'dsh' : 'api';
-      const decision = this.controller.limits().beforeAction(parentSource, 'douyin_open_video');
-      if (!decision.allowed) throw new Error(decision.reason || '当前时间不允许打开分享作品。');
       let popup, target = page;
       try {
         await card.click();
@@ -1385,6 +1591,7 @@ export class ChatBrowser {
         }, { beforeId, newPopup: Boolean(popup) }, { timeout: 5000 }).catch(() => {});
         const observed = new URL(target.url());
         const id = /^\/video\/(\d+)\/?$/.exec(observed.pathname)?.[1] || observed.searchParams.get('modal_id');
+        check();
         if (observed.protocol !== 'https:' || !/^(?:www\.)?douyin\.com$/.test(observed.hostname) || !/^\d+$/.test(id || '')) return { ...flags, opened: true, videoId: null, url: null, reason: '实际打开页面没有可核实的公开作品 ID。' };
         if (!popup && id === beforeId) return { ...flags, opened: true, videoId: null, url: null, reason: '点击后没有核实新的作品页面，未采用原详情页的作品 ID。' };
         return { ...flags, opened: true, videoId: id, url: `https://www.douyin.com/video/${id}`, source: 'actual-opened-page-url', isPhotoGallery: message.media.isPhotoGallery };
@@ -1393,7 +1600,13 @@ export class ChatBrowser {
         await target.evaluate(() => { for (const video of document.querySelectorAll('video')) video.pause(); }).catch(() => {});
         if (popup) await popup.close().catch(() => {});
       }
-    }, { signal });
+    } finally {
+      if (restore && !signal?.aborted && await ownsViewer().catch(() => false) && await safeViewer().catch(() => false)) {
+        // 只清理借用的作品页，原聊天页没有被导航。
+        await page.goto(previous.href, { waitUntil: 'domcontentloaded', timeout: 5000 }).catch(() => {});
+        await page.evaluate(() => { for (const video of document.querySelectorAll('video')) video.pause(); }).catch(() => {});
+      }
+    }
   }
   canFallbackFromImage(delivery, recipientId) { return Boolean(delivery && this.unsentImageDeliveries.get(delivery) === recipientId && delivery.confirmed === false && delivery.deliveryUncertain === false); }
   sendImageMessage(recipientId, asset, { allowed = false, expectedContact, expectedMessageIds, expectedMessageContent, expectedMessageEvidence, signal, authorize, weak = false, backgroundOnly = false } = {}) {

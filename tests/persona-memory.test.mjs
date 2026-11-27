@@ -8,6 +8,13 @@ import { promisify } from 'node:util';
 import { PersonaMemory, GENERATED_START, GENERATED_END } from '../persona-memory.mjs';
 
 const run = promisify(execFile);
+test('人格文件空白占满时无损压缩，缺少续写条目时保留原文件',t=>{
+  const {store}=fixture(t);store.initialize({importLegacy:false});
+  const payload={rows:Array.from({length:50000},(_,id)=>({id,label:'保留的证据',samples:[{from:0,to:1},{from:1,to:2},{from:2,to:3}]}))};
+  assert.ok(Buffer.byteLength(JSON.stringify(payload,null,2))>8*1024*1024);assert.ok(Buffer.byteLength(JSON.stringify(payload))<8*1024*1024);
+  store.writeState(payload);const raw=fs.readFileSync(store.stateFile,'utf8');assert.deepEqual(JSON.parse(raw),payload);
+  assert.throws(()=>store.writeState({text:'x'.repeat(8*1024*1024)}),{code:'PERSONA_STATE'});assert.equal(fs.readFileSync(store.stateFile,'utf8'),raw);
+});
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-persona-synthetic-'));
   t.after(() => {
@@ -25,6 +32,21 @@ function state(id = '100001', extra = {}) {
 function capture(id = '100001', extra = {}) {
   return { state: state(id), frames: [{ mimeType: 'image/jpeg', data: '/9j/2Q==', videoId: id, time: 1.25 }], observation: { videoId: id }, ...extra };
 }
+
+test('大份旧证据保留原文件，后续作品写入现有续写机制', t => {
+  const { store, memoryDir } = fixture(t);
+  store.initialize();
+  const base = JSON.parse(fs.readFileSync(store.stateFile, 'utf8'));
+  const padded = JSON.stringify({ ...base, legacyPadding: '合'.repeat(800_000) });
+  fs.writeFileSync(store.stateFile, padded, 'utf8');
+  store.recordObservation(state('100001'), { source: 'api' });
+  store.recordObservation(state('100002'), { source: 'dsh' });
+  const reopened = new PersonaMemory({ memoryDir }).snapshot();
+  assert.deepEqual(reopened.recentObservations.map(item => item.videoId), ['100001', '100002']);
+  assert.equal(reopened.generation, 2);
+  assert.equal(fs.readFileSync(store.stateFile, 'utf8'), padded);
+  assert.ok(fs.statSync(store.evidenceJournal).size > 0);
+});
 
 test('可播放作品缺少作者时仍可记录观察，不凭空补作者', t => {
   const f = fixture(t); f.store.initialize();

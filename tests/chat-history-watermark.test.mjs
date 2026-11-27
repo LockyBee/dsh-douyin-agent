@@ -51,9 +51,10 @@ test('历史兼容缺最新端、次序、旧分类或原始资格证据时拒�
 function fixture(t, { phase = 'model', mutation = 'history' } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-group-history-proposal-'));
   const contact = { id: 'conv:' + '4'.repeat(64), name: '合成许可群', isGroup: true, followed: null, identityVersion: 2, identityKind: 'rendered-conversation', identityHash: '4'.repeat(64), identityBinding: 'binding:' + '5'.repeat(64), identityVerified: true };
-  const tracker = new MessageIdentityTracker(), sent = [], inputs = []; let stage = 'baseline', afterModelReads = 0, service;
+  const tracker = new MessageIdentityTracker(), sent = [], inputs = []; let stage = 'baseline', service;
+  const locked = () => fs.existsSync(path.join(directory, 'outbound-send.guard'));
   const browser = { listContacts: async () => ({ contacts: [contact] }), readConversation: async () => {
-    const change = inputs.length > 0 && (phase === 'model' || phase === 'delivery' && ++afterModelReads >= 2 || phase === 'wait' && stage === 'full');
+    const change = inputs.length > 0 && (phase === 'model' || phase === 'delivery' && locked() || phase === 'wait' && stage === 'full');
     let texts = stage === 'baseline' ? ['历史乙', '历史丙'] : change && mutation === 'history' ? ['更早的历史甲', '历史乙', '历史丙', '大肥鱼现在能回话吗'] : ['历史乙', '历史丙', '大肥鱼现在能回话吗'];
     const rows = texts.map((text, order) => ({ text, kind: 'text', sender: 'incoming', direction: 'incoming', order, orderMode: 'relative', latestEndVerified: true }));
     if (change && mutation === 'new-tail') rows.push({ ...rows.at(-1), text: '新追加问题', order: rows.length });

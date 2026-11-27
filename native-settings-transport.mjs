@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 export const SETTINGS_PREFIX = '/api/douyin-browser';
 export const SETTINGS_RPC_CHANNEL = '/douyin-settings';
 const MAX_BYTES = 262_144;
-const writes = new Set(['diagnostics','diagnostics/repair','watch/schedule','watch/options','video/configure','video/start','video/stop','browser/open','persona/configure','model/configure','mode/configure','watch/start','watch/stop','spark/configure','spark/start','spark/stop','spark/resolve','comments/configure','comments/resolve','share/configure','share/resolve','chat/contacts','chat/configure','chat/start','chat/stop','chat/prepare','chat/resolve','chat/unanswered/resolve','media/configure','media/credentials','reports/generate']);
+const writes = new Set(['interactions/configure','diagnostics','diagnostics/repair','watch/schedule','watch/options','video/configure','video/private-schedule','video/start','video/stop','browser/open','browser/mode','browser/verification','browser/verification/frame','browser/verification/input','persona/configure','model/configure','mode/configure','watch/start','watch/stop','spark/configure','spark/start','spark/stop','spark/resolve','comments/configure','comments/resolve','reactions/configure','share/configure','share/resolve','chat/contacts','chat/configure','chat/start','chat/stop','chat/prepare','chat/resolve','chat/unanswered/resolve','media/configure','media/credentials','reports/generate']);
 const valid = (route, write) => write ? writes.has(route.slice(1)) : route === '/state' || route === '/chat/unanswered' || /^\/reports\/read\?date=\d{4}-\d{2}-\d{2}$/.test(route);
 const result = (status, error) => ({ status, body: { error } });
 

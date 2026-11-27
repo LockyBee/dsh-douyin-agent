@@ -35,6 +35,63 @@ test('识别可见附件类别，只返回卡片资料，不访问链接或文�
   assert.equal(requests, 0);
 });
 
+test('专用浏览器从同一原生文件和视频附件读取正文与样帧，只有普通卡片链接时不会下载', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-native-parity-'));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const file = Buffer.from('原生附件的合成正文', 'utf8');
+  const video = fs.readFileSync(new URL('./fixtures/headless-progress.mp4', import.meta.url));
+  for (const [kind, body] of [['file', file], ['video', video]]) {
+    const f = await dom(t, `<div data-e2e="message-${kind}">合成附件</div>`);
+    const address = `https://test.douyincdn.com/media/${kind}?signature=fixture-only`;
+    const content = kind === 'file' ? { file_name: '附件.txt', data_size: body.length, download_url: address }
+      : { video: { play_addr: { url_list: [address] } } };
+    await f.page.locator('[data-e2e="message-content"]').evaluate((node, attachment) => {
+      node.parentElement.setAttribute('data-message-id', '5192345678913456789');
+      node.__reactProps$synthetic = { children: { props: { message: {
+        conversationId: 'synthetic-chat', serverId: '5192345678913456789',
+        createdAt: new Date(), _parsedContent: attachment,
+      } } } };
+    }, content);
+    const raw = await f.read();
+    const contact = { id: 'conv:' + 'b'.repeat(64), displayName: raw.displayName, nativeId: raw.nativeId, conversationType: 'direct', isGroup: false };
+    f.chat.select = async () => ({ contact, flags: {} });
+    f.chat.verifyContactBinding = async (_page, expected) => assert.equal(expected.id, contact.id);
+    f.chat.voiceCaptureDir = root;
+    const downloaded = [];
+    f.chat.downloadAttachment = async (url, destination) => {
+      assert.equal(url, address);
+      downloaded.push(url);
+      fs.writeFileSync(destination, body);
+      return { bytes: body.length };
+    };
+    const [message] = f.chat.publicMessages(contact.id, raw.messages);
+    assert.equal(f.chat.canCaptureAttachment(message), true);
+    assert.doesNotMatch(JSON.stringify(message), /fixture-only|download_url|play_addr/);
+    const observed = await f.chat.captureMessage(contact.id, message.id, { allowed: true });
+    if (kind === 'file') {
+      assert.equal(observed.understandingScope, 'single-message-file-text');
+      assert.equal(observed.fileText.text, '原生附件的合成正文');
+    } else {
+      assert.equal(observed.understandingScope, 'single-message-video-samples');
+      assert.equal(observed.frames.length, 3);
+      assert.ok(observed.frames.every(frame => frame.data && frame.timeSemantics === 'approximate-seek-position'));
+    }
+    await f.page.locator('[data-e2e="message-content"]').evaluate(node => {
+      node.__reactProps$synthetic.children.props.message.conversationId = 'different-chat';
+      node.querySelector('div').insertAdjacentHTML('beforeend', '<a href="https://test.douyincdn.com/unverified">合成链接</a>');
+    });
+    const [unbound] = f.chat.publicMessages(contact.id, (await f.read()).messages);
+    assert.notEqual(f.chat.canCaptureAttachment(unbound), true);
+    const metadata = await f.chat.captureMessage(contact.id, unbound.id, { allowed: true });
+    assert.equal(metadata.understandingScope, 'visible-message-metadata-only');
+    assert.equal(downloaded.length, 1);
+  }
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
 test('未知附件有明确占位，撤回和系统消息不触发回复', async t => {
   const f = await dom(t, '<div data-e2e="message-placeholder">合成新附件</div>');
   let message = (await f.read()).messages[0];
@@ -97,6 +154,42 @@ test('模型入参同时包含正文、引用和附件，不泄漏资源地址�
   assert.doesNotMatch(JSON.stringify(request), /PRIVATE_REFERENCE|PRIVATE_URL|PRIVATE_MEDIA/);
   assert.match(request.system, /接梗/); assert.match(request.system, /文件未读正文/);
   assert.equal(normalizeChatReplyText('【自动回复】 合成短句\n[[QQ_BREAK]]\n合成补充'), '合成短句\n\n合成补充');
+});
+
+test('纯文字模型拒绝图片时保留一批语音、文件和文字，只降级被拒的画面', async () => {
+  const attempts = [];
+  const agent = new ChatAgent({
+    config: { apiKey: 'synthetic-key', baseUrl: 'https://synthetic.invalid', model: 'synthetic' },
+    fetchImpl: async (_url, options) => {
+      attempts.push(JSON.parse(options.body).messages);
+      if (attempts.length === 1) return Response.json({ error: { message: 'unknown variant `image_url`, expected text' } }, { status: 422 });
+      return Response.json({ choices: [{ finish_reason: 'stop', message: { content: '合成文本回复' } }] });
+    },
+  });
+  const text = '合成当前问题';
+  const messages = [
+    { id: 'voice', sender: 'incoming', media: { type: 'voice' } },
+    { id: 'doc', sender: 'incoming', media: { type: 'file' } },
+    { id: 'photo', sender: 'incoming', media: { type: 'image' } },
+    { id: 'text', sender: 'incoming', text },
+  ];
+  const result = await agent.reply({ messages, mediaObservations: [
+    { messageId: 'photo', media: { type: 'image' }, frames: [{ mimeType: 'image/png', data: 'AQID' }] },
+    { messageId: 'voice', media: { type: 'voice' }, frames: [], understandingScope: 'single-message-audio-transcription',
+      transcription: { backend: 'local-whisper', text: '合成音频内容', interval: { startSeconds: 0, durationSeconds: 2 } } },
+    { messageId: 'doc', media: { type: 'file' }, frames: [], understandingScope: 'single-message-file-text',
+      fileText: { text: '合成文件内容' } },
+  ] });
+  assert.equal(result.text, '合成文本回复');
+  assert.equal(result.visualsUnavailable, true);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].at(-1).content.some(part => part.type === 'image_url'), true);
+  assert.equal(attempts[1].every(message => typeof message.content === 'string'), true);
+  assert.match(attempts[1].at(-1).content, /当前模型未接收这条附件的图片/);
+  assert.match(attempts[1].at(-1).content, /合成音频内容/);
+  assert.match(attempts[1].at(-1).content, /合成文件内容/);
+  assert.equal(attempts[1].some(message => message.content === text), true);
+  assert.doesNotMatch(attempts[1].at(-1).content, /base64|AQID/);
 });
 
 function serviceFixture(t, group = false) {

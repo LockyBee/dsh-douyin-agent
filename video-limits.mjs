@@ -2,14 +2,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
 import { randomUUID } from 'node:crypto';
+import {atomicJsonWrite, withJsonControlGuard} from './atomic-file.mjs';
 
 const DAY = 86_400_000;
 const SOURCES = ['api', 'dsh'];
 const READ_ACTIONS = new Set(['douyin_status', 'douyin_pause', 'douyin_recall', 'douyin_remember', 'douyin_video_limits_status']);
+const PRIVATE_VIDEO_MODES = new Set(['all-day', 'follow-watch-hours']);
 export const DEFAULT_VIDEO_POLICY = Object.freeze({ version: 1, timeZone: 'Asia/Shanghai', enabled:false, windows: ['00:00-24:00'], dailyMinutes: 10, dailyRequests:30 });
+
+export function readyImagePost(state) {
+  const image = state?.imagePost;
+  if (state?.pageKind !== 'image-post' || state.video || image?.recognized !== true || image.loaded !== true || typeof image.id !== 'string' || !/^\d{10,30}$/.test(image.id)) return false;
+  if (image.source === 'active-image-element') return true;
+  return state.playbackBackend === 'local-decoder' && image.source === 'local-media-image' && /^[a-f0-9]{64}$/.test(image.imageKey || '') &&
+    ['width', 'height'].every(key => Number.isSafeInteger(image.dimensions?.[key]) && image.dimensions[key] >= 120);
+}
+
+export function isLiveRoom(state) {
+  const room = state?.liveRoom;
+  return state?.pageKind === 'live-room' && room?.recognized === true && /^\d{4,30}$/.test(room.roomId || '') &&
+    (room.source === 'direct-live-url-and-player' || room.source === 'local-media-live' && state.playbackBackend === 'local-decoder');
+}
+
 const shanghai = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });
 const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
-function write(file, value) { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; fs.writeFileSync(temporary, JSON.stringify(value, null, 2), { mode: 0o600 }); fs.renameSync(temporary, file); }
+const write=atomicJsonWrite;
 function initialize(file, value) { let descriptor; try { descriptor = fs.openSync(file, 'wx', 0o600); } catch (error) { if (error.code === 'EEXIST') return; throw error; } try { fs.writeFileSync(descriptor, JSON.stringify(value, null, 2)); } finally { fs.closeSync(descriptor); } }
 function sourceName(source) { if (!SOURCES.includes(source)) throw new Error('刷视频入口只能是 api 或 dsh。'); return source; }
 function parseWindow(value) {
@@ -55,12 +72,11 @@ export class VideoLimits {
   constructor({stateDir=resolveRuntimePaths().stateDir,now=Date.now}={}) {
     Object.assign(this,{stateDir,now});fs.mkdirSync(stateDir,{recursive:true});
     this.policyFile=path.join(stateDir,'video-policy.json');this.sessionsFile=path.join(stateDir,'video-sessions.json');this.guardFile=path.join(stateDir,'video-control.guard');this.usageFile=path.join(stateDir,'video-usage.json');this.budgetFile=path.join(stateDir,'watch-budget.json');this.scheduleFile=path.join(stateDir,'watch-schedule-policy.json');
+    this.privateVideoScheduleFile = path.join(stateDir, 'private-video-schedule.json');
     const legacySchedule=optional(this.scheduleFile,null);initialize(this.policyFile,{...DEFAULT_VIDEO_POLICY,...(legacySchedule?.maxRequests!==undefined?{dailyRequests:legacySchedule.maxRequests}:{})});initialize(this.sessionsFile,{version:1,current:null});initialize(this.usageFile,{version:1,days:{},active:null});this.enforcing=false;
   }
   control(action) {
-    let descriptor;const token=randomUUID();try{descriptor=fs.openSync(this.guardFile,'wx',0o600);}catch(error){if(error.code==='EEXIST')throw Object.assign(new Error('视频设置正在更新，或控制锁需要人工核对；未自动删除。'),{status:409,code:'VIDEO_CONTROL_BUSY'});throw error;}
-    try{fs.writeFileSync(descriptor,JSON.stringify({pid:process.pid,token}));}finally{fs.closeSync(descriptor);}
-    try{return action();}finally{const guard=read(this.guardFile);if(guard.token===token&&guard.pid===process.pid)fs.unlinkSync(this.guardFile);}
+    return withJsonControlGuard(this.guardFile, action, Object.assign(new Error('视频设置控制锁暂时无法取得。'), { status: 409, code: 'VIDEO_CONTROL_BUSY' }));
   }
   policy() {
     const raw=read(this.policyFile),schedule=optional(this.scheduleFile,null);
@@ -68,6 +84,27 @@ export class VideoLimits {
     const input={...raw};if(raw.dailyRequests===undefined&&schedule?.maxRequests!==undefined)input.dailyRequests=schedule.maxRequests;
     if(schedule)input.enabled=schedule.enabled;
     return validateVideoPolicy(input);
+  }
+  privateVideoSchedule(now = this.now(), watchWindow) {
+    try {
+      const saved = optional(this.privateVideoScheduleFile, { version: 1, mode: 'all-day' });
+      if (saved?.version !== 1 || !PRIVATE_VIDEO_MODES.has(saved.mode)) throw new Error('私信视频时段设置无法读取。');
+      if (saved.mode === 'all-day') return { mode: saved.mode, allowed: true, reason: '' };
+      const window = watchWindow === undefined ? allowedWindow(this.policy(), now) : watchWindow;
+      return { mode: saved.mode, allowed: Boolean(window), reason: window ? '' : '当前不在私信视频的允许时段。' };
+    } catch {
+      return { mode: null, allowed: false, reason: '私信视频时段设置无法读取，请重新选择。' };
+    }
+  }
+  savePrivateVideoSchedule(input, { explicit = false } = {}) {
+    if (!explicit) throw Object.assign(new Error('私信视频时段只能由用户修改。'), { status: 403 });
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 1 || !PRIVATE_VIDEO_MODES.has(input.mode)) {
+      throw Object.assign(new Error('请选择全天或跟随自主观看时段。'), { status: 400 });
+    }
+    return this.control(() => {
+      write(this.privateVideoScheduleFile, { version: 1, mode: input.mode });
+      return this.privateVideoSchedule();
+    });
   }
   usage() {
     const value=read(this.usageFile);
@@ -102,7 +139,7 @@ export class VideoLimits {
     const worker=optional(path.join(this.stateDir,'watch-loop.lock'),null),saved=optional(path.join(this.stateDir,'watch-state.json'),null),lastRequestPending=worker&&Number.isSafeInteger(worker.pid)&&worker.pid>0&&alive(worker.pid)&&Number.isFinite(worker.heartbeatAt)&&now-worker.heartbeatAt>=0&&now-worker.heartbeatAt<5000&&saved?.pendingRequests===1&&['model','comment-model'].includes(saved.phase)&&typeof worker.runId==='string'&&saved.runId===worker.runId&&saved.sessionId===worker.sessionId&&saved.source===worker.source;
     let reason='',reasonCode='';if(!policy.enabled){reason='允许观看已关闭。';reasonCode='disabled';}else if(!window){reason='当前不在允许刷视频的时间段。';reasonCode='outside-window';}else if(remainingSeconds!==null&&remainingSeconds<=0){reason='今天的观看时长已用完，等待上海时间次日恢复。';reasonCode='daily-time';}else if(remainingRequests!==null&&remainingRequests<=0&&!lastRequestPending){reason='今天的观看模型请求次数已用完，等待上海时间次日恢复。';reasonCode='daily-requests';}
     const expiresAt=window?window.expiresAt:null,session=sessions.current?{...sessions.current,expiresAt}:null;
-    return{protocol:'video-limits-v2',timeZone:'Asia/Shanghai',now,policy,session,window,allowed:!reason,reason,reasonCode,daily:{date,usedSeconds,remainingSeconds,requests,remainingRequests,timeLimitMinutes:policy.dailyMinutes,requestLimit:policy.dailyRequests},remainingSeconds:reason?0:remainingSeconds===null?expiresAt===null?null:Math.max(0,(expiresAt-now)/1000):expiresAt===null?remainingSeconds:Math.min(remainingSeconds,Math.max(0,(expiresAt-now)/1000))};
+    return{protocol:'video-limits-v2',timeZone:'Asia/Shanghai',now,policy,session,window,allowed:!reason,reason,reasonCode,privateVideoSchedule:this.privateVideoSchedule(now,window),daily:{date,usedSeconds,privateVideoSeconds:usage.privateVideoDays?.[date] || 0,remainingSeconds,requests,remainingRequests,timeLimitMinutes:policy.dailyMinutes,requestLimit:policy.dailyRequests},remainingSeconds:reason?0:remainingSeconds===null?expiresAt===null?null:Math.max(0,(expiresAt-now)/1000):expiresAt===null?remainingSeconds:Math.min(remainingSeconds,Math.max(0,(expiresAt-now)/1000))};
   }
   savePolicy(input,{explicit=false}={}) {
     if(!explicit)throw new Error('视频时间设置只能由用户在控制台明确修改。');
@@ -121,8 +158,12 @@ export class VideoLimits {
   }
   notePlayback(source,browserState,{ownerId=source}={}) {
     sourceName(source);const state=browserState?.state||browserState;
-    const image=state?.imagePost,imageVisible=state?.pageKind==='image-post'&&!state.video&&image?.recognized===true&&image.source==='active-image-element'&&image.loaded===true&&/^\d{10,30}$/.test(image.id||'')&&image.viewport&&['x','y','width','height'].every(key=>Number.isFinite(image.viewport[key]))&&image.viewport.width>=120&&image.viewport.height>=120;
-    const room=state?.liveRoom,livePlaying=state?.pageKind==='live-room'&&room?.recognized===true&&room.source==='direct-live-url-and-player'&&/^\d{4,30}$/.test(room.roomId||'')&&!room.ended&&room.video?.paused===false&&room.video.readyState>=2&&room.video.width>=2&&room.video.height>=2;
+    const image = state?.imagePost;
+    const imageVisible = readyImagePost(state) && (image.source === 'local-media-image' ? image.reading === true :
+      ['x', 'y', 'width', 'height'].every(key => Number.isFinite(image.viewport?.[key])) && image.viewport.width >= 120 && image.viewport.height >= 120);
+    const room = state?.liveRoom, liveVideo = room?.video;
+    const livePlaying = isLiveRoom(state) && !room.ended && liveVideo?.paused === false && liveVideo.readyState >= 2 &&
+      (room.source === 'local-media-live' ? liveVideo.decodedFrames > 0 && liveVideo.time > 0 : liveVideo.width >= 2 && liveVideo.height >= 2);
     const playing=(state?.pageKind!=='live-room'&&state?.video?.paused===false&&state.video.readyState>=2||imageVisible||livePlaying)&&!state.privateChatVisible&&!state.loginRequired&&!state.verificationRequired&&!state.unsupportedPage;
     const now=this.now();
     try{return this.control(()=>{const policy=this.policy(),usage=this.accrue(this.usage(),policy,now);usage.active=null;const current=this.state(now);if(playing&&current.allowed)usage.active={source,ownerId:String(ownerId),pid:process.pid,fromAt:now,verifiedAt:now,expiresAt:now+2000};write(this.usageFile,usage);return this.state(now);});}
@@ -130,6 +171,16 @@ export class VideoLimits {
   }
   settleWatching(source,{ownerId}={}) {
     if(source!==undefined)sourceName(source);return this.control(()=>{const usage=this.accrue(this.usage(),this.policy(),this.now());if(!source||usage.active?.source===source&&(!ownerId||usage.active.ownerId===ownerId))usage.active=null;write(this.usageFile,usage);return this.state();});
+  }
+  recordPrivateVideo(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) throw new TypeError('私信视频需要已核对的播放进度。');
+    return this.control(() => {
+      const usage = this.usage(), key = dateKey(this.now());
+      usage.privateVideoDays ||= {};
+      usage.privateVideoDays[key] = (usage.privateVideoDays[key] || 0) + seconds;
+      write(this.usageFile, usage);
+      return usage.privateVideoDays[key];
+    });
   }
   reserveRequest({sessionId,source='api'}={}) {
     sourceName(source);return this.control(()=>{const state=this.state();if(!state.allowed||state.daily.remainingRequests===0)throw Object.assign(new Error(state.reason||'今天的观看模型请求次数已用完。'),{watchStatus:'limited',status:409});const budget=this.budget(),key=state.daily.date;budget.days[key]=(budget.days[key]||0)+1;if(sessionId){budget.sessions[sessionId]||={requests:0,maxRequests:null};budget.sessions[sessionId].requests++;}write(this.budgetFile,budget);return{date:key,requests:budget.days[key],remaining:state.policy.dailyRequests===null?null:Math.max(0,state.policy.dailyRequests-budget.days[key])};});

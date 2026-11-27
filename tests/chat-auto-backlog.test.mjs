@@ -23,6 +23,27 @@ function nativeMiss(contact) {
  const messages=[incoming('native-before-a'),incoming('native-before-b'),target],mark={startedAt:new Date(now-60_000).toISOString(),context:structuredClone(messages)},record={archiveId:'native-archive',phase:'unqualified',at:new Date(now-19_000).toISOString(),incoming:[{id:target.id,text:target.text}]},snapshot={dayEvidence:{chronology:'oldest-first',latestEndVerified:true}};
  return {now,target,messages,mark,record,snapshot,contact};
 }
+test('缺证据的旧待答随会话变化再核对，已经处理的旧记录不重新计入', async t => {
+ const f=await fixture(t,{group:false}), original=f.messages.pop();
+ const handled=archive(f.authorized,[...f.messages,original],{id:'already-handled',phase:'handled-by-user'});
+ f.mark().unanswered.push(handled);
+ f.service.persist();
+ await f.service.poll();
+ assert.equal(f.service.state().recovery.autoPendingCount,0);
+ assert.equal(f.service.state().recovery.waitingEvidenceCount,1);
+ assert.equal(f.mark().autoBacklog.state,'waiting-evidence');
+ const reads=f.reads();
+ await f.service.poll();
+ assert.equal(f.reads(),reads);
+ assert.equal(f.sent.length,0);
+ f.messages.push(original);
+ f.service.lastFullScanAt=0;
+ await f.service.poll();
+ assert.equal(f.sent.length,1);
+ assert.equal(f.service.state().recovery.waitingEvidenceCount,0);
+ assert.equal(f.mark().unanswered.length,2);
+ assert.equal(handled.phase,'handled-by-user');
+});
 test('原生漏回资格：创建于观测基线之后且发送前归档，可恢复而不伪造原资格',()=>{
  const f=nativeMiss({isGroup:false}),evidence=qualifyNativeUnanswered(f.record,f.mark,f.messages,f.snapshot,f.contact,null,f.now);assert.ok(evidence);
  assert.equal(evidence.qualifiedIncoming[0].originalEligibleForReply,false);assert.equal(evidence.qualifiedIncoming[0].message.eligibleForReply,false);
@@ -57,6 +78,82 @@ test('自动补答：原生新私信在运行中被误归档，按真实证据�
 test('自动补答：维护重启保留旧观测基线，恢复原生漏回而不清除旧水位',async t=>{
  const f=await fixture(t,{group:false}),miss=nativeMiss(f.authorized);f.messages.splice(0,f.messages.length,...miss.messages);Object.assign(f.mark(),miss.mark,{seen:miss.messages.map(message=>message.id),unanswered:[miss.record],autoBacklog:null});f.service.persist();
  f.service.stop({preservePending:true,reason:'maintenance'});await f.service.start({schedule:false});await f.service.poll();await f.service.poll();assert.equal(f.sent.length,1);assert.equal(f.mark().unanswered[0].autoHandled,true);assert.equal(f.mark().unanswered[0].recoveryEvidence.qualifiedIncoming[0].originalEligibleForReply,false);
+});
+
+test('文字与表情一同超时后，根据原会话证据补答一次', async t => {
+  const f = await fixture(t, { group: false });
+  const emoji = { ...incoming('native-emoji', ''), kind: 'emoji', media: { type: 'emoji', label: '合成表情' } };
+  f.messages.push(emoji);
+  const target = f.messages.at(-2);
+  const record = archive(f.authorized, f.messages, { phase: 'model', generatedText: null, targetIndex: f.messages.length - 2 });
+  record.incoming.push(structuredClone(emoji));
+  record.recoveryEvidence.qualifiedIncoming.push({ message: structuredClone(emoji), fingerprint: messageFingerprint(emoji), qualified: true, originalEligibleForReply: true });
+  f.mark().unanswered = [record];
+  f.mark().seen.push(emoji.id);
+  f.mark().autoBacklog = {
+    reason: 'waiting-bounded-generation-evidence', state: 'waiting', nextRetryAt: new Date(Date.now() + 300_000).toISOString(),
+    targets: [target, emoji].map(message => ({ id: message.id, fingerprint: messageFingerprint(message) })),
+  };
+  f.service.persist();
+  f.service.stop({ preservePending: true, reason: 'maintenance' });
+  await f.service.start({ schedule: false });
+  assert.equal(f.mark().autoBacklog.nextRetryAt, null);
+  await f.service.poll();
+  await f.service.poll();
+  assert.equal(f.requests.length, 1);
+  assert.ok(f.requests[0].messages.some(message => message.id === target.id));
+  assert.ok(f.requests[0].messages.some(message => message.id === emoji.id && message.media.type === 'emoji'));
+  assert.equal(f.requests[0].mediaObservations[0].messageId, emoji.id);
+  assert.equal(f.requests[0].mediaObservations[0].understandingScope, 'single-message-visual-unavailable');
+  assert.equal(f.sent.length, 1);
+  assert.equal(f.mark().unanswered[0].autoHandledProof.confirmed, true);
+});
+
+test('同一批漏读的文字和原生图片用各自绑定证据补答，替换图片后不补发', async t => {
+  const f = await fixture(t, { group: false }), miss = nativeMiss(f.authorized);
+  const image = { ...miss.target, id: 'native-picture', text: '', kind: 'image',
+    media: { type: 'image', resources: [{ resourceRef: 'media:synthetic-picture' }] } };
+  miss.messages.push(image);
+  miss.mark.context.push(structuredClone(image));
+  miss.record.incoming = [miss.target, image].map(message => ({ id: message.id, text: message.text, fingerprint: messageFingerprint(message) }));
+  const evidence = qualifyNativeUnanswered(miss.record, miss.mark, miss.messages, miss.snapshot, miss.contact, null, miss.now);
+  assert.equal(evidence?.qualifiedIncoming.length, 2);
+  assert.equal(mapBacklogMessages({ ...miss.record, recoveryEvidence: evidence }, miss.messages).canSend, true);
+  const changed = structuredClone(miss.messages);
+  changed.at(-1).media.resources[0].resourceRef = 'media:another-picture';
+  assert.equal(mapBacklogMessages({ ...miss.record, recoveryEvidence: evidence }, changed).ready, false);
+  f.messages.splice(0, f.messages.length, ...miss.messages);
+  Object.assign(f.mark(), miss.mark, { seen: miss.messages.map(message => message.id), unanswered: [miss.record], autoBacklog: null });
+  f.browser.captureMessage = async (_id, messageId) => ({ messageId, frames: [{ mimeType: 'image/jpeg', data: 'AQID' }] });
+  f.service.persist();
+  await f.service.poll();
+  await f.service.poll();
+  assert.deepEqual(f.requests[0].replyToIds, [miss.target.id, image.id]);
+  assert.equal(f.requests[0].mediaObservations[0].messageId, image.id);
+  assert.equal(f.requests[0].mediaObservations[0].frames.length, 1);
+  assert.equal(f.sent.length, 1);
+  assert.equal(miss.record.autoHandledProof.confirmed, true);
+});
+
+test('后台 API 的稳定来信可补答，结果不明时只接受同会话的唯一服务器回执', async t => {
+  const f = await fixture(t, { group: false });
+  const apiMessage = message => ({ ...message, identitySource: 'api-message-id', apiServerMessageBound: true, serverConfirmed: true });
+  f.messages.splice(0, f.messages.length, ...f.messages.map(apiMessage));
+  const record = archive(f.authorized, f.messages, { generatedText: null });
+  const weak = structuredClone(record);
+  weak.recoveryEvidence.qualifiedIncoming[0].message.apiServerMessageBound = false;
+  assert.equal(mapBacklogMessages(weak, f.messages).ready, false);
+  assert.equal(mapBacklogMessages(record, f.messages).canSend, true);
+  const uncertain = { ...record, autoAttempt: { state: 'uncertain' } };
+  const reply = apiMessage({ id: 'api-sent', sender: 'outgoing', text: '合成后台回执' });
+  assert.equal(backlogOutgoingReadback(uncertain, mapBacklogMessages(uncertain, [...f.messages, reply]), [...f.messages, reply], reply.text)?.id, reply.id);
+  assert.equal(backlogOutgoingReadback(uncertain, mapBacklogMessages(uncertain, f.messages), [...f.messages, { ...reply, serverConfirmed:false }], reply.text), null);
+  f.mark().unanswered = [record];
+  f.service.persist();
+  await f.service.poll();
+  await f.service.poll();
+  assert.equal(f.sent.length, 1);
+  assert.equal(record.autoHandledProof.confirmed, true);
 });
 
 test('补答pure：native目标和完整原上下文必须一致，不能只按单条ID放行',()=>{

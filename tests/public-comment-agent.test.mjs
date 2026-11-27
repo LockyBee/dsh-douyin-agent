@@ -22,6 +22,21 @@ test('评论生成允许明确放弃，拒绝其他字段、工具、超长、�
   for (const response of invalid) await assert.rejects(agent.generate({ observation: observation(), decisionProvider: async () => response }));
 });
 
+test('公开摘录供模型决定是否补充，重复正文自动跳过', async () => {
+  const agent = new PublicCommentAgent();
+  const existing = '转场前背景有三次蓝色闪光';
+  const discussion = [existing, '我的手机号 13800000000', { text: '非纯文本', user: '不应传入' }, '@其他人 查看链接'];
+  let messages;
+  const repeated = await agent.generate({ observation: observation(), discussion,
+    decisionProvider: async request => { messages = request.messages; return answer(existing + '。'); } });
+  const modelInput = JSON.stringify(messages);
+  assert.match(modelInput, /转场前背景有三次蓝色闪光/);
+  assert.doesNotMatch(modelInput, /13800000000|不应传入|其他人/);
+  assert.equal(repeated.text, null);
+  assert.equal(repeated.code, 'COMMENT_DISCUSSION_DUPLICATE');
+  assert.equal((await agent.generate({ observation: observation(), discussion, decisionProvider: async () => answer('右侧金色边框在最后一帧变窄了。') })).text, '右侧金色边框在最后一帧变窄了。');
+});
+
 test('没有同作品有效画面、私信可见、登录或验证时不会调用评论模型', async () => {
   let calls = 0; const agent = new PublicCommentAgent(), provider = async () => { calls++; return answer('合成评论'); };
   const missing = observation(); missing.frames = [];

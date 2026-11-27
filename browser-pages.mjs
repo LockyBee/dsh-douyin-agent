@@ -14,6 +14,14 @@ export function browserPageAliases(source) {
       : [browserPageLabel(source)];
 }
 
+export function isRecommendationAddress(address) {
+  let url;
+  try { url = new URL(address); } catch { return false; }
+  return url.origin === 'https://www.douyin.com'
+    && ['/', '/recommend', '/recommend/', '/jingxuan', '/jingxuan/'].includes(url.pathname)
+    && !url.searchParams.has('modal_id') && !url.searchParams.has('aweme_id');
+}
+
 export async function findSharedPage(browser, source, signal) {
   const aliases = browserPageAliases(source), matches = [];
   for (const page of browser.contexts().flatMap(context => context.pages())) {
@@ -40,6 +48,7 @@ export async function adoptSharedPreparePage(browser, { signal } = {}) {
   const page = matches[0];
   const adopted = await page.evaluate(() => {
     if (location.origin !== 'https://www.douyin.com' || window.name !== 'deepseek-douyin-launcher') return false;
+    if (document.title?.trim() === '验证码中间页') return false;
     const visible = element => { const r = element.getBoundingClientRect(), s = getComputedStyle(element); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; };
     if ([...document.querySelectorAll('#captcha_container,[id^="captcha_container"],[data-e2e="captcha-container"]')].some(visible)) return false;
     if ([...document.querySelectorAll('body *')].some(node => !node.childElementCount && visible(node) && /扫码登录|验证码登录|登录后即可|手机扫码登录|请完成下方验证|请完成验证|安全验证|拖动滑块/.test(node.textContent || ''))) return false;

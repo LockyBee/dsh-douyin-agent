@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ChatService } from '../chat-service.mjs';
+import { checkPrivateVideoAccess } from '../chat-message.mjs';
+import { VideoLimits } from '../video-limits.mjs';
 
 const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPEkAAAAASUVORK5CYII=';
 const videoId = '1234567890123456789';
@@ -40,6 +42,145 @@ test('分享作品通过本机协调观察器采样，并要求真实作品身�
   assert.equal(calls, 1); assert.equal(result.understandingScope, 'card-cover-and-three-second-video-sampling'); assert.equal(result.frames.length, 4); assert.deepEqual(f.actions, []);
 });
 
+test('个人私信收到的分享时段外可看，只记私信时长，作品身份核对后释放许可', async t => {
+  const f = fixture(t);
+  f.messages.push(card());
+  const limits = new VideoLimits({ stateDir: f.service.stateDir, now: () => Date.parse('2026-11-23T15:00:00+08:00') });
+  limits.savePolicy({ enabled: true, windows: ['12:00-14:00'], dailyMinutes: 1, dailyRequests: 1 }, { explicit: true });
+  f.service.videoLimits = limits;
+  const before = limits.state();
+  assert.equal(before.reasonCode, 'outside-window');
+  let token;
+  f.service.observeSharedWork = async input => {
+    token = input.privateVideoAccess;
+    assert.equal(checkPrivateVideoAccess(token, videoId), true);
+    assert.throws(() => checkPrivateVideoAccess(token, '9999'), /许可无效/);
+    return sample();
+  };
+  const result = await f.service.observeMessage(f.contact.id, 'shared');
+  assert.equal(result.frames.length, 4);
+  const after = limits.state();
+  assert.equal(after.daily.privateVideoSeconds, 3);
+  assert.equal(after.daily.usedSeconds, before.daily.usedSeconds);
+  assert.equal(after.daily.requests, before.daily.requests);
+  assert.equal(after.session, null);
+  assert.equal(limits.beforeAction('api', 'douyin_open_video').allowed, false);
+  assert.throws(() => checkPrivateVideoAccess(token, videoId), /许可无效/);
+});
+
+test('跟随自主观看时段时，私信分享时段外只读卡片，时段内不共用开关和额度', async t => {
+  const f = fixture(t);
+  f.messages.push(card());
+  let now = Date.parse('2026-11-25T15:00:00+08:00');
+  const limits = new VideoLimits({ stateDir: f.service.stateDir, now: () => now });
+  limits.savePolicy({ enabled: true, windows: ['12:00-14:00'], dailyMinutes: 1, dailyRequests: 1 }, { explicit: true });
+  limits.savePrivateVideoSchedule({ mode: 'follow-watch-hours' }, { explicit: true });
+  f.service.videoLimits = limits;
+  let opened = 0, observed = 0;
+  const open = f.browser.openSharedVideo;
+  f.browser.openSharedVideo = async (...args) => { opened++; return open(...args); };
+  f.service.observeSharedWork = async input => {
+    observed++;
+    assert.equal(checkPrivateVideoAccess(input.privateVideoAccess, videoId), true);
+    return sample();
+  };
+  const outside = await f.service.observeMessage(f.contact.id, 'shared');
+  assert.equal(outside.frames.length, 1);
+  assert.match(outside.note, /不在私信视频的允许时段/);
+  assert.equal(opened, 0);
+  assert.equal(observed, 0);
+  assert.equal(limits.state().daily.privateVideoSeconds, 0);
+
+  now = Date.parse('2026-11-25T13:00:00+08:00');
+  limits.reserveRequest({ source: 'api' });
+  assert.equal(limits.state().reasonCode, 'daily-requests');
+  assert.equal((await f.service.observeMessage(f.contact.id, 'shared')).frames.length, 4);
+  limits.savePolicy({ enabled: false }, { explicit: true });
+  assert.equal(limits.state().reasonCode, 'disabled');
+  assert.equal((await f.service.observeMessage(f.contact.id, 'shared')).frames.length, 4);
+  assert.equal(opened, 2);
+  assert.equal(observed, 2);
+  assert.equal(limits.state().daily.privateVideoSeconds, 6);
+  assert.equal(limits.state().daily.usedSeconds, 0);
+  assert.equal(limits.state().daily.requests, 1);
+});
+
+test('私信分享采样中到达时段终点会取消取样，卡片仍可用于回复', async t => {
+  const f = fixture(t);
+  f.messages.push(card());
+  let now = Date.parse('2026-11-25T13:59:59+08:00');
+  const limits = new VideoLimits({ stateDir: f.service.stateDir, now: () => now });
+  limits.savePolicy({ windows: ['12:00-14:00'] }, { explicit: true });
+  limits.savePrivateVideoSchedule({ mode: 'follow-watch-hours' }, { explicit: true });
+  f.service.videoLimits = limits;
+  let cancelled = false;
+  f.service.observeSharedWork = async ({ signal, privateVideoAccess }) => {
+    assert.equal(checkPrivateVideoAccess(privateVideoAccess, videoId), true);
+    now = Date.parse('2026-11-25T14:00:00+08:00');
+    await new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('合成取样没有及时停止。')), 3000);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        cancelled = true;
+        reject(signal.reason);
+      }, { once: true });
+    });
+  };
+  const result = await f.service.observeMessage(f.contact.id, 'shared');
+  assert.equal(cancelled, true);
+  assert.equal(result.understandingScope, 'card-cover-and-dom-metadata');
+  assert.equal(result.frames.length, 1);
+  assert.match(result.note, /不在私信视频的允许时段/);
+  assert.equal(limits.state().daily.privateVideoSeconds, 0);
+});
+
+test('旧私信封面超时仍从同一作品取得正片，采集取消继续生效', async t => {
+  const f = fixture(t, { allowed: false });
+  f.messages.push(card());
+  const request = new AbortController();
+  f.browser.captureMessage = async (_id, _message, { signal }) => {
+    assert.notEqual(signal, request.signal);
+    throw new DOMException('合成封面超时', 'TimeoutError');
+  };
+  f.service.observeSharedWork = async input => {
+    assert.equal(input.signal, request.signal);
+    assert.equal(checkPrivateVideoAccess(input.privateVideoAccess, videoId), true);
+    return sample();
+  };
+  const result = await f.service.observeMessage(f.contact.id, 'shared', { signal: request.signal });
+  assert.equal(result.frames.length, 3);
+  assert.ok(result.frames.every(frame => frame.videoId === videoId));
+  f.browser.captureMessage = async () => { request.abort(); throw request.signal.reason; };
+  f.service.observeSharedWork = async () => assert.fail('原采集已取消');
+  await assert.rejects(f.service.observeMessage(f.contact.id, 'shared', { signal: request.signal }), { name: 'AbortError' });
+});
+
+test('群分享和自己发出的分享仍会在原观看通道判断时段', async t => {
+  for (const group of [true, false]) {
+    const f = fixture(t, { group, allowed: false });
+    f.messages.push({ ...card(), sender: group ? 'incoming' : 'outgoing' });
+    f.service.observeSharedWork = async () => assert.fail('未通过观看时段');
+    const result = await f.service.observeMessage(f.contact.id, 'shared');
+    assert.equal(result.frames.length, 1);
+    assert.match(result.note, /时段外/);
+  }
+});
+
+test('私信可按需同时返回正片和同作品公开评论，拒绝侧页残留评论', async t => {
+  const f = fixture(t);
+  f.messages.push(card());
+  const comments = { videoId, status: 'ready', rows: [{ text: '合成热评', likeCount: 684, authorReplies: [{ text: '合成作者回复', likeCount: 5 }] }] };
+  f.service.observeSharedWork = async input => {
+    assert.equal(input.includeComments, true);
+    return { ...sample(), comments };
+  };
+  const observed = await f.service.observeMessage(f.contact.id, 'shared', { includeComments: true });
+  assert.equal(observed.frames.length, 4);
+  assert.deepEqual(observed.comments, comments);
+  comments.videoId = '9999';
+  assert.equal((await f.service.observeMessage(f.contact.id, 'shared', { includeComments: true })).comments, undefined);
+});
+
 test('只有封面、暂停画面、身份不符或没有推进时不能声称已经看过视频', async t => {
   for (const mutate of [value => value.frames = [], value => value.state.video.id = '999', value => value.observation.beforePaused = true, value => value.observation.afterTime = 2, value => value.frames.forEach(frame => frame.time = 2), value => value.frames.forEach(frame => frame.time += 100), value => value.frameProof = { issuer: 'dafeiyu-shared-video-capture-v1', version: 1 }]) {
     const f = fixture(t); f.messages.push(card()); f.service.observeSharedWork = async () => { const value = sample(); mutate(value); return value; };
@@ -59,8 +200,8 @@ test('默认观察路径先播放、再核对三秒采样，最终只暂停已�
   assert.equal(result.understandingScope, 'card-cover-and-three-second-video-sampling'); assert.deepEqual(f.actions, ['douyin_open_video', 'douyin_play', 'douyin_observe', 'douyin_pause']);
 });
 
-test('观看时段不允许时保留卡片解释，不调用观察器或改变预算', async t => {
-  const f = fixture(t, { allowed: false }); f.messages.push(card()); f.service.observeSharedWork = async () => assert.fail('不应绕过原视频时段');
+test('群聊的观看时段不允许时保留卡片解释，不调用观察器或改变预算', async t => {
+  const f = fixture(t, { group: true, allowed: false }); f.messages.push(card()); f.service.observeSharedWork = async () => assert.fail('不应绕过原视频时段');
   const result = await f.service.observeMessage(f.contact.id, 'shared'); assert.equal(result.frames.length, 1); assert.match(result.note, /未播放作品/); assert.deepEqual(f.actions, []);
 });
 

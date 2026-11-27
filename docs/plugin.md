@@ -91,7 +91,7 @@ $dshInstallDirectory = 'C:\Apps\DSH Desktop' # 替换为实际安装目录
 | 位置 | 内容 |
 | --- | --- |
 | `memoryDir/persona/role-card.md` | 手编人格及受管生成区 |
-| `memoryDir/persona/state.json` | 作品观察、观看与兴趣依据 |
+| `memoryDir/persona/state.json`、`memoryDir/persona/evidence.sqlite` | 原有作品观察、观看与兴趣依据。原文件写满后，新记录续写进数据库，备份时一并保留。 |
 | `memoryDir/reports/videos/YYYY-MM-DD.md` | 上海日期的视频日报 |
 | `memoryDbPath` | 共享 SQLite 记忆库 |
 | `stateDir/video-policy.json`、`video-usage.json`、`watch-budget.json` | 观看设置、每日时长及请求账本 |

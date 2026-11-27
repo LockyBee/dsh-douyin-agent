@@ -65,6 +65,7 @@ export class ApiProcess {
   }
   configure(config) { return this.request('configure', { config }); }
   getConfig() { return this.request('get-config'); }
+  inspectVerification(binding) { return this.request('browser-verification', { binding }); }
   stop() { return this.stopping ??= this.stopOnce(); }
   async stopOnce() {
     if (!this.child) return;

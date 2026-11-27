@@ -1,12 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { MediaAdapter,loadMediaConfig,validatePublicMediaUrl } from '../media/index.mjs';
+import { once } from 'node:events';
+import { MediaAdapter,loadMediaConfig,validatePublicMediaUrl,downloadPublicMedia } from '../media/index.mjs';
+import dns from 'node:dns/promises';
+test('原生消息签名图片仅允许宿主受信路径，公开媒体工具仍拒绝签名链接',async()=>{
+  const source='https://p3-sign.douyinpic.com/sample.jpg?x-expires=123&signature=test';
+  await assert.rejects(validatePublicMediaUrl(source),/签名/);
+  await assert.rejects(validatePublicMediaUrl('https://douyinpic.com.example.com/a?x-expires=123',{trustedMessageMedia:true}),/签名/);
+  const lookup=dns.lookup;try{dns.lookup=async()=>[{address:'8.8.8.8',family:4}];assert.equal((await validatePublicMediaUrl(source,{trustedMessageMedia:true})).hostname,'p3-sign.douyinpic.com');dns.lookup=async()=>[{address:'127.0.0.1',family:4}];await assert.rejects(validatePublicMediaUrl(source,{trustedMessageMedia:true}),/公网/);}finally{dns.lookup=lookup;}
+});
+
+test('核对过的分享作品只接受对应的HTTPS媒体域名，并保留内网及凭据限制', async () => {
+  const verifiedWorkId = '1234567890123456789';
+  const url = 'https://vod.example.douyinvod.com/video.mp4';
+  const lookup = dns.lookup;
+  try {
+    dns.lookup = async () => [{ address: '8.8.8.8', family: 4 }];
+    assert.equal((await validatePublicMediaUrl(url, { verifiedWorkId })).href, url);
+    await assert.rejects(validatePublicMediaUrl('https://douyinvod.com.example.com/file', { verifiedWorkId }), /作品.*核对/);
+    await assert.rejects(validatePublicMediaUrl(url, { verifiedWorkId: 'invalid' }), /作品.*核对/);
+    await assert.rejects(validatePublicMediaUrl(url + '?token=fixture', { verifiedWorkId }), /签名/);
+    await assert.rejects(validatePublicMediaUrl('https://name:secret@vod.example.douyinvod.com/file', { verifiedWorkId }), /公开 HTTPS/);
+    dns.lookup = async () => [{ address: '127.0.0.1', family: 4 }];
+    await assert.rejects(validatePublicMediaUrl(url, { verifiedWorkId }), /公网 IPv4/);
+  } finally { dns.lookup = lookup; }
+});
 
 async function fixture(t) {
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'douyin-media-test-'));
@@ -15,6 +40,48 @@ async function fixture(t) {
   for(let i=0;i<32000;i++)data.writeInt16LE(Math.round(3000*Math.sin(2*Math.PI*220*i/16000)),44+i*2);
   const source=path.join(directory,'synthetic-tone.wav');await fs.writeFile(source,data);return{directory,source};
 }
+
+test('已核对的播放地址建立隧道后无媒体响应时及时放弃，释放连接和临时文件', { timeout: 20_000 }, async t => {
+  const { directory } = await fixture(t);
+  const target = path.join(directory, 'stalled.mp4');
+  const server = http.createServer(), sockets = new Set(), authority = [];
+  let completedTunnels = 0;
+  server.on('connect', (request, socket) => {
+    authority.push(request.url);
+    sockets.add(socket);
+    socket.on('end', () => { completedTunnels++; socket.end(); });
+    socket.on('close', () => sockets.delete(socket));
+    socket.resume();
+    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => {
+    for (const socket of sockets) socket.destroy();
+    return new Promise(resolve => server.close(resolve));
+  });
+  const lookup = dns.lookup, keys = ['HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    dns.lookup = async () => [{ address: '8.8.8.8', family: 4 }];
+    process.env.HTTPS_PROXY = 'http://127.0.0.1:' + server.address().port;
+    process.env.NO_PROXY = '';
+    process.env.no_proxy = '';
+    await assert.rejects(downloadPublicMedia('https://pinned.example.douyinvod.com/movie.mp4', target,
+      { verifiedWorkId: '1234567890123' }), { code: 'MEDIA_OPEN_TIMEOUT' });
+    assert.deepEqual(authority, ['8.8.8.8:443']);
+    await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+    if (sockets.size) await Promise.all([...sockets].map(socket => once(socket, 'close')));
+    assert.equal(sockets.size, 0);
+    assert.equal(completedTunnels, 1);
+  } finally {
+    dns.lookup = lookup;
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
 const response = value => new Response(JSON.stringify(value),{headers:{'content-type':'application/json'}});
 async function enabled(t,{selectedBackend='local-whisper',...options}={}){const {directory}=await fixture(t);const adapter=new MediaAdapter({...options,settingsFile:path.join(directory,'settings.json')});await adapter.saveSettings({enabled:true,backend:selectedBackend},{explicit:true});return adapter;}
 async function ffmpeg(args){await new Promise((resolve,reject)=>{const child=spawn('ffmpeg',['-nostdin','-hide_banner','-loglevel','error','-y',...args],{windowsHide:true,shell:false,stdio:'ignore'});child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(new Error('合成媒体生成失败')));});}

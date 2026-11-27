@@ -17,10 +17,20 @@ async function body(req) {
 const empty = value => { if (Object.keys(value).length) throw Object.assign(new Error('此操作不接收参数。'), { status: 400 }); };
 const active = state => Boolean(state?.running || state?.starting || state?.busy || state?.worker?.alive);
 const chatBusy = state => Boolean(state?.starting || state?.busy || state?.contacts?.some(item => item.pending?.phase === 'model'));
+const verificationEndpoints = new Map([
+  ['/browser/verification', 'control'],
+  ['/browser/verification/frame', 'capture'],
+  ['/browser/verification/input', 'operate'],
+]);
 
 // 复用 DSH 原生 WebServer 和设置页插槽，不启动独立软件或第二个端口。
-export function createNativeSettingsRoute({ getController, getComments, getReport, getSpark, getWatch, getMode, getShare, getChat, getMedia, getFriends, modelSettings, configureMode, startWatch, startSpark, startChat, watchSchedule, getDiagnostics } = {}) {
+export function createNativeSettingsRoute({ getController, getComments, getReport, getSpark, getWatch, getMode, getShare, getChat, getMedia, getFriends, modelSettings, configureMode, startWatch, startSpark, startChat, watchSchedule, getDiagnostics, getVerification } = {}) {
   const token = randomBytes(32).toString('hex');
+  const authorized = req => {
+    const supplied = req.headers['x-douyin-settings-token'];
+    return typeof supplied === 'string' && /^[a-f0-9]{64}$/.test(supplied)
+      && timingSafeEqual(Buffer.from(supplied), Buffer.from(token));
+  };
   let diagnostics;
   return { kind: 'prefix', path: PREFIX, async handler(req, res) {
     try {
@@ -28,6 +38,15 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
       if (!host || !/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host)) return send(res, 403, { error: '设置页只接受本机来源。' });
       const origin = `${req.socket?.encrypted ? 'https' : 'http'}://${host}`, url = new URL(req.url, origin);
       if (url.origin !== origin || req.headers.origin && req.headers.origin !== origin || ['cross-site', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, { error: '拒绝跨来源设置请求。' });
+      const verificationMethod = verificationEndpoints.get(url.pathname.slice(PREFIX.length));
+      if (url.pathname.startsWith(PREFIX + '/') && verificationMethod) {
+        if (req.socket?.remoteAddress && !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) return send(res, 403, { error: '辅助验证只接受本机连接。' });
+        if (req.method !== 'POST') return send(res, 405, { error: '辅助验证只接受设置页操作。' });
+        if (!authorized(req)) return send(res, 403, { error: '请刷新原生设置页后重试。' });
+        if (!getVerification) return send(res, 503, { error: '辅助验证暂不可用。' });
+        const input = await body(req);
+        return send(res, 200, await (await getVerification())[verificationMethod](input));
+      }
       const controller = await getController();
       const stateDir = controller.limits().stateDir ?? resolveRuntimePaths().stateDir, usageLedger = new UsageLedger({ stateDir }), optionsService = new WatchOptions({ stateDir });
       if (!url.pathname.startsWith(`${PREFIX}/diagnostics`)) for (const getter of [getChat]) if (getter) { const service = await getter(); if (service.agent) { service.agent.usageLedger = usageLedger; service.agent.source = 'dsh'; } }
@@ -35,18 +54,17 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
         const [spark,comments,reports,watch,chat,share,friends] = await Promise.all([getSpark?.(),getComments(),getReport(),getWatch(),getChat?.(),getShare?.(),getFriends?.()]);
         const chatState=chat?.state()||{}, watchState=watch.state(), shareState=share?.state()||{}, commentsState=comments.state(), video=controller.limits().state();
         const pendingWatch=watchState.pendingRequests||0,pendingChat=(chatState.contacts||[]).filter(item=>item.pending?.phase==='model').length;
+        const browserMode = controller.getBrowserMode?.().state();
         const usage={...usageLedger.state(),checkedAt:new Date().toISOString(),inProgress:{watch:pendingWatch,chat:pendingChat,total:pendingWatch+pendingChat},videoDaily:video.daily||null};
-        return send(res,200,{token,schedule:watchSchedule?.state(),interactions:interactionStatus({friend:friends?.state(),chat:chatState,share:shareState,comments:commentsState,watch:watchState,modelReady:modelSettings.state().configured}),sections:SETTINGS_SECTIONS,usage,watchOptions:optionsService.state(),video,spark:spark?.state()||{enabled:false},comments:commentsState,reports:await reports.state(),persona:controller.getPersonaMemory().snapshot(),mode:(await getMode()).state(),model:typeof modelSettings.catalog==='function'?await modelSettings.catalog():modelSettings.state(),watch:watchState,...(share?{share:shareState}:{}),...(chat?{chat:chatState}:{}),...(getMedia?{media:await(await getMedia()).status()}:{}),setup:{browser:'Microsoft Edge',audioOptional:true,independentAppRequired:false,model:'使用 DSH 已配置提供商；可选音频 Key 单独保存。'}});
+        return send(res,200,{token,schedule:watchSchedule?.state(),interactions:interactionStatus({friend:friends?.state(),chat:chatState,share:shareState,comments:commentsState,watch:watchState,modelReady:modelSettings.state().configured}),sections:SETTINGS_SECTIONS,usage,watchOptions:optionsService.state(),video,spark:spark?.state()||{enabled:false},comments:commentsState,reactions:controller.getReactions ? (await controller.getReactions()).state() : null,reports:await reports.state(),persona:controller.getPersonaMemory().snapshot(),mode:(await getMode()).state(),browserMode,verificationAvailable:typeof getVerification==='function',model:typeof modelSettings.catalog==='function'?await modelSettings.catalog():modelSettings.state(),watch:watchState,...(share?{share:shareState}:{}),...(chat?{chat:chatState}:{}),...(getMedia?{media:await(await getMedia()).status()}:{}),setup:{browser:'Microsoft Edge',audioOptional:true,independentAppRequired:false,model:'使用 DSH 已配置提供商；可选音频 Key 单独保存。'}});
       }
       if (req.method === 'GET' && url.pathname === `${PREFIX}/reports/read`) return send(res, 200, await (await getReport()).read({ date: url.searchParams.get('date') }));
       if (req.method === 'GET' && url.pathname === `${PREFIX}/chat/unanswered`) {
-        const supplied = req.headers['x-douyin-settings-token'];
-        if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) return send(res, 403, { error: '请刷新原生设置页后重试。' });
+        if (!authorized(req)) return send(res, 403, { error: '请刷新原生设置页后重试。' });
         return send(res, 200, await (await getChat()).unanswered());
       }
       if (req.method !== 'POST') return send(res, 404, { error: '设置地址不存在。' });
-      const supplied = req.headers['x-douyin-settings-token'];
-      if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied) || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) return send(res, 403, { error: '请刷新原生设置页后重试。' });
+      if (!authorized(req)) return send(res, 403, { error: '请刷新原生设置页后重试。' });
       const input = await body(req); let value;
       switch (url.pathname.slice(PREFIX.length)) {
         case '/diagnostics':
@@ -59,6 +77,7 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
         case '/watch/schedule': if(!watchSchedule) throw new Error('自动观看调度尚未加载。'); value=await watchSchedule.configure(input,{explicit:true}); if(input.enabled===false){await(await getWatch()).stop({explicit:true});controller.limits().endSession({explicit:true,reason:'允许自动观看已关闭。'});await controller.pauseForLimits?.();} else void watchSchedule.tick();break;
         case '/watch/options': value = optionsService.configure(input, { explicit: true }); break;
         case '/video/configure': value = controller.limits().savePolicy(input, { explicit: true }); break;
+        case '/video/private-schedule': value = controller.limits().savePrivateVideoSchedule(input, { explicit: true }); break;
         case '/video/start': empty(input); if ((await getWatch()).state().running) throw Object.assign(new Error('请先停止自主观看，再开始新一轮。'), { status: 409 }); await controller.pauseForLimits?.(); value = controller.limits().markSession('dsh', { explicit: true }); break;
         case '/video/stop': empty(input); value = controller.limits().endSession({ explicit: true }); await controller.pauseForLimits?.(); break;
         case '/browser/open': empty(input); value = await controller.openBrowser(); break;
@@ -79,6 +98,7 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
           value = await modelSettings.configure(input, { explicit: true, beforeCommit: assertStopped }); if(getFriends)await(await getFriends()).reconcile();break;
         }
         case '/mode/configure': value = await configureMode(input); break;
+        case '/browser/mode': value = await controller.configureBrowserMode(input, { watchService: await getWatch(), friendInteractions: await getFriends?.() }); break;
         case '/watch/start': {
           if (Object.keys(input).some(key => key !== 'maxRequests')) throw Object.assign(new Error('自主观看只接收本轮请求上限。'), { status: 400 });
           value = await startWatch(input); break;
@@ -88,6 +108,7 @@ export function createNativeSettingsRoute({ getController, getComments, getRepor
         case '/spark/stop': empty(input); value = await (await getSpark()).stop({ explicit: true }); break;
         case '/spark/start': throw Object.assign(new Error('自动续火花功能已移除。'),{status:410});
         case '/spark/resolve': value = await (await getSpark()).resolve(input, { explicit: true }); break;
+        case '/reactions/configure': value = (await controller.getReactions()).configure(input, { explicit: true }); break;
         case '/comments/configure': value = await (await getComments()).configure(input, { explicit: true }); break;
         case '/comments/resolve': value = await (await getComments()).resolve(input, { explicit: true }); break;
         case '/share/configure': if(getFriends){if(Object.keys(input).some(key=>!['enabled','dailyLimit'].includes(key)))throw Object.assign(new Error('好友互动只接受总开关。'),{status:400});await(await getFriends()).configure({enabled:input.enabled},{explicit:true});value=(await getShare()).state();}else value=await(await getShare()).configure(input,{explicit:true});break;

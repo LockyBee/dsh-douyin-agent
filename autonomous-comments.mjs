@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveRuntimePaths } from './runtime-paths.mjs';
+import { compareCommentNovelty } from './comment-novelty.mjs';
 
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const day = now => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
@@ -64,7 +65,12 @@ export class AutonomousComments {
     const recoveryRequired = Boolean(guard && !alive(guard.pid)), unresolved = this.unresolved(ledger);
     return { protocol: 'autonomous-comments-v1', enabled: policy.enabled, policy: { enabled: policy.enabled, dailyLimit: policy.dailyLimit, perSessionLimit: policy.perSessionLimit }, timeZone: 'Asia/Shanghai', daily: { date, attempts: ledger.days[date] || 0, remaining: Math.max(0, policy.dailyLimit - (ledger.days[date] || 0)) }, session: { id: sessionId, attempts: sessionId ? ledger.sessions[sessionId] || 0 : 0, remaining: sessionId ? Math.max(0, policy.perSessionLimit - (ledger.sessions[sessionId] || 0)) : 0 }, paused: unresolved.length > 0 || recoveryRequired, busy: Boolean(guard && alive(guard.pid)), recoveryRequired, needsReview: unresolved.map(({ operationId, videoId, sessionId, status, startedAt, browserOperationId }) => ({ operationId, videoId, sessionId, status, startedAt, browserOperationId })), recent: ledger.operations.slice(-10).map(({ operationId, videoId, sessionId, status, startedAt, completedAt, text, commentId }) => ({ operationId, videoId, sessionId, status, startedAt, completedAt, text, commentId })), receiptsFile: this.files.ledger };
   }
-  context() { const state = this.state(); return { enabled: Boolean(state.enabled && !state.paused && state.daily.remaining > 0 && state.session.remaining > 0 && this.videoLimits.state().allowed), remainingDaily: state.daily.remaining, remainingSession: state.session.remaining, paused: state.paused, maxTextLength: 200 }; }
+  context(videoId) {
+    const state = this.state();
+    const enabled = state.enabled && !state.paused && state.daily.remaining > 0 && state.session.remaining > 0 &&
+      this.videoLimits.state().allowed && (!videoId || !this.ledger().operations.some(item => item.videoId === videoId));
+    return { enabled: Boolean(enabled), remainingDaily: state.daily.remaining, remainingSession: state.session.remaining, paused: state.paused, maxTextLength: 200 };
+  }
   configure(input = {}, { explicit = false } = {}) {
     if (!explicit) throw fail('自主评论许可只能由用户在本机设置。', 403);
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['enabled', 'dailyLimit', 'perSessionLimit'].includes(key)) || typeof input.enabled !== 'boolean' || input.dailyLimit !== undefined && (!Number.isSafeInteger(input.dailyLimit) || input.dailyLimit < 1 || input.dailyLimit > 20) || input.perSessionLimit !== undefined && (!Number.isSafeInteger(input.perSessionLimit) || input.perSessionLimit < 1 || input.perSessionLimit > 3)) throw fail('评论设置只接受总开关、每日 1 至 20 次和单轮 1 至 3 次上限。', 400);
@@ -99,9 +105,34 @@ export class AutonomousComments {
     return time;
   }
   update(operationId, patch) { return this.control(() => { const ledger = this.ledger(), item = ledger.operations.find(item => item.operationId === operationId); if (!item) throw fail('评论预留记录丢失，未继续发布。'); Object.assign(item, patch); write(this.files.ledger, ledger); }); }
+  async commenter() {
+    const commenter = await (this.getCommenter ? this.getCommenter() : this.controller?.getCommenter?.());
+    if (commenter) return commenter;
+    const { CommentBrowser } = await import('./comment-browser.mjs');
+    return this.ownedCommenter ??= new CommentBrowser({ source: this.source, videoLimits: this.videoLimits, stateDir: this.stateDir });
+  }
+  async discussion(videoId, { signal } = {}) {
+    if (this.post || !this.context().enabled || !videoIdentity(videoId)) return [];
+    const reader = await this.commenter();
+    return await reader.discussion?.(videoId, { signal }) ?? [];
+  }
+  releaseSkippedReservation(operationId) {
+    this.control(() => {
+      const ledger = this.ledger();
+      const operation = ledger.operations.find(item => item.operationId === operationId);
+      if (operation?.status !== 'reserved' || operation.pid !== process.pid || ledger.days[operation.day] < 1 || ledger.sessions[operation.sessionId] < 1) throw fail('评论预留已变化，保留原记录。');
+      ledger.days[operation.day]--;
+      ledger.sessions[operation.sessionId]--;
+      ledger.operations = ledger.operations.filter(item => item.operationId !== operationId);
+      write(this.files.ledger, ledger);
+    });
+  }
   async comment(input = {}, { signal, watchRunId } = {}) {
     if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['evidenceId', 'videoId', 'text'].includes(key))) throw fail('自主评论只接受观察编号、当前作品和纯文字。', 400);
     input = { ...input, text: validateCommentText(input.text) }; this.allowed(input, { signal, watchRunId });
+    if (this.ledger().operations.some(item => item.videoId === input.videoId)) throw fail('同一作品已处理过评论，未跨日或重启后自动重复发布。');
+    const novelty = compareCommentNovelty(input.text, this.ledger().operations, { now: this.now() });
+    if (!novelty.accepted) return { confirmed: false, skipped: true, code: novelty.code, deliveryUncertain: false, videoId: input.videoId };
     if (this.active) throw fail('此入口已有评论正在处理。'); fs.mkdirSync(this.stateDir, { recursive: true });
     const token = randomUUID(); let descriptor;
     try { descriptor = fs.openSync(this.files.send, 'wx', 0o600); } catch (error) { if (error.code === 'EEXIST') throw fail('另一个入口正在评论，或上次评论发送锁需要核对。'); throw error; }
@@ -113,18 +144,29 @@ export class AutonomousComments {
       this.control(() => {
         const time = this.allowed(input, { signal: combined, watchRunId }); sessionId = time.session.id; const ledger = this.ledger();
         if (ledger.operations.some(item => item.videoId === input.videoId)) throw fail('同一作品已处理过评论，未跨日或重启后自动重复发布。');
+        const currentNovelty = compareCommentNovelty(input.text, ledger.operations, { now: this.now() });
+        if (!currentNovelty.accepted) throw Object.assign(fail('近期已说过相似内容，继续观看。'), { code: currentNovelty.code });
         const date = day(this.now()); ledger.days[date] = (ledger.days[date] || 0) + 1; ledger.sessions[sessionId] = (ledger.sessions[sessionId] || 0) + 1;
         ledger.operations.push({ operationId, evidenceId: input.evidenceId, videoId: input.videoId, text: input.text, day: date, sessionId, runId: watchRunId, source: this.source, pid: process.pid, status: 'reserved', startedAt: new Date(this.now()).toISOString() }); write(this.files.ledger, ledger); reserved = true;
       });
       const authorize = ({ phase, videoId } = {}) => { if (finished || videoId !== input.videoId || !['prepare', 'monitor', 'before-click'].includes(phase)) throw fail('可信评论授权与当前作品不一致。'); this.allowed(input, { signal: combined, watchRunId, operationId, sessionId }); if (phase === 'before-click') { if (clicking) throw fail('这条评论已授权一次发布，未再次点击。'); this.update(operationId, { status: 'clicking' }); clicking = true; } return true; };
       authorize.beginDispatch = () => { if (finished || !clicking || releaseDispatch) throw fail('没有一次有效的评论最终输入许可。'); const release = this.acquireControl(); try { this.allowed(input, { signal: combined, watchRunId, operationId, sessionId }); } catch (error) { release(); throw error; } releaseDispatch = release; return () => { releaseDispatch?.(); releaseDispatch = null; }; };
       let post = this.post;
-      if (!post) { let commenter = await (this.getCommenter ? this.getCommenter() : this.controller?.getCommenter?.()); if (!commenter) { const { CommentBrowser } = await import('./comment-browser.mjs'); this.ownedCommenter ??= new CommentBrowser({ source: this.source, videoLimits: this.videoLimits, stateDir: this.stateDir }); commenter = this.ownedCommenter; } if (typeof commenter.post !== 'function') throw fail('当前评论适配尚未提供可核对的发布接口。'); post = commenter.post.bind(commenter); }
+      if (!post) {
+        const commenter = await this.commenter();
+        if (typeof commenter.post !== 'function') throw fail('当前评论适配尚未提供可核对的发布接口。');
+        post = commenter.post.bind(commenter);
+      }
       const result = await post({ expectedVideoId: input.videoId, text: input.text }, { signal: combined, authorize, autonomousRunId: watchRunId });
+      if (!clicking && result?.skipped === true && result.code === 'COMMENT_DISCUSSION_DUPLICATE' && result.confirmed === false && result.deliveryUncertain === false && result.videoId === input.videoId) {
+        this.releaseSkippedReservation(operationId);
+        return { confirmed: false, skipped: true, code: result.code, deliveryUncertain: false, videoId: input.videoId };
+      }
       const confirmed = clicking && result?.confirmed === true && result.videoId === input.videoId && identifier(result.commentId), uncertain = !confirmed && (clicking || result?.deliveryUncertain === true || result?.confirmed === true);
       this.update(operationId, { status: confirmed ? 'confirmed' : uncertain ? 'uncertain' : 'not-sent', completedAt: new Date(this.now()).toISOString(), ...(identifier(result?.operationId) ? { browserOperationId: result.operationId } : {}), ...(confirmed ? { commentId: result.commentId } : {}) });
       return { confirmed, deliveryUncertain: uncertain, operationId, videoId: input.videoId, ...(confirmed ? { commentId: result.commentId } : { reason: uncertain ? '评论发布结果未确认，已暂停后续评论，请在抖音核对。' : result?.reason || '没有发布可核对的新评论，未改用其他发送方式。', ...(result?.needsUserAction ? { needsUserAction: true } : {}) }) };
     } catch (error) {
+      if (!reserved && ['COMMENT_REPEATED', 'COMMENT_TOO_SIMILAR', 'COMMENT_NO_CONTENT'].includes(error.code)) return { confirmed: false, skipped: true, code: error.code, deliveryUncertain: false, videoId: input.videoId };
       if (reserved) try { this.update(operationId, { status: clicking ? 'uncertain' : 'not-sent', completedAt: new Date(this.now()).toISOString() }); } catch { /* 保留原预留记录，不能证明未发出时不重试。 */ }
       if (clicking) return { confirmed: false, deliveryUncertain: true, operationId, videoId: input.videoId, reason: '发布期间中断，原评论结果需人工核对，未再次发送。' }; throw error;
     } finally { finished = true; try { releaseDispatch?.(); const owner = read(this.files.send, null); if (owner?.pid === process.pid && owner.token === token) fs.unlinkSync(this.files.send); } finally { this.active = null; completion.resolve(); } }

@@ -9,7 +9,7 @@ const fail = (message, status = 409) => Object.assign(new Error(message), { stat
 const alive = pid => { if (!Number.isSafeInteger(pid) || pid < 1) return false; try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
 const day = now => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now));
 const read = (file, fallback) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return fallback; throw fail('自主分享记录无法读取，未重置许可、预算或未确认收据。'); } };
-const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx' }); fs.renameSync(temporary, file); } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } };
+const write = (file, value) => { const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`; try { fs.writeFileSync(temporary, JSON.stringify(value, null, 2) + '\n', { mode: 0o600, flag: 'wx', flush: true }); fs.renameSync(temporary, file); } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } };
 const recipientPattern = /^conv:[a-f0-9]{64}$/;
 const evidencePattern = /^video:[a-f0-9]{64}$/;
 const statuses = new Set(['reserved', 'clicking', 'confirmed', 'not-sent', 'uncertain', 'resolved-confirmed', 'resolved-not-sent']);
@@ -22,9 +22,31 @@ const failureOf = value => {
 export function isRecoverableSharePreflight(code, stage) {
   if (['CHAT_PAGE_NOT_OPEN', 'CHAT_FOREGROUND'].includes(code)) return ['contact-identity', 'conversation-baseline'].includes(stage);
   if (code === 'OUTBOUND_BUSY') return stage === 'outbound-wait';
+  if (code === 'SHARE_PREPARATION_TIMEOUT') return stage === 'preparation';
+  if (code === 'MCP_SHARE_CONTACT_UNAVAILABLE') return stage === 'contact-identity';
+  if (['MCP_SHARE_BASELINE_UNAVAILABLE', 'MCP_SHARE_ALREADY_IN_HISTORY'].includes(code)) return stage === 'conversation-baseline';
+  if (code === 'MCP_SHARE_TOOL_UNAVAILABLE') return stage === 'preparation';
+  if (['MCP_IM_SEND_AUTHORIZATION_REQUIRED', 'MCP_IM_SEND_ACCOUNT_CHANGED', 'MCP_IM_SEND_STATUS_UNAVAILABLE'].includes(code)) return stage === 'send-authorization';
   return stage === 'recipient' && ['FORWARD_RECIPIENT_IDENTITY_MISMATCH', 'FORWARD_BUTTON_TARGET_MISMATCH', 'FORWARD_BUTTON_UNAVAILABLE'].includes(code)
     || stage === 'geometry' && code === 'FORWARD_GEOMETRY_FAILED'
     || stage === 'open-panel' && code === 'FORWARD_SHARE_PANEL_UNAVAILABLE';
+}
+
+export function sharePreflightError({ code, stage, message }, { forwardOperationId, videoId, recipientId }) {
+  const failure = { code, stage, message };
+  const preflight = { protocol: 'share-preflight-v1', outcome: 'not-sent', forwardOperationId, videoId, recipientId, sendClicks: 0, dispatchAuthorized: false, failureCode: code, failureStage: stage };
+  return Object.assign(new Error(message), { code, failure, forwardOperationId, preflight });
+}
+
+async function waitForShare(pending, signal) {
+  let scheduled;
+  const cancelled = Promise.withResolvers();
+  // 同一轮已回读的发送结果可先落账，取消后禁止再申请发送许可。
+  const onAbort = () => { scheduled = setImmediate(() => cancelled.reject(signal.reason)); };
+  signal.addEventListener('abort', onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  try { return await Promise.race([pending, cancelled.promise]); }
+  finally { signal.removeEventListener('abort', onAbort); clearImmediate(scheduled); }
 }
 export function isSharePreflightNotSent(value, { videoId, recipientId } = {}) {
   const proof = value?.preflight;
@@ -37,9 +59,10 @@ export function isSharePreflightNotSent(value, { videoId, recipientId } = {}) {
 
 // 共享许可只允许发送当前已观察作品的官方卡片；选择理由留在本机，不进入私信正文。
 export class AutonomousShare {
-  constructor({ personaMemory, videoLimits, controller, getForwarder, send, stateDir = resolveRuntimePaths().stateDir, source = 'api', now = Date.now } = {}) {
+  constructor({ personaMemory, videoLimits, controller, getForwarder, send, stateDir = resolveRuntimePaths().stateDir, source = 'api', now = Date.now, operationTimeoutMs = 60_000 } = {}) {
     if (!personaMemory?.snapshot || !videoLimits?.state || !['api', 'dsh'].includes(source) || (send !== undefined && typeof send !== 'function')) throw new TypeError('自主分享缺少共同观察证据、有限时钟或可信发送接口。');
-    Object.assign(this, { personaMemory, videoLimits, controller, getForwarder, send, stateDir, source, now });
+    if (!Number.isSafeInteger(operationTimeoutMs) || operationTimeoutMs < 1 || operationTimeoutMs > 60_000) throw new TypeError('单个收件人的分享超时参数无效。');
+    Object.assign(this, { personaMemory, videoLimits, controller, getForwarder, send, stateDir, source, now, operationTimeoutMs });
     this.files = Object.fromEntries(['policy', 'ledger', 'control', 'send'].map(name => [name, path.join(stateDir, `share-${name}${['control', 'send'].includes(name) ? '.guard' : '.json'}`)]));
     this.active = null; this.closed = false;
   }
@@ -150,8 +173,10 @@ export class AutonomousShare {
     const token = randomUUID(), operationId = randomUUID(); let descriptor;
     try { descriptor = fs.openSync(this.files.send, 'wx', 0o600); } catch (error) { if (error.code === 'EEXIST') throw fail('另一个入口正在分享，或上次发送锁需要人工核对。'); throw error; }
     try { fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid, token, operationId })); } finally { fs.closeSync(descriptor); }
-    const abort = new AbortController(), combined = AbortSignal.any([abort.signal, ...(signal ? [signal] : []), AbortSignal.timeout(60_000)]);
-    let reserved = false, clicked = false, finished = false, releaseDispatch, sessionId;
+    const abort = new AbortController(), combined = signal ? AbortSignal.any([abort.signal, signal]) : abort.signal;
+    const timeout = Object.assign(new Error('单个收件人的分享处理超时。'), { code: 'SHARE_OPERATION_TIMEOUT', stage: 'sharing' });
+    const timer = setTimeout(() => abort.abort(timeout), this.operationTimeoutMs);
+    let reserved = false, clicked = false, dispatchGranted = false, finished = false, releaseDispatch, sessionId;
     const completion = Promise.withResolvers(); this.active = { abort, completion: completion.promise };
     try {
       const skipped = this.control(() => {
@@ -175,38 +200,50 @@ export class AutonomousShare {
       };
       // 最终短输入与设置写入互斥；设置若遇到此阶段会明确返回忙，不能先报关闭成功再发送。
       authorize.beginDispatch = () => {
-        if (finished || !clicked || releaseDispatch) throw fail('当前分享未获得一次有效的最终输入授权。');
+        if (finished || !clicked || dispatchGranted) throw fail('当前分享未获得一次有效的最终输入授权。');
         const release = this.acquireControl();let releaseInteractions;
         try { releaseInteractions=acquireFriendInteractionDispatch(this.stateDir);this.allowed(input, { signal: combined, watchRunId, operationId, sessionId }); }
         catch (error) { releaseInteractions?.();release(); throw error; }
+        dispatchGranted = true;
         releaseDispatch = ()=>{try{releaseInteractions();}finally{release();}};
         return () => { releaseDispatch?.(); releaseDispatch = null; };
       };
       let send = this.send;
       if (!send) {
-        const forwarder = await (this.getForwarder ? this.getForwarder() : this.controller?.getForwarder?.());
+        const forwarder = await waitForShare(this.getForwarder ? this.getForwarder() : this.controller?.getForwarder?.(), combined);
         if (!forwarder?.forwardAutonomous) throw fail('当前转发器尚未提供可信自主分享入口。');
         send = forwarder.forwardAutonomous.bind(forwarder);
       }
-      const result = await send({ recipientId: input.recipientId, expectedVideoId: input.videoId }, { signal: combined, authorize, autonomousRunId: watchRunId });
+      combined.throwIfAborted();
+      const result = await waitForShare(send({ recipientId: input.recipientId, expectedVideoId: input.videoId }, { signal: combined, authorize, autonomousRunId: watchRunId }), combined);
       const confirmed = clicked && result?.confirmed === true && result.deliveryType === 'native-card' && result.videoId === input.videoId && typeof result.messageId === 'string' && !!result.messageId;
       const uncertain = !confirmed && (clicked || result?.deliveryUncertain === true || result?.confirmed === true);
       const failure = !confirmed ? failureOf(result?.failure || { code: uncertain ? 'SHARE_DELIVERY_UNCERTAIN' : 'SHARE_NOT_SENT', stage: uncertain ? 'receipt' : 'send', message: result?.reason || (uncertain ? '分享结果未确认，请核对收据。' : '没有发出可核对的作品卡片。') }) : null;
       this.update(operationId, { status: confirmed ? 'confirmed' : uncertain ? 'uncertain' : 'not-sent', completedAt: new Date(this.now()).toISOString(), ...(typeof result?.operationId === 'string' ? { forwardOperationId: result.operationId } : {}), ...(confirmed ? { messageId: result.messageId } : { failure }) });
       return { confirmed, deliveryUncertain: uncertain, deliveryType: 'native-card', operationId, videoId: input.videoId, recipientId: input.recipientId, ...(confirmed ? { messageId: result.messageId } : { failure, reason: failure.message }) };
     } catch (error) {
+      finished = true;
+      const preparationTimedOut = error === timeout && !clicked && !signal?.aborted && !this.closed;
+      if (preparationTimedOut) error = sharePreflightError({ code: 'SHARE_PREPARATION_TIMEOUT', stage: 'preparation', message: '核对该收件人超时，未提交发送。' }, { ...input, forwardOperationId: operationId });
       const failure = failureOf(error);
-      const recoverable = reserved && !clicked && !combined.aborted && !error.receiptWarning && error.deliveryUncertain !== true && error.confirmed !== true && isSharePreflightNotSent({ ...error, failure }, input);
+      const recoverable = reserved && !clicked && (!combined.aborted || preparationTimedOut) && !error.receiptWarning && error.deliveryUncertain !== true && error.confirmed !== true && isSharePreflightNotSent({ ...error, failure }, input);
       let recorded = false;
-      if (reserved) { try { this.update(operationId, { status: clicked ? 'uncertain' : 'not-sent', completedAt: new Date(this.now()).toISOString(), failure, ...(typeof error.forwardOperationId === 'string' ? { forwardOperationId: error.forwardOperationId } : {}), ...(recoverable ? { preflight: error.preflight } : {}) }); recorded = true; } catch { /* 保留预留记录，不能证明未发送时不重试。 */ } }
+      if (reserved) {
+        try {
+          releaseDispatch?.(); releaseDispatch = null;
+          this.update(operationId, { status: clicked ? 'uncertain' : 'not-sent', completedAt: new Date(this.now()).toISOString(), failure, ...(typeof error.forwardOperationId === 'string' ? { forwardOperationId: error.forwardOperationId } : {}), ...(recoverable ? { preflight: error.preflight } : {}) });
+          recorded = true;
+        } catch { /* 保留预留记录，不能证明未发送时不重试。 */ }
+      }
       if (clicked) return { confirmed: false, deliveryUncertain: true, deliveryType: 'native-card', operationId, videoId: input.videoId, recipientId: input.recipientId, failure, reason: failure.message };
       if (recoverable && recorded) {
-        this.allowed(input, { signal: combined, watchRunId, operationId, sessionId });
+        this.allowed(input, { signal: preparationTimedOut ? signal : combined, watchRunId, operationId, sessionId });
         return { status: 'not-sent', code: 'SHARE_PREFLIGHT_NOT_SENT', confirmed: false, deliveryUncertain: false, deliveryType: 'native-card', operationId, forwardOperationId: error.forwardOperationId, videoId: input.videoId, recipientId: input.recipientId, preflight: error.preflight, failure, reason: failure.message };
       }
       throw error;
     } finally {
       finished = true;
+      clearTimeout(timer);
       try { releaseDispatch?.(); const owner = read(this.files.send, null); if (owner?.pid === process.pid && owner.token === token) fs.unlinkSync(this.files.send); }
       finally { this.active = null; completion.resolve(); }
     }

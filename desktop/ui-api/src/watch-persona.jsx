@@ -29,29 +29,60 @@ export function WatchControls({ state, video, configured, connected, otherBusy, 
   </div>;
 }
 
+const evidenceActions = [['stay', '继续停留'], ['skip', '跳过'], ['share', '确认分享']];
+const evidenceBasis = new Map([
+  ['observation-only', '仅有作品观察'], ['insufficient-behavior', '待观察'],
+  ['confirmed-share', ''], ['sustained-watch', ''], ['quick-skip', '']
+]);
+
 function BehaviorEvidence({ value }) {
-  const ratio = value?.watchRatio ?? value?.ratio, actual = value?.actions;
-  return <div className="behavior-evidence"><div className="interest-list">
-    {Number.isFinite(value?.watchedSeconds) && <Tag>已核实观看 {value.watchedSeconds} 秒</Tag>}
-    {Number.isFinite(ratio) && <Tag>观看比例 {Math.round(Math.min(1, Math.max(0, ratio)) * 100)}%</Tag>}
-    {actual && ['stay', 'skip', 'share'].map(action => Number.isFinite(actual[action]) && <Tag key={action}>{{ stay: '继续停留', skip: '跳过', share: '已确认分享' }[action]} {actual[action]} 次</Tag>)}
-  </div><p className="muted">{value?.basis || '只有画面或主题记录，尚无足够的实际观看与行为依据。'}</p>
-    {value?.counts && <p className="muted">正向 {value.counts.like ?? 0} · 负向 {value.counts.dislike ?? 0} · 待观察 {value.counts.neutral ?? 0}</p>}
-  </div>;
+  const seconds = value?.watchedSeconds, ratio = value?.watchRatio ?? value?.ratio;
+  const percentage = Number.isFinite(ratio) ? `${Math.round(Math.min(1, Math.max(0, ratio)) * 100)}%` : '';
+  const evidence = [];
+  if (Number.isFinite(seconds) && seconds > 0) evidence.push(`观看 ${seconds} 秒${percentage ? `（${percentage}）` : ''}`);
+  else if (ratio > 0 && percentage) evidence.push(`观看 ${percentage}`);
+  for (const [action, label] of evidenceActions) {
+    const count = value?.actions?.[action];
+    if (Number.isFinite(count) && count > 0) evidence.push(`${label} ${count} 次`);
+  }
+  const basis = evidenceBasis.get(value?.basisCode) ?? value?.basis;
+  if (basis) evidence.push(basis);
+  return evidence.length ? <p className="behavior-evidence">{evidence.join(' · ')}</p> : null;
+}
+
+function InterestCard({ interest }) {
+  const evidence = Array.isArray(interest?.evidence) ? interest.evidence : [];
+  const count = Number.isSafeInteger(interest?.evidenceCount) ? interest.evidenceCount : evidence.length;
+  const counts = interest?.counts, updated = dateLabel(interest?.updatedAt);
+  const topic = topicOf(interest) || '未命名兴趣';
+  return <details className="interest-card interest-details">
+    <summary>
+      <strong className="interest-topic" title={topic}>{topic}</strong>
+      <span>{signalLabel(interest?.basis || counts ? interest.signal : 'neutral')}</span>
+      <span className="interest-count">{count} 条依据</span>
+    </summary>
+    <div className="interest-detail">
+      {counts ? <p>正向 {counts.like ?? 0} · 负向 {counts.dislike ?? 0} · 待观察 {counts.neutral ?? 0}</p>
+        : interest?.basis && <p>{interest.basis}</p>}
+      {updated && <small>更新于 {updated}</small>}
+      {evidence.slice(-2).reverse().map((entry, index) => {
+        const source = entry.source === 'dsh' ? '插件' : entry.source === 'api' ? '独立软件' : entry.source;
+        const origin = [source, dateLabel(entry.at)].filter(Boolean).join(' · ');
+        return <div className="interest-reflection" key={entry.evidenceId || index}>
+          {entry.reflection && <p>{entry.reflection}</p>}
+          <BehaviorEvidence value={entry} />
+          {origin && <small>{origin}</small>}
+        </div>;
+      })}
+    </div>
+  </details>;
 }
 
 export function InterestRecords({ snapshot }) {
   return <><section className="persona-records"><h2>正在形成的兴趣</h2>
-    <p className="muted">画面主题只是选题线索，喜好依据来自实际观看时长、比例及已确认行为，不从识别到的像素主题直接判断喜欢。</p>
-    <div className="interest-records">{(snapshot?.interests || []).map((interest, index) => <article className="interest-card" key={interest?.key || interest?.id || `${topicOf(interest)}-${index}`}>
-      <div className="interest-list"><Tag>{topicOf(interest) || '未命名兴趣'}</Tag><Tag>{signalLabel(interest?.basis || interest?.counts ? interest.signal : 'neutral')}</Tag></div>
-      <small>{Number.isSafeInteger(interest?.evidenceCount) ? interest.evidenceCount : Array.isArray(interest?.evidence) ? interest.evidence.length : 0} 条作品依据{dateLabel(interest?.updatedAt) ? ` · 更新于 ${dateLabel(interest.updatedAt)}` : ''}</small>
-      <BehaviorEvidence value={interest} />
-      {(interest?.evidence || []).slice(-2).reverse().map((evidence, evidenceIndex) => <div className="interest-reflection" key={evidence?.evidenceId || evidenceIndex}>
-        <p>选题反思：{evidence.reflection || '暂无文字反思。'}</p><BehaviorEvidence value={evidence} />
-        <small>{evidence.source === 'dsh' ? '插件' : evidence.source === 'api' ? '独立软件' : evidence.source || ''}{dateLabel(evidence.at) ? ` · ${dateLabel(evidence.at)}` : ''}</small>
-      </div>)}
-    </article>)}</div>{!snapshot?.interests?.length && <p className="muted">还没有兴趣记录，实际观看与行为证据会逐步积累在共用记忆中。</p>}
+    <div className="interest-records">{(snapshot?.interests || []).map((interest, index) => (
+      <InterestCard interest={interest} key={interest?.key || interest?.id || `${topicOf(interest)}-${index}`} />
+    ))}</div>{!snapshot?.interests?.length && <p className="muted">暂无兴趣记录。</p>}
   </section><section className="persona-records"><h2>最近观察与兴趣变化</h2>
     {(snapshot?.recentObservations || []).slice(-30).reverse().map((item, index) => <article className="observation-entry" key={item?.id || index}>
       {dateLabel(item?.observedAt || item?.createdAt || item?.at) && <small>{dateLabel(item.observedAt || item.createdAt || item.at)}</small>}
@@ -64,11 +95,30 @@ export function InterestRecords({ snapshot }) {
 
 export function WatchView({ state, video, browser, snapshot, onSettings }) {
   const active = watchIsActive(state), decision = state?.lastDecision;
-  return <div className="memory-view watch-view"><div className="section-heading"><h1>自主观看</h1><p>和插件共用大肥鱼的人格与兴趣；在允许的时段和每日额度内自动运行。</p></div>
-    <div className="watch-summary"><Tag>{states[state?.status] || '正在读取状态'}</Tag><strong>今日已看 {secondsLabel(video?.daily?.usedSeconds ?? 0)} · 剩余 {secondsLabel(video?.daily?.remainingSeconds ?? (video?.policy?.dailyMinutes === null ? null : video?.remainingSeconds))}</strong><span>今日模型请求 {video?.daily?.requests ?? state?.counts?.dailyRequests ?? 0} / {video?.policy?.dailyRequests === null ? "不限" : video?.policy?.dailyRequests ?? state?.counts?.dailyLimit ?? 30}</span><Button size="sm" onClick={onSettings}>查看观看设置</Button></div>
-    <section className="persona-records"><h2>当前选择</h2>{browser?.video?.title && <h3>{browser.video.title}</h3>}{decision ? <><Tag>{actions[decision.action] || decision.action || '观察作品'}</Tag><p className="decision-reason">{decision.reason || '当前选择尚未给出理由。'}</p>{decision.query && <p className="muted">搜索：{decision.query}</p>}{Number.isFinite(decision.seconds) && <p className="muted">计划观察 {decision.seconds} 秒</p>}</> : <p className="muted">{active ? '正在准备本次选择…' : '在业务设置中开启“允许自动观看”后，会显示选择理由。'}</p>}{state?.lastError && <p className="notice error" role="alert">{state.lastError}</p>}</section>
+  const watchedSeconds = video?.daily?.usedSeconds;
+  const watched = Number.isFinite(watchedSeconds) ? Math.max(0, Math.floor(watchedSeconds)) : null;
+  const remaining = video?.daily && Object.hasOwn(video.daily, 'remainingSeconds')
+    ? video.daily.remainingSeconds : video?.policy?.dailyMinutes === null ? null : video?.remainingSeconds;
+  const requests = video?.daily?.requests ?? state?.counts?.dailyRequests;
+  const limit = video?.policy?.dailyRequests === null ? '不限' : video?.policy?.dailyRequests ?? state?.counts?.dailyLimit;
+  const remainingLabel = remaining === null || Number.isFinite(remaining) ? secondsLabel(remaining) : '—';
+  return <div className="memory-view watch-view">
+    <section className="watch-summary" aria-label="今日观看用量">
+      <dl className="watch-metrics">
+        <div className="watch-metric-primary">
+          <dt>今日已观看</dt>
+          <dd>{watched === null ? '—' : <>{Math.floor(watched / 60)} <span>分</span> {watched % 60} <span>秒</span></>}</dd>
+        </div>
+        <div><dt>剩余时长</dt><dd>{remainingLabel}</dd></div>
+        <div><dt>今日模型请求</dt><dd>{requests ?? '—'} <span>{limit === undefined ? '次' : '/ ' + limit}</span></dd></div>
+      </dl>
+      <div className="watch-summary-actions">
+        <Tag>{states[state?.status] || '正在读取状态'}</Tag>
+        <Button size="sm" variant="outline" onClick={onSettings}>{state?.recovery ? '处理观看暂停' : '查看观看设置'}</Button>
+      </div>
+    </section>
+    <section className="persona-records"><h2>当前选择</h2>{browser?.video?.title && <h3>{browser.video.title}</h3>}{decision ? <><Tag>{actions[decision.action] || decision.action || '观察作品'}</Tag>{decision.reason && <p className="decision-reason">{decision.reason}</p>}{decision.query && <p className="muted">搜索「{decision.query}」</p>}{Number.isFinite(decision.seconds) && <p className="muted">计划观察 {decision.seconds} 秒</p>}</> : <p className="muted">{active ? '正在挑片…' : '暂无选择。'}</p>}{state?.lastError && <p className="notice error" role="alert">{state.lastError}</p>}</section>
     <InterestRecords snapshot={snapshot} />
-    <div className="watch-origin"><span>运行入口：{state?.worker?.source || '无活动入口'}</span><span>本窗口持有 worker：{state?.owned === true ? '是' : '否'}</span></div>
   </div>;
 }
 
@@ -77,6 +127,7 @@ export function PersonaPanel({ snapshot, onSnapshot, api, run, bridge, busy, wat
   const retired = useRef(new Set()), accepted = useRef(snapshot), alive = useRef(true), dirty = useRef(false), version = useRef(0), writing = useRef(false), queued = useRef(false), live = useRef({});
   if (snapshot && !retired.current.has(snapshot.revision)) accepted.current = snapshot;
   const shown = accepted.current, active = watchIsActive(watchState), conflict = editing && (forceConflict || shown?.revision !== baseRevision);
+  const effectiveText = shown?.personaText || shown?.manualText;
   live.current = { editing, draft, baseRevision, active, watchReady, forceConflict, onSnapshot, api };
   useEffect(() => { alive.current = true; return () => { alive.current = false; queued.current = false; }; }, []);
   useEffect(() => { if (!editing) setDraft(shown?.manualText || ''); }, [shown?.manualText, editing]);
@@ -110,13 +161,45 @@ export function PersonaPanel({ snapshot, onSnapshot, api, run, bridge, busy, wat
   }
   function chooseLatest() { const current = accepted.current; dirty.current = false; version.current += 1; setDraft(current?.manualText || ''); live.current.draft = current?.manualText || ''; adoptRevision(current?.revision); setNotice('已载入最新人格，可继续编辑。'); }
   function keepDraft() { adoptRevision(accepted.current?.revision); dirty.current = true; setNotice('已采用最新版本号，正在保存保留的草稿。'); void save(); }
-  return <section className="persona-section"><div className="section-heading"><h2>人格与兴趣</h2><p>手编人格单独保存，兴趣和观察会随记忆积累。这里不修改时段、许可名单或发送权限。</p></div>
-    <div className="memory-location"><strong>软件与插件共用的人格文件夹</strong><code>{snapshot?.personaFolder || '正在读取人格文件夹位置…'}</code>{snapshot?.roleCardFile && <small>{snapshot.roleCardFile}</small>}<Button size="sm" variant="outline" disabled={!snapshot?.personaFolder || !bridge?.openPersonaFolder} onClick={() => { void run('openPersona', () => bridge.openPersonaFolder()); }}>打开人格文件夹</Button></div>
-    {!shown ? <p className="muted">正在读取共用人格…</p> : <><h3>手编人格正文</h3>{editing ? <div><label className="field"><span>编辑人格正文，离开输入框自动保存</span><textarea aria-label="人格正文" rows={12} maxLength={40000} disabled={active || !watchReady} value={draft} onChange={event => { const text = event.target.value; version.current += 1; dirty.current = true; live.current.draft = text; setDraft(text); setNotice('离开输入框后自动保存。'); }} onBlur={() => { void save(); }} /></label>
-      {conflict && <div className="persona-conflict" role="alert"><strong>人格文件已有新版本，未保存的草稿已保留。</strong><details><summary>查看最新的手编人格</summary><p className="plain-persona">{shown.manualText || '最新版本为空。'}</p></details><div className="actions"><Button size="sm" disabled={saving} onMouseDown={event => event.preventDefault()} onClick={chooseLatest}>载入最新人格</Button><Button size="sm" disabled={saving} onMouseDown={event => event.preventDefault()} onClick={keepDraft}>保留草稿，采用最新版本号</Button></div></div>}
-      <div className="actions"><Button size="sm" disabled={saving} onMouseDown={event => event.preventDefault()} onClick={() => { dirty.current = false; version.current += 1; queued.current = false; setEditing(false); setNotice(''); }}>取消编辑</Button></div></div> : <><div className="persona-card">{shown.manualText ? <MarkdownText text={shown.manualText} labels={LABELS} /> : <p className="muted">暂未填写手编人格，当前沿用共用人格文件。</p>}</div><Button size="sm" variant="outline" disabled={active || !watchReady} onClick={edit}>编辑人格</Button></>}
-      {shown.personaText && <details className="effective-persona"><summary>查看当前生效人格</summary><MarkdownText text={shown.personaText} labels={LABELS} /></details>}</>}
-    {active && <p className="notice">请先停止自主观看，再保存人格正文。</p>}{notice && <p className="notice" role="status">{notice}</p>}
+  return <section className="persona-section"><div className="section-heading"><h2>人格与兴趣</h2></div>
+    <div className="actions"><Button size="sm" variant="outline" title={snapshot?.personaFolder} disabled={!snapshot?.personaFolder || !bridge?.openPersonaFolder} onClick={() => { void run('openPersona', () => bridge.openPersonaFolder()); }}>打开人格文件夹</Button></div>
+    {!shown ? <p className="muted">正在读取共用人格…</p> : <details className="effective-persona">
+      <summary>查看当前生效人格</summary>
+      {editing ? <div>
+        <label className="field"><span>编辑人格正文，离开输入框自动保存</span>
+          <textarea aria-label="人格正文" rows={12} maxLength={40000} disabled={active || !watchReady} value={draft} onChange={event => {
+            const text = event.target.value;
+            version.current += 1;
+            dirty.current = true;
+            live.current.draft = text;
+            setDraft(text);
+            setNotice('离开输入框后自动保存。');
+          }} onBlur={() => { void save(); }} />
+        </label>
+        {conflict && <div className="persona-conflict" role="alert">
+          <strong>人格文件已有新版本，未保存的草稿已保留。</strong>
+          <details><summary>查看最新的手编人格</summary><p className="plain-persona">{shown.manualText || '最新版本为空。'}</p></details>
+          <div className="actions">
+            <Button size="sm" disabled={saving} onMouseDown={event => event.preventDefault()} onClick={chooseLatest}>载入最新人格</Button>
+            <Button size="sm" disabled={saving} onMouseDown={event => event.preventDefault()} onClick={keepDraft}>保留草稿，采用最新版本号</Button>
+          </div>
+        </div>}
+        <div className="actions"><Button size="sm" disabled={saving} onMouseDown={event => event.preventDefault()} onClick={() => {
+          dirty.current = false;
+          version.current += 1;
+          queued.current = false;
+          setEditing(false);
+          setNotice('');
+        }}>取消编辑</Button></div>
+      </div> : <>
+        <div className="actions"><Button size="sm" variant="outline" disabled={active || !watchReady} onClick={edit}>编辑人格</Button></div>
+        <div className="persona-card">
+          {effectiveText ? <MarkdownText text={effectiveText} labels={LABELS} /> : <p className="muted">暂无人格正文。</p>}
+        </div>
+      </>}
+      {active && <p className="notice">请先停止自主观看，再保存人格正文。</p>}
+      {notice && <p className="notice" role="status">{notice}</p>}
+    </details>}
     <InterestRecords snapshot={snapshot} />
   </section>;
 }

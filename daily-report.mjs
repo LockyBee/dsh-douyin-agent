@@ -41,10 +41,11 @@ function readFile(file, maximum, optional = false) {
   } catch (error) { if (optional && error.code === 'ENOENT') return null; throw error; }
 }
 const markdown = value => String(value ?? '').replace(/[\r\n\t]+/g, ' ').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replace(/[\\`*_[\]{}()#!|]/g, '\\$&');
-function parseSource(raw) {
-  if (raw === null) return { available: false, observations: [], viewings: [], actions: [], interests: [] };
-  let state;
-  try { state = JSON.parse(raw); } catch { throw failure('共享作品证据格式损坏，未生成或覆盖日报。', 'DAILY_REPORT_SOURCE'); }
+function parseSource(state) {
+  if (state === null) return { available: false, observations: [], viewings: [], actions: [], interests: [] };
+  if (typeof state === 'string') {
+    try { state = JSON.parse(state); } catch { throw failure('共享作品证据格式损坏，未生成或覆盖日报。', 'DAILY_REPORT_SOURCE'); }
+  }
   if (!state || state.version !== 1 || !Array.isArray(state.observations) || !Array.isArray(state.interests) || (state.behavior !== undefined && (state.behavior?.version !== 1 || !Array.isArray(state.behavior.viewings) || !Array.isArray(state.behavior.actions)))) throw failure('共享作品证据结构错误，未生成或覆盖日报。', 'DAILY_REPORT_SOURCE');
   const observations = [], known = new Map(), videos = new Map();
   for (const row of state.observations) {
@@ -199,6 +200,9 @@ export class DailyReport {
   constructor({ personaMemory, now = Date.now, stateDir = null } = {}) {
     if (!personaMemory || typeof personaMemory.personaFolder !== 'string' || !path.isAbsolute(personaMemory.personaFolder) || typeof personaMemory.stateFile !== 'string' || !path.isAbsolute(personaMemory.stateFile) || path.dirname(path.normalize(personaMemory.stateFile)) !== path.normalize(personaMemory.personaFolder) || typeof now !== 'function') throw new TypeError('日报需要共享人格中的独立作品证据路径。');
     this.personaFolder = path.normalize(personaMemory.personaFolder); this.stateFile = path.normalize(personaMemory.stateFile); this.now = now; this.stateDir = stateDir ? path.normalize(stateDir) : null;
+    this.readEvidence = typeof personaMemory.readEvidence === 'function'
+      ? () => personaMemory.readEvidence().state
+      : () => readFile(this.stateFile, MAX_SOURCE, true);
     this.folder = path.join(path.dirname(this.personaFolder), 'reports', 'videos'); this.guardFile = path.join(this.folder, '.daily-report.guard');
   }
   interactions(date) {
@@ -253,7 +257,14 @@ export class DailyReport {
     try { fs.writeFileSync(descriptor, owner); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
     let temporary;
     try {
-      const source = parseSource(readFile(this.stateFile, MAX_SOURCE, true));
+      let evidence;
+      try { evidence = this.readEvidence(); }
+      catch (error) {
+        if (error.code === 'PERSONA_FILE') throw failure('日报来源文件类型、大小不符合要求。', 'DAILY_REPORT_PATH');
+        if (error.code?.startsWith('PERSONA_')) throw failure('共享作品证据无法核对，未生成或覆盖日报。', 'DAILY_REPORT_SOURCE');
+        throw error;
+      }
+      const source = parseSource(evidence);
       const summary = summarize(source, selected, this.now());
       summary.interactions = this.interactions(selected);
       const file = this.file(selected), original = readFile(file, MAX_REPORT, true), previous = managed(original, selected);

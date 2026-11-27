@@ -40,6 +40,28 @@ function fixture(t) {
   return { directory, qqPath, centralPath, qq, central, handles, message, memory, sync, rows, store };
 }
 
+test('离线补读私聊不进入跨应用共享记忆', t => {
+  const f = fixture(t);
+  f.message('【离线补读的私聊历史，2026/11/13】仅供原私聊使用：合成专属内容');
+  f.message('正常对话保留既有共享行为');
+  f.sync();
+  const content = JSON.stringify(f.rows());
+  assert.equal(content.includes('合成专属内容'), false);
+  assert.equal(content.includes('正常对话'), true);
+});
+
+test('旧进程尝试同步离线私聊时，集中库在插入和更新时屏蔽原文', t => {
+  const f = fixture(t);
+  const put=f.central.prepare(`INSERT INTO memory_entries(kind,content,source,sources_json,metadata_json,created_at,updated_at,origin,status,external_key)
+    VALUES ('qq-history',?,'qq','["qq"]','{}',1,1,'qq-history','observed-history','synthetic-private')
+    ON CONFLICT(external_key) DO UPDATE SET content=excluded.content`);
+  put.run('【离线补读的私聊历史，测试】合成私密一');
+  assert.equal(f.central.prepare('SELECT content FROM memory_entries WHERE external_key=?').get('synthetic-private').content,'[离线私聊内容仅保存在原会话]');
+  put.run('【离线补读的私聊历史，媒体观察 1】合成私密二');
+  assert.equal(f.central.prepare('SELECT content FROM memory_entries WHERE external_key=?').get('synthetic-private').content,'[离线私聊内容仅保存在原会话]');
+  assert.doesNotMatch(JSON.stringify(f.rows()),/合成私密一|合成私密二/);
+});
+
 test('首次导入仅保存active确认记忆与去敏文字历史，来源与时间可核对', t => {
   const f = fixture(t);
   f.memory('测试甲喜欢猫咪视频，QQ 654321，api_key=synthetic-secret', { subject: '测试甲的视频偏好' });

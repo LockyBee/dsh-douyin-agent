@@ -89,7 +89,7 @@ test('本机HTTP无需APIKey也能打开准备入口，仍校验token和空参�
   const result = await pending; assert.equal(result.status, 200); assert.equal((await result.json()).opened, true); assert.equal(opens, 1); assert.equal(bootstrap.config.configured, false);
 });
 
-test('真实临时Edge经核心openBrowser复用准备页和watch入口，有限轮次文件逐字节不变', { timeout: 30_000 }, async t => {
+test('真实临时Edge后台显示请求明确拒绝，启动器仍复用准备页和watch入口且保留有限轮次', { timeout: 30_000 }, async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-launcher-core-')); const home = path.join(root, 'home'), temporary = path.join(root, 'tmp'), stateDir = path.join(root, 'state');
   for (const directory of [home, temporary, stateDir]) fs.mkdirSync(directory);
   t.after(() => { if (path.dirname(path.resolve(root)) !== path.resolve(os.tmpdir())) throw new Error('浏览器入口测试目录越界。'); fs.rmSync(root, { recursive: true, force: true }); });
@@ -97,23 +97,27 @@ test('真实临时Edge经核心openBrowser复用准备页和watch入口，有限
 import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';
 import {chromium} from ${JSON.stringify(new URL('../playwright-runtime.mjs', import.meta.url).href)};
 import {BrowserController} from ${JSON.stringify(new URL('../core.mjs', import.meta.url).href)};
+import {BrowserLauncher} from ${JSON.stringify(new URL('../browser-launcher.mjs', import.meta.url).href)};
 import {VideoLimits} from ${JSON.stringify(new URL('../video-limits.mjs', import.meta.url).href)};
-const browser=await chromium.launch({channel:'msedge',headless:true});
+const edgeEnv={...process.env};if(process.platform==='win32'&&edgeEnv.SYNTHETIC_EDGE_USERPROFILE){edgeEnv.USERPROFILE=edgeEnv.SYNTHETIC_EDGE_USERPROFILE;edgeEnv.HOME=edgeEnv.SYNTHETIC_EDGE_USERPROFILE;}
+const browser=await chromium.launch({channel:'msedge',headless:true,env:edgeEnv});
 try{
  const context=await browser.newContext();await context.route('**/*',route=>route.fulfill({contentType:'text/html',body:${JSON.stringify(HTML)}}));
  const limits=new VideoLimits({stateDir:process.env.SYNTHETIC_LAUNCHER_STATE});
  const before=fs.readFileSync(limits.sessionsFile,'utf8');const policy=fs.readFileSync(limits.policyFile,'utf8');
  const controller=new BrowserController({source:'api',videoLimits:limits});controller.browser=browser;
- const first=await controller.openBrowser();const second=await controller.openBrowser();
+ await assert.rejects(controller.openBrowser(), error=>error.code==='BACKGROUND_BROWSER_NEEDS_VISIBLE');
+ const launcher=new BrowserLauncher({getBrowser:()=>browser,getWatchState:()=>{try{return JSON.parse(fs.readFileSync(path.join(limits.stateDir,'watch-loop.lock'),'utf8'))}catch{return null}}});
+ const first=await launcher.open();const second=await launcher.open();
  assert.equal(first.mode,'prepare');assert.equal(second.reused,true);assert.equal(context.pages().length,1);
  const prepare=context.pages()[0];await prepare.locator('video').waitFor({state:'attached',timeout:5000});assert.equal(await prepare.locator('video').evaluate(video=>video.paused),true);
  const watch=await context.newPage();await watch.goto('https://www.douyin.com/video/7770000000000000008');await watch.evaluate(()=>{window.name='deepseek-douyin-dsh'});await watch.waitForFunction(()=>document.querySelector('video')?.readyState>=2&&!document.querySelector('video').paused,null,{timeout:5000});
  fs.writeFileSync(path.join(limits.stateDir,'watch-loop.lock'),JSON.stringify({version:1,pid:process.pid,source:'dsh',runId:'synthetic-live-owner',sessionId:'synthetic-session'}));
- const third=await controller.openBrowser();assert.equal(third.mode,'watch');assert.equal(await watch.locator('video').evaluate(video=>video.paused),false);assert.equal(context.pages().length,2);
+ const third=await launcher.open();assert.equal(third.mode,'watch');assert.equal(await watch.locator('video').evaluate(video=>video.paused),false);assert.equal(context.pages().length,2);
  assert.equal(fs.readFileSync(limits.sessionsFile,'utf8'),before);assert.equal(fs.readFileSync(limits.policyFile,'utf8'),policy);assert.equal(controller.page,null);
  console.log(JSON.stringify({reused:second.reused,preparePaused:true,watchPreserved:third.watchPreserved,clockUnchanged:true}));
 }finally{await browser.close()}
 `;
-  const { stdout } = await run(process.execPath, ['--input-type=module', '-e', script], { timeout: 25_000, windowsHide: true, env: { ...process.env, HOME: home, USERPROFILE: home, TEMP: temporary, TMP: temporary, DOUYIN_RUNTIME_LOCATION_FILE: path.join(root, 'absent-location.json'), SYNTHETIC_LAUNCHER_STATE: stateDir } });
+  const { stdout } = await run(process.execPath, ['--input-type=module', '-e', script], { timeout: 25_000, windowsHide: true, env: { ...process.env, SYNTHETIC_EDGE_USERPROFILE:process.env.USERPROFILE||'', HOME: home, USERPROFILE: home, TEMP: temporary, TMP: temporary, DOUYIN_RUNTIME_LOCATION_FILE: path.join(root, 'absent-location.json'), SYNTHETIC_LAUNCHER_STATE: stateDir } });
   assert.deepEqual(JSON.parse(stdout.trim()), { reused: true, preparePaused: true, watchPreserved: true, clockUnchanged: true });
 });

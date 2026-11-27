@@ -16,8 +16,18 @@ function fixture(t,initial=[{}]) {
     Object.assign(value,{
       isClosed:()=>value.closed,url:()=>value.address,async close(){value.closed=true;},setDefaultTimeout(){},setDefaultNavigationTimeout(){},
       async evaluate(fn,arg){
-        await setImmediate();const window={name:value.name},document={body:{textContent:value.text},querySelectorAll:()=>({length:value.elements})};
-        const result=vm.runInNewContext(`(${fn.toString()})(__argument)`,{window,document,__argument:arg});
+        await setImmediate();
+        const window = { name: value.name };
+        const elements = Array.from({ length: value.elements }, () => ({
+          childElementCount: 1,
+          getBoundingClientRect: () => ({ width: 0, height: 0 }),
+        }));
+        const document = { body: { textContent: value.text }, querySelectorAll: () => elements };
+        const location = new URL(value.address);
+        const getComputedStyle = () => ({ display: 'none' });
+        const result = vm.runInNewContext(`(${fn.toString()})(__argument)`, {
+          window, document, location, URL, getComputedStyle, __argument: arg,
+        });
         if(window.name!==value.name)value.writes.push(window.name);value.name=window.name;return result;
       },
       async goto(url){await setImmediate();value.navigations.push(url);value.address=url;},

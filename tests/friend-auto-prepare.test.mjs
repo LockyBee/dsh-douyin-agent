@@ -9,6 +9,7 @@ import { FriendInteractions } from '../friend-interactions.mjs';
 import { ChatService } from '../chat-service.mjs';
 import { ChatBrowser } from '../chat-browser.mjs';
 import { BrowserController } from '../core.mjs';
+import { installNativeFocusReset } from '../browser-host.mjs';
 import { chromium } from '../playwright-runtime.mjs';
 
 const contact = { id: `conv:${'1'.repeat(64)}`, name: '合成许可好友', followed: true, isGroup: false, identityVerified: true, identityBinding: `binding:${'2'.repeat(64)}`, identityVersion: 2, identityKind: 'rendered-user', identityHash: '1'.repeat(64) };
@@ -35,6 +36,180 @@ test('真实服务缺消息页后自然准备并启动，不等待自身reconcil
   assert.equal(f.service.state().running, true); assert.equal(coordinator.state().status, 'running'); assert.equal(f.calls.prepare, 1); assert.equal(f.calls.start, 2);
   await f.service.poll(); for (let i = 0; i < 30; i++) await coordinator.reconcile();
   assert.equal(f.calls.prepare, 1); assert.equal(fs.existsSync(coordinator.prepareGuard), false); assert.equal(JSON.parse(fs.readFileSync(coordinator.prepareBudgetFile)).attempts, 1); f.unchanged();
+});
+
+test('后台浏览器未运行时自动准备，未选择后台模式时保持等待', async t => {
+  for (const background of [true, false]) {
+    const f = await fixture(t), coordinator = f.create();
+    const prepare = f.browser.prepareChat;
+    f.browser.canStartBackgroundBrowser = () => background;
+    f.browser.listContacts = async () => {
+      if (!f.calls.prepare) throw Object.assign(new Error('专用浏览器未运行。'), { code: 'BROWSER_NOT_RUNNING' });
+      return { contacts: [structuredClone(contact)] };
+    };
+    f.browser.prepareChat = async options => {
+      assert.equal(options.startBackgroundBrowser, true);
+      await options.authorizePrepare();
+      return prepare(options);
+    };
+    await settle(coordinator);
+    assert.equal(f.calls.prepare, background ? 1 : 0);
+    assert.equal(f.service.state().running, background);
+    assert.equal(coordinator.state().lastErrorCode, background ? '' : 'BROWSER_NOT_RUNNING');
+    f.unchanged();
+  }
+});
+
+test('后台浏览器断开后原回复任务自动接回，保留消息水位和发送记录', async t => {
+  const f = await fixture(t), coordinator = f.create();
+  f.setPresent(true);
+  await settle(coordinator);
+  const runId = f.service.state().worker.runId;
+  const markBefore = JSON.parse(fs.readFileSync(f.service.watermarkFile)).contacts[contact.id];
+  let disconnected = true;
+  const read = f.browser.readConversation, prepare = f.browser.prepareChat;
+  f.browser.canStartBackgroundBrowser = () => true;
+  f.browser.readConversation = async (...args) => {
+    if (disconnected) throw Object.assign(new Error('专用浏览器未运行。'), { code: 'BROWSER_NOT_RUNNING' });
+    return read(...args);
+  };
+  f.browser.prepareChat = async options => {
+    assert.equal(options.startBackgroundBrowser, true);
+    await options.authorizePrepare();
+    disconnected = false;
+    return prepare(options);
+  };
+  await f.service.poll();
+  assert.equal(f.service.browserWaitError?.code, 'BROWSER_NOT_RUNNING');
+  await settle(coordinator);
+  await f.service.poll();
+  const markAfter = JSON.parse(fs.readFileSync(f.service.watermarkFile)).contacts[contact.id];
+  assert.equal(f.service.state().worker.runId, runId);
+  assert.equal(f.calls.start, 1);
+  assert.equal(f.calls.prepare, 1);
+  assert.equal(f.service.browserWaitError, null);
+  assert.deepEqual(markAfter.seen, markBefore.seen);
+  assert.deepEqual(markAfter.unanswered, markBefore.unanswered);
+  f.unchanged();
+});
+
+test('消息轮询尚未运行时也能发现浏览器断线并恢复原回复任务', async t => {
+  const f = await fixture(t), coordinator = f.create();
+  f.setPresent(true);
+  await settle(coordinator);
+  const runId = f.service.state().worker.runId;
+  let disconnected = true;
+  const prepare = f.browser.prepareChat;
+  f.browser.canStartBackgroundBrowser = () => true;
+  f.browser.isDisconnected = () => disconnected;
+  f.browser.prepareChat = async options => {
+    await options.authorizePrepare();
+    assert.equal(options.startBackgroundBrowser, true);
+    disconnected = false;
+    return prepare(options);
+  };
+  assert.equal(f.service.browserWaitError, null);
+  await settle(coordinator);
+  assert.equal(f.calls.prepare, 1);
+  assert.equal(f.calls.start, 1);
+  assert.equal(f.service.state().worker.runId, runId);
+  f.unchanged();
+});
+
+test('页面跳转和列表重绘快速重试，持续变化或登录验证仍按正常间隔等待', async t => {
+  const f = await fixture(t);
+  const loading = new Error('page.evaluate: Execution context was destroyed, most likely because of a navigation');
+  const listChanged = Object.assign(new Error('会话列表正在更新。'), { code: 'CHAT_CONTACT_LIST_CHANGED' });
+  const login = Object.assign(new Error('需要登录或验证。'), { code: 'CHAT_LOGIN_REQUIRED' });
+  const failures = [listChanged, loading, listChanged, login];
+  const coordinator = f.create(undefined, {
+    startChat: async () => {
+      if (f.calls.prepare) throw failures.shift();
+      throw Object.assign(new Error('消息页未打开。'), { code: 'CHAT_PAGE_NOT_OPEN' });
+    },
+  });
+  const prepare = f.browser.prepareChat;
+  f.browser.prepareChat = async options => {
+    await prepare(options);
+    throw loading;
+  };
+  const checkInterval = async (code, expectedMs) => {
+    const before = Date.now();
+    await settle(coordinator);
+    const state = coordinator.state(), retry = Date.parse(state.nextRetryAt);
+    assert.equal(state.lastErrorCode, code);
+    assert.ok(retry >= before + expectedMs && retry <= Date.now() + expectedMs);
+    coordinator.deferUntil = 0;
+  };
+  await checkInterval('CHAT_PAGE_LOADING', 1_500);
+  await checkInterval('CHAT_CONTACT_LIST_CHANGED', 1_500);
+  await checkInterval('CHAT_PAGE_LOADING', 60_000);
+  await checkInterval('CHAT_CONTACT_LIST_CHANGED', 60_000);
+  await checkInterval('CHAT_LOGIN_REQUIRED', 60_000);
+  assert.equal(f.calls.prepare, 1);
+  f.unchanged();
+});
+
+test('自动连接遇到平台验证时保留需要验证状态，等待期间不重复准备', async t => {
+  const f = await fixture(t), coordinator = f.create();
+  f.browser.canStartBackgroundBrowser = () => true;
+  f.browser.listContacts = async () => { throw Object.assign(new Error('专用浏览器未运行。'), { code: 'BROWSER_NOT_RUNNING' }); };
+  f.browser.prepareChat = async options => {
+    assert.equal(options.startBackgroundBrowser, true);
+    await options.authorizePrepare();
+    f.calls.prepare++;
+    return { prepared: false, verificationRequired: true };
+  };
+  await settle(coordinator);
+  assert.equal(coordinator.state().lastErrorCode, 'CHAT_LOGIN_REQUIRED');
+  await coordinator.reconcile();
+  assert.equal(f.calls.prepare, 1);
+  assert.equal(f.service.state().running, false);
+  f.unchanged();
+});
+
+test('切换浏览器后先准备消息入口，再用原消息水位恢复已启动的回复', async t => {
+  const f = await fixture(t), coordinator = f.create();
+  f.setPresent(true);
+  await settle(coordinator);
+  const before = fs.readFileSync(f.service.watermarkFile, 'utf8');
+  const prepare = f.browser.prepareChat;
+  f.browser.prepareChat = async options => {
+    assert.equal(options.allowForegroundBrowsing, true);
+    assert.equal(f.service.state().running, false);
+    await options.authorizePrepare();
+    return prepare(options);
+  };
+  const result = await coordinator.withChatPaused(async (chat, prepareReply) => {
+    assert.equal(chat.state().running, false);
+    f.setPresent(false);
+    return prepareReply(AbortSignal.timeout(5000));
+  }, { reason: 'browser-mode-change', resume: 'preserve', prepareForBrowser: true });
+  assert.deepEqual(result, { status: 'ready' });
+  assert.equal(coordinator.state().replyRunning, true);
+  assert.equal(f.calls.start, 1);
+  assert.equal(f.calls.prepare, 1);
+  assert.equal(fs.readFileSync(f.service.watermarkFile, 'utf8'), before);
+  assert.equal(fs.existsSync(coordinator.prepareBudgetFile), false);
+  f.unchanged();
+});
+
+test('切换成功但抖音要求验证时，回复仍等待且保留原消息水位', async t => {
+  const f = await fixture(t), coordinator = f.create();
+  f.setPresent(true);
+  await settle(coordinator);
+  const before = fs.readFileSync(f.service.watermarkFile, 'utf8');
+  f.browser.prepareChat = async ({ authorizePrepare }) => {
+    await authorizePrepare();
+    return { prepared: false, verificationRequired: true };
+  };
+  const result = await coordinator.withChatPaused((_chat, prepareReply) => prepareReply(AbortSignal.timeout(5000)),
+    { reason: 'browser-mode-change', resume: 'preserve', prepareForBrowser: true });
+  assert.deepEqual(result, { status: 'waiting', code: 'CHAT_LOGIN_REQUIRED' });
+  assert.equal(coordinator.state().replyRunning, false);
+  assert.equal(coordinator.state().lastErrorCode, 'CHAT_LOGIN_REQUIRED');
+  assert.equal(fs.readFileSync(f.service.watermarkFile, 'utf8'), before);
+  f.unchanged();
 });
 
 test('API和DSH竞争只由共享准备租约的拥有者准备，另入口看到真实worker后自然恢复', async t => {
@@ -153,9 +328,50 @@ test('真实Edge合成缺页：自动准备仅创建一个受管聊天页，真�
   const before = f.navigations(); for (let i = 0; i < 12; i++) await coordinator.reconcile(); assert.equal(f.navigations(), before); assert.equal(f.context.pages().length, 2); assert.equal(await f.sends(), 0);
 });
 
+test('可见会话行重绘时重读当前列表，旧快照不覆盖新行身份', { timeout: 30_000 }, async t => {
+  const f = await edgeFixture(t);
+  const evaluate = f.existing.evaluate.bind(f.existing);
+  await evaluate(() => { document.querySelector('[data-e2e="im-dialog"]').hidden = false; });
+  let attempts = 0;
+  f.existing.evaluate = async (fn, args) => {
+    if (Array.isArray(args) && args[0]?.nativeId && ++attempts === 1) {
+      await evaluate(() => {
+        const row = document.querySelector('[data-e2e="conversation-item"]');
+        row.setAttribute('data-conversation-id', 'synthetic-redrawn');
+        row.querySelector('[data-e2e="conversation-name"]').textContent = '重绘后的会话';
+      });
+    }
+    return evaluate(fn, args);
+  };
+  const list = await f.chat.contactList(f.existing);
+  assert.equal(attempts, 2);
+  assert.equal(list.contacts.length, 1);
+  assert.equal(list.contacts[0].displayName, '重绘后的会话');
+  assert.equal(await f.existing.locator('[data-e2e="conversation-item"]').getAttribute('data-deepseek-chat-id'), list.contacts[0].id);
+  assert.equal(await f.sends(), 0);
+});
+
 test('真实Edge合成前台：建页前停止，不强制清焦点或改变窗口状态', { timeout: 30_000 }, async t => {
-  const f = await edgeFixture(t, { foreground: true }); await f.existing.bringToFront(); assert.equal(await f.chat.isForeground(f.existing), true);
+  const f = await edgeFixture(t, { foreground: true }); f.controller.executionMode=async()=> 'visible'; await f.existing.bringToFront(); assert.equal(await f.chat.isForeground(f.existing), true);
   const before = f.navigations(); await assert.rejects(f.chat.prepareChat({ automatic: true, authorizePrepare: async () => true }), error => error.code === 'CHAT_FOREGROUND'); assert.equal(f.context.pages().length, 1); assert.equal(f.navigations(), before); assert.equal(await f.sends(), 0);
+});
+
+test('切回有窗口时可在受管作品页后恢复消息入口，前台消息页依然受保护', { timeout: 30_000 }, async t => {
+  const f = await edgeFixture(t, { foreground: true });
+  await installNativeFocusReset(f.context);
+  f.controller.executionMode = async () => 'visible';
+  await f.existing.evaluate(() => { window.name = 'deepseek-douyin-launcher'; });
+  await f.existing.bringToFront();
+  const options = { automatic: true, authorizePrepare: async () => true, allowForegroundBrowsing: true };
+  assert.equal((await f.chat.prepareChat(options)).prepared, true);
+  assert.equal(f.context.pages().length, 2);
+  assert.equal(await f.chat.isForeground(f.existing), true);
+  const messagePage = f.controller.page;
+  assert.equal(await messagePage.evaluate(() => window.name), 'deepseek-douyin-api-chat');
+  await messagePage.bringToFront();
+  await assert.rejects(f.chat.prepareChat(options), error => error.code === 'CHAT_FOREGROUND');
+  assert.equal(f.context.pages().length, 2);
+  assert.equal(await f.sends(), 0);
 });
 
 test('真实Edge合成已有草稿：不导航、不改草稿、不多建页', { timeout: 30_000 }, async t => {
@@ -163,11 +379,55 @@ test('真实Edge合成已有草稿：不导航、不改草稿、不多建页', {
   const before = f.navigations(); await assert.rejects(f.chat.prepareChat({ automatic: true, authorizePrepare: async () => true }), error => error.code === 'CHAT_DRAFT_PRESENT'); assert.equal(f.context.pages().length, 1); assert.equal(f.navigations(), before); assert.equal(await f.existing.locator('[contenteditable]').innerText(), '合成草稿必须保留'); assert.equal(await f.sends(), 0);
 });
 
+test('真实Edge空编辑器占位符不拦截准备，附件草稿仍受保护', { timeout: 30_000 }, async t => {
+  const f = await edgeFixture(t);
+  await f.existing.evaluate(() => {
+    window.name = 'deepseek-douyin-api-chat';
+    document.querySelector('[data-e2e="im-dialog"]').hidden = false;
+    document.querySelector('[contenteditable]').textContent = '\uFEFF\u200B';
+  });
+  const before = f.navigations();
+  const options = { automatic: true, authorizePrepare: async () => true };
+  assert.equal((await f.chat.prepareChat(options)).prepared, true);
+  assert.equal(await f.existing.locator('[contenteditable]').innerText(), '\uFEFF\u200B');
+  await f.existing.locator('[contenteditable]').evaluate(editor => {
+    editor.appendChild(document.createElement('img'));
+  });
+  await assert.rejects(f.chat.prepareChat(options), error => error.code === 'CHAT_DRAFT_PRESENT');
+  assert.equal(await f.existing.locator('[contenteditable] img').count(), 1);
+  assert.equal(f.context.pages().length, 1);
+  assert.equal(f.navigations(), before);
+  assert.equal(await f.sends(), 0);
+});
+
 test('真实Edge合成登录与验证码：已有受管页发现阻断即停止，不另建页', { timeout: 30_000 }, async t => {
   for (const html of ['<div data-e2e="login-panel">扫码登录</div>', '<div id="captcha_container">验证码</div>']) {
     const f = await edgeFixture(t); await f.existing.evaluate(value => document.body.insertAdjacentHTML('afterbegin', value), html);
     const before = f.navigations(); await assert.rejects(f.chat.prepareChat({ automatic: true, authorizePrepare: async () => true }), error => error.code === 'CHAT_LOGIN_REQUIRED'); assert.equal(f.context.pages().length, 1); assert.equal(f.navigations(), before); assert.equal(await f.sends(), 0);
   }
+});
+
+test('聊天页首次导航超时但已进入验证码中间页，保留标签并等待验证', { timeout: 30_000 }, async t => {
+  const f = await edgeFixture(t);
+  await f.existing.evaluate(() => { window.name = ''; });
+  await f.existing.goto('about:blank');
+  await f.context.route('https://www.douyin.com/?recommend=1&from_nav=1', route => route.fulfill({
+    contentType: 'text/html; charset=utf-8', body: '<title>验证码中间页</title><main></main>',
+  }));
+  const goto = f.existing.goto.bind(f.existing);
+  f.existing.goto = async (...args) => {
+    await goto(...args);
+    throw Object.assign(new Error('合成导航等待超时'), { name: 'TimeoutError' });
+  };
+  const page = await f.controller.connect(AbortSignal.timeout(8000));
+  assert.equal(page, f.existing);
+  assert.equal(await page.evaluate(() => window.name), 'deepseek-douyin-api-chat');
+  const prepare = () => f.chat.prepareChat({ automatic: true, authorizePrepare: async () => true });
+  await assert.rejects(prepare(), error => error.code === 'CHAT_LOGIN_REQUIRED');
+  await page.evaluate(() => { window.name = ''; });
+  await assert.rejects(prepare(), error => error.code === 'CHAT_LOGIN_REQUIRED');
+  assert.equal(f.context.pages().length, 1);
+  assert.equal(await f.sends(), 0);
 });
 
 test('真实Edge合成双入口竞争：共享准备到worker就绪的租约只产生一个受管聊天页', { timeout: 30_000 }, async t => {
@@ -222,20 +482,23 @@ function disconnectedHostProbe(t, phase, automatic = true) {
     import fs from 'node:fs'; import path from 'node:path'; import os from 'node:os'; import assert from 'node:assert/strict'; import childProcess from 'node:child_process'; import {syncBuiltinESMExports} from 'node:module';
     const root=${JSON.stringify(directory)}, phase=${JSON.stringify(phase)}, automatic=${automatic};
     assert.equal(path.resolve(os.homedir()),path.resolve(root),'宿主探针必须使用临时home。');
-    let starts=0,requests=0;
-    childProcess.spawn=()=>{starts++;throw Object.assign(new Error('合成宿主启动边界已拦截'),{code:'SYNTHETIC_HOST_START_INTERCEPTED'});}; syncBuiltinESMExports();
-    globalThis.fetch=async()=>{requests++;return {ok:false};};
+    const startBackgroundBrowser = phase.startsWith('background');
+    let starts=0,requests=0,hostMode=null;
+    childProcess.spawn=(_executable,args)=>{starts++;hostMode=args.at(-1);throw Object.assign(new Error('合成宿主启动边界已拦截'),{code:'SYNTHETIC_HOST_START_INTERCEPTED'});}; syncBuiltinESMExports();
+    globalThis.fetch=async()=>{requests++;if(phase==='background-mode-changed')controller.getBrowserMode().configure({mode:'visible'},{explicit:true});return {ok:false};};
     const {BrowserController}=await import(${JSON.stringify(import.meta.resolve('../core.mjs'))});
     const {ChatBrowser}=await import(${JSON.stringify(import.meta.resolve('../chat-browser.mjs'))});
     const controller=new BrowserController({source:'api-chat'});
     assert.ok(path.resolve(controller.controlDirectory).startsWith(path.resolve(root)+path.sep),'不能使用真实浏览器控制目录。');
     const connected={isConnected:()=>true,contexts:()=>[{pages:()=>[]}],close:async()=>{}}, closed={isConnected:()=>false,close:async()=>{}};
-    controller.browser=automatic?connected:closed;let checked=0;
-    controller.connectExistingBrowser=async()=>{if(++checked===1&&automatic){if(phase==='after-preflight')queueMicrotask(()=>{controller.browser=closed;});return connected;}return null;};
+    if(startBackgroundBrowser&&phase!=='background-disabled')controller.getBrowserMode().configure({mode:'background'},{explicit:true});
+    controller.browser=automatic&&!startBackgroundBrowser?connected:closed;let checked=0;
+    controller.connectExistingBrowser=async()=>{if(++checked===1&&automatic&&!startBackgroundBrowser){if(phase==='after-preflight')queueMicrotask(()=>{controller.browser=closed;});return connected;}return null;};
     if(phase==='before-create'){const connect=controller.connect.bind(controller);controller.connect=async(signal,options)=>{try{return await connect(signal,options);}catch(error){if(error.code==='CHAT_PAGE_NOT_OPEN'&&options.create===false)controller.browser=closed;throw error;}};}
     const chat=new ChatBrowser({controller}); let code='';
-    try{await chat.prepareChat({automatic,authorizePrepare:async()=>true});}catch(error){code=error.code||error.message;}
-    console.log(JSON.stringify({starts,requests,checked,code,controlInTemporaryHome:true}));
+    const authorizePrepare=async()=>{if(phase==='background-revoked'&&requests>0)throw Object.assign(new Error('合成许可已撤回'),{code:'CHAT_PREPARE_REVOKED'});};
+    try{await chat.prepareChat({automatic,startBackgroundBrowser,authorizePrepare});}catch(error){code=error.code||error.message;}
+    console.log(JSON.stringify({starts,requests,checked,code,hostMode,controlInTemporaryHome:true}));
   `;
   const imports = []; for (let i = 0; i < process.execArgv.length; i++) if (process.execArgv[i] === '--import') imports.push('--import', process.execArgv[++i]);
   const result = spawnSync(process.execPath, [...imports, '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, USERPROFILE: directory, HOME: directory, DOUYIN_RUNTIME_LOCATION_FILE: path.join(directory, 'absent-runtime-location.json'), DOUYIN_STATE_DIR: path.join(directory, 'state'), DEEPSEEK_SHARED_MEMORY_DB: path.join(directory, 'memory', 'absent.sqlite') } });
@@ -252,4 +515,15 @@ test('自动准备第一次无页检查后浏览器退出：第二次withPage也
 
 test('人工准备仍保留启动兼容，启动边界由临时子进程拦截而不真正启动', t => {
   const result = disconnectedHostProbe(t, 'manual', false); assert.equal(result.starts, 1); assert.equal(result.requests, 1); assert.equal(result.code, 'SYNTHETIC_HOST_START_INTERCEPTED'); assert.equal(result.controlInTemporaryHome, true);
+});
+
+test('后台自动准备只启动无窗口宿主，设置变化或撤权时不启动', t => {
+  const permitted = disconnectedHostProbe(t, 'background');
+  assert.equal(permitted.starts, 1); assert.equal(permitted.hostMode, 'background'); assert.equal(permitted.code, 'SYNTHETIC_HOST_START_INTERCEPTED');
+  const disabled = disconnectedHostProbe(t, 'background-disabled');
+  assert.equal(disabled.starts, 0); assert.equal(disabled.requests, 0); assert.equal(disabled.code, 'BROWSER_NOT_RUNNING');
+  const changed = disconnectedHostProbe(t, 'background-mode-changed');
+  assert.equal(changed.starts, 0); assert.equal(changed.code, 'BROWSER_NOT_RUNNING');
+  const revoked = disconnectedHostProbe(t, 'background-revoked');
+  assert.equal(revoked.starts, 0); assert.equal(revoked.code, 'CHAT_PREPARE_REVOKED');
 });

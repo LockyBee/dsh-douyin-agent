@@ -45,6 +45,7 @@
     }
   ],
   "win": {
+    "electronLanguages": ["en-US", "zh-CN", "zh-TW"],
     "target": [
       "portable"
     ],

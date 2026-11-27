@@ -93,6 +93,32 @@ test('网页未提供关注关系时，必须本人明确核对后才能保存�
   assert.equal(result.running, false); assert.equal(f.inputs.length, 0); assert.equal(f.reads.length, 0);
 });
 
+test('关注关系未查询的个人会话以稳定身份授权，核对前及身份丢失后拒绝保存', async t => {
+  const f = fixture(t, [contact('合成未查询关注关系', { relationshipStatus: 'unverified' })]);
+  const [current] = f.contacts;
+  const { id } = current;
+  assert.equal(canAuthorizeConversation(current), true);
+  const list = await f.service.listContacts();
+  assert.equal(list.contacts[0].manualAuthorizationEligible, true);
+  assert.equal(list.contacts[0].followed, null);
+  await assert.rejects(f.service.configure({ recipientIds: [id] }), /核对/);
+  const saved = await f.service.configure({ recipientIds: [id], allowConversationOnly: true });
+  assert.equal(saved.policy.allowlist[0].authorizationKind, 'existing-conversation');
+  assert.equal(saved.policy.allowlist[0].followed, null);
+  assert.equal(matchesAuthorizedContact(saved.policy.allowlist[0], current), true);
+  assert.equal(matchesAuthorizedContact(saved.policy.allowlist[0], { ...current, identityBinding: `binding:${hash('合成不同绑定')}` }), false);
+  assert.equal(canAuthorizeConversation({ ...current, followed: false }), false);
+  await f.service.start({ schedule: false });
+  assert.equal(f.service.state().contacts[0].status, 'ready');
+  f.service.stop();
+  const policy = fs.readFileSync(f.service.policyFile, 'utf8');
+  for (const key of ['identityVersion', 'identityKind', 'identityHash']) delete current[key];
+  assert.equal((await f.service.listContacts()).contacts[0].manualAuthorizationEligible, false);
+  await assert.rejects(f.service.configure({ recipientIds: [id], allowConversationOnly: true }), /核对/);
+  assert.equal(fs.readFileSync(f.service.policyFile, 'utf8'), policy);
+  assert.deepEqual(f.sent, []);
+});
+
 test('群聊单独取得明确授权，群类型或身份未知的会话始终拒绝', async t => {
   const f = fixture(t, [contact('合成已关注群', { isGroup: true, followed: true })]);
   await assert.rejects(f.service.configure({ recipientIds: [f.contacts[0].id] }), /核对/);
@@ -169,7 +195,12 @@ test('生成期间个人会话变为群聊时不发送，避免绕过群触发�
 
 test('已生成回复但进入共同发送锁后绑定变动，最终核对仍拒绝发送', async t => {
   const f = fixture(t); await start(f); const id = f.contacts[0].id, original = f.browser.readConversation; let reads = 0;
-  f.browser.readConversation = async (...args) => { const value = await original(...args); if (++reads === 3) value.contact.identityBinding = `binding:${hash('合成最后发送关口身份变化')}`; return value; };
+  f.browser.readConversation = async (...args) => {
+    const value = await original(...args);
+    reads++;
+    if (fs.existsSync(f.service.outbound.guardFile)) value.contact.identityBinding = `binding:${hash('合成最后发送关口身份变化')}`;
+    return value;
+  };
   f.messages.get(id).push(incoming('before-final-check', '需要回复的新问题')); await f.service.poll();
-  assert.equal(reads, 3); assert.equal(f.inputs.length, 1); assert.equal(f.sent.length, 0); assert.equal(f.service.state().contacts[0].status, 'paused');
+  assert.equal(reads, 2); assert.equal(f.inputs.length, 1); assert.equal(f.sent.length, 0); assert.equal(f.service.state().contacts[0].status, 'paused');
 });

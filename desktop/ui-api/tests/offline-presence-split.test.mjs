@@ -31,10 +31,12 @@ test('软件顶栏分开显示观看与回复，观看中不再只剩离线', as
   const page = await browser.newPage(); await page.goto(`http://127.0.0.1:${server.address().port}`);
   const button = page.getByLabel('好友互动状态', { exact: true });
   await button.filter({ hasText: '回复已关闭' }).waitFor();
-  assert.match(await button.innerText(), /○ 回复已关闭/);
+  assert.equal(await button.innerText(), '回复已关闭');
+  assert.equal(await button.getAttribute('data-state'), 'offline');
   assert.match(await page.getByLabel('自主观看状态').innerText(), /正在挑选视频/);
   assert.equal(await page.getByLabel('待核对事项').count(), 0);
   assert.equal(await page.getByRole('button', { name: '查看遗留待处理消息', exact: true }).count(), 0);
   assert.equal(await page.getByRole('button', { name: '查看好友互动状态', exact: true }).count(), 0);
-  await page.getByText('好友互动已关闭。', { exact: true }).waitFor();
+  assert.equal(await page.getByLabel('好友互动状态').getAttribute('title'), '好友互动已关闭。');
+  assert.equal(await page.getByText('好友互动已关闭。', { exact: true }).count(), 0);
 });

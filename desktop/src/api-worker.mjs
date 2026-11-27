@@ -14,6 +14,7 @@ export function runApiWorker() {
   let server;
   let config;
   let api;
+  let domainRoot;
   let starting;
   let stopping;
   let queue = Promise.resolve();
@@ -40,7 +41,7 @@ export function runApiWorker() {
   const start = async options => {
     if (server || starting || stopping) throw new Error('独立后台已经启动或正在退出。');
     if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => !['config', 'htmlFile', 'staticRoot', 'domainRoot'].includes(key))) throw new Error('独立后台启动参数无效。');
-    const domainRoot = absolute(options.domainRoot ?? DEVELOPMENT_DOMAIN_ROOT, '领域源码目录');
+    domainRoot = absolute(options.domainRoot ?? DEVELOPMENT_DOMAIN_ROOT, '领域源码目录');
     const htmlFile = absolute(options.htmlFile, '软件首页');
     const staticRoot = absolute(options.staticRoot, '软件资源目录');
     const [actualHtml, actualStaticRoot] = await Promise.all([fs.realpath(htmlFile), fs.realpath(staticRoot)]);
@@ -74,6 +75,10 @@ export function runApiWorker() {
       } else if (type === 'get-config') {
         if (!server || stopping) throw new Error('独立后台尚未就绪。');
         result = server.apiConfig();
+      } else if (type === 'browser-verification') {
+        if (!server || stopping) throw new Error('独立后台尚未就绪。');
+        const { inspectDedicatedVerification } = await import(pathToFileURL(path.join(domainRoot, 'core.mjs')).href);
+        result = await inspectDedicatedVerification(message.binding, { signal: AbortSignal.timeout(15000) });
       } else if (type === 'stop') {
         await stop();
         result = { stopped: true };

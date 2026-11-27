@@ -31,9 +31,15 @@ async function runtimeDigest(directory, prefix = '', hash = createHash('sha256')
   return prefix ? null : hash.digest('hex');
 }
 assert.equal(packaged.version, version); assert.equal(manifest.productVersion, version);
+const buildConfig = JSON.parse(await fs.readFile(path.join(desktop, 'electron-builder.json'), 'utf8'));
+const locales = buildConfig.win?.electronLanguages;
+if (Array.isArray(locales)) {
+  const packagedLocales = (await fs.readdir(path.join(unpacked, 'locales'))).filter(name => name.endsWith('.pak')).sort();
+  assert.deepEqual(packagedLocales, locales.map(name => name + '.pak').sort(), 'Windows 包应仅带配置的 Electron 语言资源。');
+}
 assert.equal(await runtimeDigest(path.join(resources, 'api-runtime')), manifest.runtimeId);
 assert.equal(JSON.parse(await fs.readFile(path.join(resources, 'api-runtime/public/build-info.json'), 'utf8')).version, version);
-for (const name of ['main.mjs', 'api-process.mjs', 'prepare-api-runtime.mjs', 'media-key-store.mjs', 'startup-navigation.mjs', 'preload.cjs', 'update-service.mjs', 'update-launcher.mjs']) {
+for (const name of ['main.mjs', 'api-process.mjs', 'prepare-api-runtime.mjs', 'media-key-store.mjs', 'startup-navigation.mjs', 'preload.cjs', 'update-service.mjs', 'update-launcher.mjs', 'browser-verification.mjs']) {
   const source = name === 'media-key-store.mjs' ? path.join(domain, 'media/key-store.mjs') : path.join(desktop, 'src', name);
   assert.equal(digest(asar.extractFile(archive, `app/${name}`)), digest(await fs.readFile(source)), name);
 }
@@ -62,6 +68,18 @@ Object.assign(env, { HOME: home, USERPROFILE: home, APPDATA: path.join(directory
 const child = spawn(executable, ['--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1'], { env, windowsHide: true, stdio: 'ignore' });
 const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', code => resolve(code)); });
 let browser, page, ready;
+async function requestAppQuit() {
+  const request = (async () => {
+    const session = await browser.newBrowserCDPSession();
+    try { await session.send('Browser.close'); }
+    catch (error) { if (browser.isConnected()) throw error; }
+    return exited;
+  })();
+  const timer = new AbortController();
+  try {
+    return await Promise.race([exited, request, delay(12_000, null, { signal: timer.signal }).then(() => { throw new Error('便携包未正常退出。'); })]);
+  } finally { timer.abort(); }
+}
 const readJson = async file => JSON.parse(await fs.readFile(file, 'utf8'));
 async function until(action, milliseconds = 60_000) {
   const end = Date.now() + milliseconds;
@@ -87,9 +105,17 @@ try {
     return route.continue();
   });
   await page.getByRole('heading', { name: '先连接你的 DeepSeek' }).waitFor();
+  const setup = page.getByRole('dialog');
+  assert.deepEqual(await page.evaluate(() => window.douyinDesktop.readBrowserVerificationStatus()), { status: 'browser-unavailable', required: false });
+  await setup.getByRole('button', { name: '辅助验证', exact: true }).click();
+  await setup.getByText('专用浏览器尚未连接。', { exact: true }).waitFor();
+  assert.equal(await setup.getByRole('button', { name: '检查验证', exact: true }).count(), 0);
+  await setup.locator('.verification-status').getByRole('button', { name: '打开抖音', exact: true }).waitFor();
+  assert.equal(await setup.getByRole('textbox', { name: 'API Key', exact: true }).inputValue(), '');
   await page.getByRole('textbox', { name: 'API Key', exact: true }).fill('synthetic-packaged-check-only');
   await page.getByRole('textbox', { name: 'API Key', exact: true }).press('Tab');
   await page.getByRole('dialog').waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: '辅助验证', exact: true }).waitFor();
   await page.getByText(`独立 API 版 · ${version}`, { exact: true }).waitFor();
   assert.deepEqual(await page.getByRole('navigation',{name:'主导航'}).getByRole('button').allTextContents(),['◌ 对话与视频','☷ 业务设置','◉ 自主观看记录']);
   await page.getByRole('img',{name:'大肥鱼图标',exact:true}).waitFor();
@@ -124,6 +150,17 @@ try {
   assert.equal(await page.getByRole('button',{name:'暂停观看',exact:true}).isDisabled(),true);
   assert.equal(await page.getByRole('switch', { name: '允许自动观看', exact: true }).getAttribute('aria-checked'), 'false');
   assert.equal(await page.getByRole('button', { name: /^保存/ }).count(), 0, '设置修改自动保存，不显示旧保存按钮');
+  const privateVideo = page.getByRole('combobox', { name: '私信分享视频时段', exact: true });
+  const beforePrivateVideo = await readStatus('/api/video/status');
+  assert.equal(await privateVideo.inputValue(), 'all-day');
+  assert.equal(beforePrivateVideo.privateVideoSchedule.mode, 'all-day');
+  await privateVideo.selectOption('follow-watch-hours');
+  await until(async () => (await readStatus('/api/video/status')).privateVideoSchedule.mode === 'follow-watch-hours');
+  const afterPrivateVideo = await readStatus('/api/video/status');
+  assert.deepEqual(afterPrivateVideo.policy, beforePrivateVideo.policy);
+  assert.deepEqual(afterPrivateVideo.daily, beforePrivateVideo.daily);
+  await privateVideo.selectOption('all-day');
+  await until(async () => (await readStatus('/api/video/status')).privateVideoSchedule.mode === 'all-day');
   await page.getByRole('combobox', { name: '观看方式', exact: true }).selectOption('topic');
   await page.getByRole('textbox', { name: '想看的主题', exact: true }).fill('合成打包主题');
   await until(async () => (await readStatus('/api/watch/options')).policy.topics.includes('合成打包主题'));
@@ -194,7 +231,7 @@ try {
   await page.unroute('**/api/chat/**', syntheticChatRoute);
   const checks = await page.evaluate(async () => {
     const boot = await (await fetch('/api/bootstrap')).json();
-    const routes = ['/api/state', '/api/video/status', '/api/watch/state', '/api/chat/state', '/api/share/state', '/api/spark/state', '/api/comments/state', '/api/mode/state', '/api/persona', '/api/media/state', '/api/reports/state', '/api/usage', '/api/watch/options', '/api/watch/schedule', '/api/interactions/state'];
+    const routes = ['/api/state', '/api/video/status', '/api/watch/state', '/api/chat/state', '/api/share/state', '/api/spark/state', '/api/comments/state', '/api/mode/state', '/api/browser/mode', '/api/persona', '/api/media/state', '/api/reports/state', '/api/usage', '/api/watch/options', '/api/watch/schedule', '/api/interactions/state'];
     const status = {};
     for (const route of routes) {
       const response = await fetch(route, { headers: { 'x-session-token': boot.token } });
@@ -206,6 +243,7 @@ try {
     return { status, cleared: !settings.configured };
   });
   assert.equal(checks.cleared, true); assert.equal(checks.status['/api/comments/state'].enabled, false); assert.equal(checks.status['/api/mode/state'].silent, false); assert.equal(checks.status['/api/chat/state'].running, false); assert.equal(checks.status['/api/spark/state'].running, false); assert.equal(checks.status['/api/media/state'].enabled, false); assert.equal(checks.status['/api/watch/state'].running, false);
+  assert.equal(checks.status['/api/browser/mode'].mode, 'visible');
   assert.deepEqual(errors, []);
   assert.equal(checks.status['/api/video/status'].policy.dailyMinutes, null);
   assert.equal(checks.status['/api/video/status'].policy.dailyRequests, 66);
@@ -220,14 +258,13 @@ try {
   const saved = await readJson(path.join(userData, 'api-settings.json'));
   assert.equal('encryptedApiKey' in saved, false); assert.equal(JSON.stringify(saved).includes('synthetic-packaged-check-only'), false);
   const receipt = { version, executable: path.basename(executable), bytes: bytes.length, sha256, archiveSourcesMatch: true, iconsMatch:true, domainFilesMatch: DOMAIN_FILES.length, runtimeId: manifest.runtimeId, startup: { ready: true, packaged: true, visible: false, isolated: true, version: ready.version }, renderer: { loaded: true, privateKeyIpc: true, apiKeyBlurAutoSaved:true, syntheticKeyCleared: true, dailyReportRendered: true, navDeduplicated:true, brandLoaded:true, updateIpc:true, dailyAdvancedAutoSaved:true, unlimitedDailyDurationEditable:true, topicAutoSaved:true, friendMasterDefaultEnabled:true, friendMasterToggledWithoutRecipients:true, noSparkEntry:true, noSaveButtons:true, syntheticGroupSelectionAutoSaved:true, manualUnansweredEntryRemoved:true, groupPreviewCaptured, pageErrors: errors.length }, readOnlyEndpoints: Object.keys(checks.status).length, automatedWorkersStarted: false, realModelCalled: false, realMessageSent:false, smokeDirectory: directory };
-  await page.evaluate(() => window.close());
-  assert.equal(await Promise.race([exited, delay(12_000, null, { ref: false }).then(() => { throw new Error('便携包未正常退出。'); })]), 0);
+  assert.equal(await requestAppQuit(), 0);
   await until(async () => { try { await fetch(ready.origin, { signal: AbortSignal.timeout(1000) }); return false; } catch { return true; } }, 12_000);
   receipt.exit = { graceful: true, backendPortReleased: true };
   await fs.writeFile(path.join(releaseDirectory, `verification-${version}.json`), JSON.stringify(receipt, null, 2) + '\n');
   console.log(JSON.stringify(receipt, null, 2));
 } finally {
-  if (page && !page.isClosed()) await page.evaluate(() => window.close()).catch(() => {});
+  if (browser?.isConnected() && child.exitCode === null) await requestAppQuit().catch(() => {});
   await browser?.close().catch(() => {});
   if (child.exitCode === null) child.kill();
 }

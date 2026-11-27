@@ -98,7 +98,7 @@ test('旧身份维护待答不能借升级恢复，只保留自动队列并处�
   const f = fixture(t, stable(), { blockModel: true }); await start(f); f.messages.push(incoming('known-new', '合成旧身份已合格消息'));
   const polling = f.service.poll(); await f.entered.promise; f.service.stop({ preservePending: true, reason: 'settings-update' }); await polling;
   const policy = f.disk(); policy.allowlist = policy.allowlist.map(legacy); fs.writeFileSync(f.service.policyFile, JSON.stringify(policy)); const marks = JSON.parse(fs.readFileSync(f.service.watermarkFile, 'utf8')); marks.contacts[f.contact.id].pending.recoveryEvidence.contact = legacy(marks.contacts[f.contact.id].pending.recoveryEvidence.contact); fs.writeFileSync(f.service.watermarkFile, JSON.stringify(marks)); f.messages.at(-1).eligibleForReply = false;
-  await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.sent.length, 0); assert.equal(f.service.state().recovery.autoPendingCount,1); assert.equal(f.service.state().recovery.recoverableCount, 0);
+  await f.service.start({ schedule: false }); await f.service.poll(); assert.equal(f.sent.length, 0); assert.equal(f.service.state().recovery.waitingEvidenceCount,1); assert.equal(f.service.state().recovery.autoPendingCount,0); assert.equal(f.service.state().recovery.recoverableCount, 0);
   f.messages.push(incoming('later-new', '合成新身份后续新消息')); await f.service.poll(); assert.equal(f.sent.length, 1);
 });
 
@@ -107,5 +107,5 @@ test('运行中的旧身份发送等待队列升级后也只能等待可靠补�
   const guard = path.join(f.directory, 'outbound-send.guard'); fs.writeFileSync(guard, JSON.stringify({ pid: process.pid, token: '合成忙锁' })); f.messages.push(incoming('waiting', '合成旧身份待发'));
   await f.service.poll(); assert.equal(f.service.state().contacts[0].pending.phase, 'outbound-wait'); fs.unlinkSync(guard);
   f.service.policy.allowlist = f.service.policy.allowlist.map(legacy); fs.writeFileSync(f.service.policyFile, JSON.stringify(f.service.policy)); f.service.watermarks.contacts[f.contact.id].pending.recoveryEvidence.contact = legacy(f.service.watermarks.contacts[f.contact.id].pending.recoveryEvidence.contact); f.service.persist();
-  await f.service.poll(); assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().recovery.autoPendingCount,1); assert.equal(f.disk().allowlist[0].identityVersion, 2);
+  await f.service.poll(); assert.equal(f.sent.length, 0); assert.equal(f.inputs.length, 1); assert.equal(f.service.state().recovery.waitingEvidenceCount,1); assert.equal(f.service.state().recovery.autoPendingCount,0); assert.equal(f.disk().allowlist[0].identityVersion, 2);
 });

@@ -17,12 +17,12 @@ const capture = current => ({ state: current, frames: [{ mimeType: 'image/png', 
 
 function fixture(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'watch-share-behavior-')), stateDir = path.join(root, 'state'), source = options.source || 'api';
-  let now = Date.parse('2026-10-15T03:00:00Z'), id = ID, time = 0, playbackPaused = false;
+  let now = Date.parse('2026-10-15T03:00:00Z'), id = ID, time = 0, playbackPaused = false, ended = false;
   const nowFn = () => now;
   const personaMemory = new PersonaMemory({ memoryDir: path.join(root, 'memory'), legacyRoleCardFile: path.join(root, 'no-legacy.md'), clock: nowFn });
   const videoLimits = new VideoLimits({ stateDir, now: nowFn }); videoLimits.savePolicy({ windows: ['00:00-24:00'], sessionMinutes: 10 }, { explicit: true });
   fs.writeFileSync(path.join(stateDir, 'chat-policy.json'), JSON.stringify({ allowlist: [{ id: recipientId, name: '合成好友甲', followed: true, isGroup: false, verifiedAt: '2026-10-15T01:00:00Z', identityVersion: 2, identityKind: 'rendered-user', identityHash: 'a'.repeat(64), identityVerified: true, identityBinding: 'binding:' + 'b'.repeat(64) }] }));
-  const current = () => { const value = state(id, time, options.duration || 10); value.video.paused = playbackPaused; return value; }, actions = [], requests = [], sends = [], delays = [], events = [], queue = options.decisions || [decision('stop')];
+  const current = () => { const value = state(id, time, options.duration || 10); value.video.paused = playbackPaused; value.video.ended = ended; return value; }, actions = [], requests = [], sends = [], delays = [], events = [], queue = options.decisions || [decision('stop')];
   let pauses = 0, watch;
   const advancePlayback=ms=>{for(let remaining=ms;remaining>0;){const step=Math.min(1000,remaining);now+=step;time+=step/1000;videoLimits.notePlayback(source,current(),{ownerId:watch?.runId||source});remaining-=step;}};
   const controller = { execute: async (name, args, controls) => {
@@ -32,7 +32,7 @@ function fixture(t, options = {}) {
       if (options.coreViewing) { const evidenceId = personaMemory.recordObservation(observation, { source, kind: 'visual' }).evidenceId; observation.personaEvidenceId = evidenceId; observation.viewing = personaMemory.recordViewing({ evidenceId, from: before, to: observation.state, wallSeconds: 3, sampleId: `core-synthetic-${actions.length}` }, { source }); }
       return observation;
     }
-    if (name === 'douyin_next') { if (options.changed !== false) { id = String(BigInt(id) + 1n); time = 0; } return { changed: options.changed !== false, state: current() }; }
+    if (name === 'douyin_next') { if (options.changed !== false) { id = String(BigInt(id) + 1n); time = 0; playbackPaused = false; ended = false; } return { changed: options.changed !== false, state: current() }; }
     if (name === 'douyin_search') return { ...current(), searchResults: [{ index: 0 }] };
     if (name === 'douyin_open_video') { id = String(BigInt(id) + 2n); time = 0; return current(); }
     return current();
@@ -64,7 +64,8 @@ function fixture(t, options = {}) {
     delays.push(ms);
     signal.throwIfAborted(); if (options.cancelStay) { watch.cancel(); return; }
     const elapsed = options.delayMs ?? ms;if(options.liveAccounting)advancePlayback(elapsed);else{now += elapsed; time += options.stayProgress ?? elapsed / 1000;}
-    if (options.switchDuringStay) { id = String(BigInt(id) + 1n); time = 0; }
+    if (options.switchDuringStay && delays.length === 1) { id = String(BigInt(id) + 1n); time = 0; }
+    if (options.endDuringStay && delays.length === 1) { playbackPaused = true; ended = true; time = options.duration || 10; }
     if (options.pauseDuringStay) playbackPaused = true;
   } });
   t.after(async () => { await watch.close(); await shareService.close(); assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); fs.rmSync(root, { recursive: true, force: true }); });
@@ -161,6 +162,62 @@ test('成功卡片回读恰逢停止时仍保全已发生互动，不继续浏�
   assert.equal(f.personaMemory.snapshot().recentObservations[0].actions.share, 1); assert.equal(f.personaMemory.snapshot().interests[0].signal, 'like'); assert.equal(f.actions.some(row => row.name === 'douyin_next'), false);
 });
 
+test('多位分享对象中一位核对超时，结束该项、继续其余对象并拒绝迟到的提交', async t => {
+  const second = `conv:${'b'.repeat(64)}`, third = `conv:${'c'.repeat(64)}`;
+  const f = fixture(t, { sharing: true, decisions: [decision('share', { recipientIds: [recipientId, second, third, third] }), decision('stop')] });
+  const policyFile = path.join(f.stateDir, 'chat-policy.json');
+  const policy = JSON.parse(fs.readFileSync(policyFile));
+  for (const id of [second, third]) policy.allowlist.push({ ...policy.allowlist[0], id, identityHash: id.slice(5) });
+  fs.writeFileSync(policyFile, JSON.stringify(policy));
+  f.shareService.operationTimeoutMs = 300;
+  const sends = [];
+  let late;
+  f.shareService.send = async ({ recipientId: target, expectedVideoId: videoId }, { authorize }) => {
+    authorize({ phase: 'prepare', recipientId: target, videoId });
+    if (target === second) return new Promise(resolve => {
+      late = () => { assert.throws(() => authorize({ phase: 'before-click', recipientId: target, videoId }), /授权/); resolve(); };
+    });
+    authorize({ phase: 'before-click', recipientId: target, videoId });
+    const release = authorize.beginDispatch();
+    sends.push(target);
+    release();
+    return { confirmed: true, deliveryType: 'native-card', videoId, messageId: 'synthetic:' + target };
+  };
+  const status = await f.run();
+  late();
+  assert.equal(status.status, 'stopped');
+  assert.deepEqual(sends, [recipientId, third]);
+  const operations = f.shareService.ledger().operations;
+  assert.deepEqual(operations.map(row => row.status), ['confirmed', 'not-sent', 'confirmed']);
+  assert.equal(operations[1].failure.code, 'SHARE_PREPARATION_TIMEOUT');
+  assert.deepEqual(f.watch.shareProgress, { total: 3, currentIndex: 3, completed: 3, confirmed: 2, notSent: 1, skipped: 0, status: 'completed' });
+  assert.equal(fs.existsSync(f.shareService.files.send), false);
+});
+
+test('提交权限已使用后回执超时，观看继续并留存未确认项，不发后续卡片', async t => {
+  const second = `conv:${'b'.repeat(64)}`;
+  const f = fixture(t, { sharing: true, decisions: [decision('share', { recipientIds: [recipientId, second] }), decision('stop')] });
+  const policyFile = path.join(f.stateDir, 'chat-policy.json');
+  const policy = JSON.parse(fs.readFileSync(policyFile));
+  policy.allowlist.push({ ...policy.allowlist[0], id: second, identityHash: second.slice(5) });
+  fs.writeFileSync(policyFile, JSON.stringify(policy));
+  f.shareService.operationTimeoutMs = 300;
+  let submitted = 0;
+  f.shareService.send = async ({ recipientId, expectedVideoId: videoId }, { authorize }) => {
+    authorize({ phase: 'before-click', recipientId, videoId });
+    authorize.beginDispatch();
+    submitted++;
+    return new Promise(() => {});
+  };
+  const status = await f.run();
+  assert.equal(status.status, 'stopped');
+  assert.equal(submitted, 1);
+  assert.equal(f.watch.shareProgress.status, 'paused');
+  assert.equal(f.shareService.state().paused, true);
+  assert.deepEqual(f.shareService.ledger().operations.map(item => item.status), ['uncertain']);
+  for (const file of [f.shareService.files.send, f.shareService.files.control, path.join(f.stateDir, 'friend-interactions-control.guard')]) assert.equal(fs.existsSync(file), false);
+});
+
 test('真实进度与实际等待满足观看比例后才确认停留，不能拿请求10秒充当观看10秒', async t => {
   const short = fixture(t, { decisions: [decision('stay', { seconds: 10 }), decision('stop')], delayMs: 500, duration: 100 }); await short.run();
   const shortView = short.personaMemory.snapshot().recentObservations.find(row => row.videoId === ID); assert.equal(shortView.watchedSeconds, 6.5); assert.equal(shortView.actions.stay, 1); assert.equal(shortView.signal, 'neutral'); assert.equal(short.personaMemory.snapshot().interests[0].signal, 'neutral');
@@ -185,15 +242,55 @@ test('模型等待长于可信窗口后仍可换片，但不把漏记的长停�
   const records = JSON.parse(fs.readFileSync(short.personaMemory.stateFile)), waited = records.behavior.viewings.find(row => row.sampleId.includes(':model-wait:')); assert.equal(waited.wallSeconds, 2); assert.equal(waited.from.time, 3); assert.equal(waited.to.time, 5);
 });
 
-test('模型等待暂停或停留期间换片与暂停仍停止学习，到视频截止立即结束', async t => {
-  for (const options of [{ pauseDuringModel: true }, { switchDuringStay: true }, { pauseDuringStay: true }]) {
+test('播放器持续暂停给出继续观看入口，视频时段截止仍立即结束', async t => {
+  for (const options of [{ pauseDuringModel: true }, { pauseDuringStay: true }]) {
     const f = fixture(t, { ...options, modelDelayMs: 31000, duration: 100, decisions: [decision('stay', { seconds: 2 })] }); const result = await f.run();
     assert.equal(result.status, 'needs_user', JSON.stringify({ options, result })); assert.equal(f.personaMemory.snapshot().interests.length, 0); assert.equal(f.personaMemory.snapshot().recentObservations.find(row => row.videoId === ID).actions.stay, 0);
-    if (options.switchDuringModel || options.pauseDuringModel) assert.equal(f.delays.length, 0);
+    assert.deepEqual(result.recovery, { action: 'resume', message: '视频已暂停。' });
+    assert.equal(f.actions.some(item => item.name === 'douyin_play' || item.name === 'douyin_next'), false);
+    if (options.pauseDuringModel) assert.equal(f.delays.length, 0);
   }
   const expired = fixture(t, { liveAccounting:true,modelDelayMs: 31000, delayMs: 27000, duration: 1000, decisions: [decision('stay', { seconds: 2 })] });
   expired.videoLimits.savePolicy({ windows: ['00:00-24:00'], sessionMinutes: 1 }, { explicit: true }); const result = await expired.run();
   assert.equal(result.status, 'limited', JSON.stringify(result)); assert.equal(expired.requests.length, 1); assert.equal(expired.videoLimits.state().allowed, false); assert.equal(expired.personaMemory.snapshot().interests.length, 0); assert.equal(expired.personaMemory.snapshot().recentObservations[0].actions.stay, 0);
+});
+
+test('停留期间自动换片或播完后重新观察，不学习中断的停留', async t => {
+  for (const options of [{ switchDuringStay: true }, { endDuringStay: true }]) {
+    const f = fixture(t, { ...options, decisions: [decision('stay', { seconds: 2 }), decision('stop')] });
+    const result = await f.run();
+    assert.equal(result.status, 'stopped');
+    assert.equal(result.lastError, '');
+    assert.equal(f.requests.length, 2);
+    assert.ok(f.personaMemory.snapshot().recentObservations.some(row => row.videoId !== ID));
+    assert.equal(f.personaMemory.snapshot().recentObservations.find(row => row.videoId === ID).actions.stay, 0);
+    const inputs = f.actions.filter(item => item.name === 'douyin_next');
+    assert.deepEqual(inputs.map(item => item.controls.expectedVideoId), options.endDuringStay ? [ID] : []);
+  }
+});
+
+test('播完只尝试一次换片，真实验证和旧停留记录各有处理入口', async t => {
+  const f = fixture(t, { endDuringStay: true, changed: false, decisions: [decision('stay', { seconds: 2 })] });
+  const result = await f.run();
+  assert.equal(result.recovery.action, 'resume');
+  assert.equal(f.actions.filter(item => item.name === 'douyin_next').length, 1);
+  assert.equal(f.requests.length, 1);
+  const recorded = JSON.parse(fs.readFileSync(f.watch.files.state, 'utf8'));
+  recorded.lastError = '停留期间作品或播放状态已变化，已停止自主观看，没有学习本次停留。';
+  delete recorded.lastErrorCode;
+  fs.writeFileSync(f.watch.files.state, JSON.stringify(recorded));
+  assert.deepEqual(f.watch.state().recovery, { action: 'resume', message: '播放状态发生变化，观看已暂停。' });
+
+  const g = fixture(t, { switchDuringStay: true, decisions: [decision('stay', { seconds: 2 })] });
+  const execute = g.watch.controller.execute;
+  g.watch.controller.execute = async (name, ...args) => {
+    const output = await execute(name, ...args);
+    if (name === 'douyin_status' && g.delays.length) return { ...output, verificationRequired: true };
+    return output;
+  };
+  assert.equal((await g.run()).recovery.action, 'verify');
+  assert.equal(g.requests.length, 1);
+  assert.equal(g.actions.some(item => item.name === 'douyin_next' || item.name === 'douyin_play'), false);
 });
 
 test('模型等待A变B后丢弃所有非stop旧决策，只重新观察B，不学习或对B执行A动作', async t => {

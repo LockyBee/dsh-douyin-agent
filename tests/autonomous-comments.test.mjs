@@ -53,13 +53,13 @@ test('确认回执精确绑定作品和commentId，预留扣每日与单轮次�
   const f = fixture(t); f.service.configure({ enabled: true }, { explicit: true }); const input = f.evidence(), result = await f.service.comment(input, f.controls);
   assert.equal(result.confirmed, true); assert.equal(result.commentId, '90001'); assert.deepEqual(Object.keys(f.calls[0].input).sort(), ['expectedVideoId', 'text']); assert.equal(f.calls[0].controls.autonomousRunId, f.watchRunId);
   assert.equal(f.service.state().daily.attempts, 1); assert.equal(f.service.state().session.remaining, 0); assert.equal(f.service.context().enabled, false); assert.equal(f.service.ledger().operations[0].status, 'confirmed');
-  await assert.rejects(f.service.comment(f.evidence('67890'), f.controls), /次数/); assert.equal(fs.existsSync(f.service.files.send), false);
+  await assert.rejects(f.service.comment(f.evidence('67890', '慢动作里水珠散开的过程拍得很清楚。'), f.controls), /次数/); assert.equal(fs.existsSync(f.service.files.send), false);
 });
 test('停启同一轮不重置次数，新轮只重置单轮额度，跨日也不重复旧作品', async t => {
   const f = fixture(t); f.service.configure({ enabled: true, dailyLimit: 3, perSessionLimit: 1 }, { explicit: true }); const first = f.evidence(); await f.service.comment(first, f.controls);
-  f.lock(); await assert.rejects(f.service.comment(f.evidence('67890'), f.controls), /次数/);
+  f.lock(); await assert.rejects(f.service.comment(f.evidence('67890', '慢动作里水珠散开的过程拍得很清楚。'), f.controls), /次数/);
   f.videoLimits.endSession({explicit:true}); f.videoLimits.markSession('api', { explicit: true }); f.lock(); assert.equal(f.service.state().session.remaining, 1); await assert.rejects(f.service.comment(first, f.controls), /重复/);
-  await f.service.comment(f.evidence('67890'), f.controls); assert.equal(f.service.state().daily.attempts, 2);
+  await f.service.comment(f.evidence('67890', '慢动作里水珠散开的过程拍得很清楚。'), f.controls); assert.equal(f.service.state().daily.attempts, 2);
   f.setNow(Date.parse('2026-10-15T16:01:00Z')); f.videoLimits.endSession({explicit:true}); f.videoLimits.markSession('api', { explicit: true }); f.lock(); assert.equal(f.service.state().daily.remaining, 3); await assert.rejects(f.service.comment(first, f.controls), /重复/); assert.equal(f.calls.length, 2);
 });
 test('输入不可用和发布前失败不退次数，也不自动重试同作品', async t => {

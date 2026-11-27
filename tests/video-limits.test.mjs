@@ -8,6 +8,16 @@ import { once } from 'node:events';
 import { createRequire } from 'node:module';
 import { VideoLimits, allowedWindow, validateVideoPolicy } from '../video-limits.mjs';
 import { createApiServer } from '../app.mjs';
+test('Windows 短暂替换冲突保留每日用量，持续失败保留原策略',t=>{
+  const {directory,limits}=fixture(t);limits.savePolicy({enabled:true},{explicit:true});limits.reserveRequest({source:'api'});
+  const rename=fs.renameSync;let attempts=0;
+  fs.renameSync=(from,to)=>{if(path.basename(to)==='video-policy.json'&&attempts++<2)throw Object.assign(Error('合成共享冲突'),{code:'EPERM'});return rename(from,to);};
+  try{limits.savePolicy({dailyRequests:41},{explicit:true});}finally{fs.renameSync=rename;}
+  assert.equal(attempts,3);assert.equal(limits.state().daily.requests,1);assert.equal(limits.state().daily.remainingRequests,40);
+  fs.renameSync=(from,to)=>{if(path.basename(to)==='video-policy.json')throw Object.assign(Error('合成持续拒绝'),{code:'EACCES'});return rename(from,to);};
+  try{assert.throws(()=>limits.savePolicy({dailyRequests:50},{explicit:true}),{code:'EACCES'});}finally{fs.renameSync=rename;}
+  assert.equal(limits.state().policy.dailyRequests,41);assert.equal(limits.state().daily.requests,1);assert.equal(fs.readdirSync(directory).some(name=>name.endsWith('.tmp')),false);
+});
 
 function fixture(t, timestamp = '2026-10-14T02:00:00Z') {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'douyin-video-time-')); let clock = Date.parse(timestamp);
@@ -72,6 +82,42 @@ async function serverFixture(t, f) {
   const request=async(route,body)=>{const response=await fetch(base+route,{headers,...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)})});return{status:response.status,body:await response.json()}};
   return{server,base,headers,request,paused,modelCalls:()=>modelCalls,chatStops:()=>chatStops};
 }
+test('本机保存私信视频时段独立于自主观看设置，并按周末与跨午夜时段放行', async t => {
+  const f = fixture(t, '2026-11-25T22:59:59+08:00');
+  f.limits.savePolicy({ windows: ['23:00-01:00'], weekendWindows: ['00:00-24:00'] }, { explicit: true });
+  f.limits.recordPrivateVideo(12.5);
+  const s = await serverFixture(t, f);
+  const route = '/api/video/private-schedule';
+  const follow = { mode: 'follow-watch-hours' };
+  const before = (await s.request('/api/video/status')).body;
+  assert.deepEqual(before.privateVideoSchedule, { mode: 'all-day', allowed: true, reason: '' });
+  assert.equal((await fetch(s.base + route, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(follow),
+  })).status, 403);
+  assert.equal((await s.request(route, { mode: 'unexpected' })).status, 400);
+  assert.equal((await s.request(route, { ...follow, enabled: true })).status, 400);
+  const saved = await s.request(route, follow);
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.mode, follow.mode);
+  assert.equal(saved.body.allowed, false);
+  const after = (await s.request('/api/video/status')).body;
+  assert.deepEqual(after.policy, before.policy);
+  assert.deepEqual(after.daily, before.daily);
+  assert.deepEqual(after.privateVideoSchedule, saved.body);
+
+  const reloaded = new VideoLimits({ stateDir: f.directory, now: f.now });
+  f.setTime('2026-11-26T00:30:00+08:00');
+  assert.equal(reloaded.state().privateVideoSchedule.allowed, true);
+  f.setTime('2026-11-26T01:00:00+08:00');
+  assert.equal(reloaded.state().privateVideoSchedule.allowed, false);
+  f.setTime('2026-11-28T15:00:00+08:00');
+  assert.equal(reloaded.state().privateVideoSchedule.allowed, true);
+  f.setTime('2026-11-26T15:00:00+08:00');
+  f.limits.savePolicy({ dailyRequests: 5 }, { explicit: true });
+  assert.equal(reloaded.state().privateVideoSchedule.mode, follow.mode);
+  assert.deepEqual((await s.request(route, { mode: 'all-day' })).body, { mode: 'all-day', allowed: true, reason: '' });
+});
+
 test('本机 API 校验参数与令牌；时间用完实际调用暂停并停止模型，私信 worker 继续运行', async (t) => {
   const f=fixture(t); const s=await serverFixture(t,f);
   assert.equal((await fetch(s.base+'/api/video/status')).status,403); assert.equal((await s.request('/api/video/policy',policy([],10))).status,400);

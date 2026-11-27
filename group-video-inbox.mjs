@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { timedVideoFrameCount } from './video-storyboard.mjs';
 import { createHash } from 'node:crypto';
 import { messageFingerprint } from './chat-message.mjs';
 
@@ -12,9 +13,9 @@ const valid = data => data?.version === 1 && Array.isArray(data.items) && Number
 
 export function sharedVideoProof(observation) {
   const work = observation?.sharedWork, sampled = work?.observation;
-  const frames = (observation?.frames || []).filter(frame => frame.videoId === work?.videoId && Number.isFinite(frame.time));
-  if (observation?.understandingScope !== 'card-cover-and-timed-video-sampling' || !/^\d{1,64}$/.test(work?.videoId || '') || frames.length < 2 || !Number.isFinite(sampled?.actualWallSeconds) || sampled.actualWallSeconds <= 0 || !Number.isFinite(sampled?.playbackProgressSeconds) || sampled.playbackProgressSeconds <= 0.1) throw error('GROUP_VIDEO_NO_VERIFIED_FRAMES');
-  return { videoHash: hash(work.videoId), frames: frames.length, actualWallSeconds: sampled.actualWallSeconds, playbackProgressSeconds: sampled.playbackProgressSeconds, audioObserved: false, fullVideoObserved: false };
+  const frames = timedVideoFrameCount(observation);
+  if (observation?.understandingScope !== 'card-cover-and-timed-video-sampling' || frames < 2 || !Number.isFinite(sampled?.actualWallSeconds) || sampled.actualWallSeconds <= 0 || !Number.isFinite(sampled?.playbackProgressSeconds) || sampled.playbackProgressSeconds <= 0.1) throw error('GROUP_VIDEO_NO_VERIFIED_FRAMES');
+  return { videoHash: hash(work.videoId), frames, actualWallSeconds: sampled.actualWallSeconds, playbackProgressSeconds: sampled.playbackProgressSeconds, audioObserved: false, fullVideoObserved: false };
 }
 
 // 队列由唯一聊天 worker 处理；只保存会话内笔记，不写跨会话记忆或发送消息。

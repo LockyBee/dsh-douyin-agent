@@ -43,7 +43,7 @@ test('抖音群回复实际检索同一SQLite的QQ群历史、确认记忆和视
   await agent.reply({ messages: [{ id: 'new', sender: 'incoming', text: '@大肥鱼 还记得蓝鲸吗' }], conversation: { displayName: '合成许可群', isGroup: true } });
   assert.equal(reads, 1); assert.equal(agent.lastMemoryContext.recalledCount, 3);
   assert.match(request.system, /PUBLIC_FACT/); assert.match(request.system, /PUBLIC_HISTORY/); assert.match(request.system, /PUBLIC_VIDEO/);
-  assert.match(request.system, /合成共同角色：短句接话/); assert.match(request.system, /合成手编角色：温柔/);
+  assert.doesNotMatch(request.system, /合成共同角色：短句接话/); assert.match(request.system, /合成手编角色：温柔/);
   assert.match(request.system, /日常接话沿用 QQ 大肥鱼的节奏/); assert.match(request.system, /不把群名当作发消息的人/);
   assert.doesNotMatch(JSON.stringify(request), /PRIVATE_FACT|PRIVATE_HISTORY|PRIVATE_DERIVED|10101|20202|bridge\.db/);
   assert.equal(request.tools, undefined);
@@ -57,7 +57,7 @@ test('共享开关撤销立即停止QQ人格和历史引用，不关闭当前聊
   await agent.reply({ messages });
   f.qq.prepare('INSERT INTO runtime_settings VALUES (?,?)').run('console-overrides', JSON.stringify({ memory: { shared: false } }));
   await agent.reply({ messages });
-  assert.match(requests[0].system, /PUBLIC_FACT|合成共同角色/);
+  assert.match(requests[0].system, /PUBLIC_FACT/); assert.match(requests[0].system, /合成共同角色/);
   assert.doesNotMatch(requests[1].system, /PUBLIC_FACT|合成共同角色/);
   assert.equal(agent.lastMemoryContext.recalledCount, 0);
 });

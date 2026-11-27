@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { chromium } from '../playwright-runtime.mjs';
 import { readPageState } from '../core.mjs?v=9';
-import { CommentBrowser, readCommentDom, inspectCommentComposer } from '../comment-browser.mjs';
+import { CommentBrowser, readCommentDom, inspectCommentComposer, readPublicCommentsFromPage } from '../comment-browser.mjs';
 import { AutonomousComments } from '../autonomous-comments.mjs';
 
 let browser;
@@ -34,6 +34,45 @@ async function fixture(t, { result = { id: '90001', mine: true, status: 'sent', 
   t.after(async () => { await page.close(); assert.equal(path.dirname(stateDir), os.tmpdir()); fs.rmSync(stateDir, { recursive: true, force: true }); });
   return { page, commenter, authorize, stateDir, hooks, setAllowed: value => { allowed = value; }, stats: () => ({ lease, begins, phases }), post: (options = {}) => commenter.post({ expectedVideoId: '12345', text }, { authorize, ...options }) };
 }
+
+test('按需读取当前作品热评、显示点赞数和展开后的作者回复，保留评论草稿', async t => {
+  const { page } = await fixture(t, { draft: '原评论草稿' });
+  await page.evaluate(() => {
+    const panel = document.querySelector('.comment-mainContent');
+    panel.hidden = true;
+    const toggle = document.createElement('button');
+    toggle.dataset.e2e = 'video-player-comment';
+    toggle.textContent = '评论';
+    toggle.onclick = () => { panel.hidden = false; };
+    document.body.prepend(toggle);
+    panel.querySelector('[data-e2e="comment-list"]').innerHTML = `
+      <div data-e2e="comment-item" data-comment-id="901">
+        <div data-comment-content=""><span data-e2e="comment-content">小声的讨论</span></div>
+      </div>
+      <div data-e2e="comment-item" data-comment-id="902">
+        <span data-e2e="comment-content">热评的正文</span><span data-e2e="comment-like-count">1.2万</span>
+        <button data-e2e="comment-reply-expand">展开 2 条回复</button>
+        <div data-replies hidden>
+          <div data-e2e="comment-reply-item" data-comment-id="903" data-parent-comment-id="902">
+            <span data-e2e="comment-author-tag">作者</span><span data-e2e="comment-content">作者补充</span><span data-e2e="comment-like-count">684</span>
+          </div>
+          <div data-e2e="comment-reply-item" data-comment-id="904" data-parent-comment-id="902"><span data-e2e="comment-content">普通跟帖</span></div>
+        </div>
+      </div>
+      <div data-e2e="comment-item" data-comment-id="905" data-video-id="54321"><span data-e2e="comment-content">旧作品残留</span><span data-e2e="comment-like-count">999999</span></div>`;
+    const button = panel.querySelector('[data-e2e="comment-reply-expand"]');
+    button.onclick = () => { panel.querySelector('[data-replies]').hidden = false; button.hidden = true; };
+    Object.defineProperty(panel.querySelector('[data-comment-id="901"]'), '__reactFiber$fixture', { value: { return: { memoizedProps: { commentInfo: { cid: '901', diggCount: 23 } } } } });
+  });
+  const result = await readPublicCommentsFromPage(page, { limit: 2 });
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(result.rows, [
+    { text: '热评的正文', likeCount: 12000, likeCountText: '1.2万', authorReplies: [{ text: '作者补充', likeCount: 684, likeCountText: '684' }] },
+    { text: '小声的讨论', likeCount: 23, likeCountText: '23', authorReplies: [] },
+  ]);
+  assert.equal(await page.locator('[contenteditable]').innerText(), '原评论草稿');
+  assert.equal(await page.evaluate(() => window.commentClicks), 0);
+});
 
 async function modernFixture(t, { lazyDraft = '', missingSubmit = false, duplicateSubmit = false, clearWithoutReceipt = false, videoId = '12345', hiddenDraft = '' } = {}) {
   const f = await fixture(t, { missingInput: true });
@@ -65,6 +104,30 @@ async function modernFixture(t, { lazyDraft = '', missingSubmit = false, duplica
   }, { lazyDraft, missingSubmit, duplicateSubmit, clearWithoutReceipt, videoId, hiddenDraft });
   return f;
 }
+
+test('同作品公开评论提供正文摘录，重复时不填写或点击，未读其他作品及私信', async t => {
+  const f = await fixture(t, { existing: [
+    { id: '88000', mine: false, text },
+    { id: '88001', mine: false, text: '其他作品正文', videoId: '88888' },
+    { id: '88002', mine: false, text: '审核中正文', status: 'pending' },
+  ] });
+  await f.page.locator('[data-comment-id="88002"]').evaluate(row => {
+    const chat = document.createElement('div');
+    chat.setAttribute('data-e2e', 'im-dialog');
+    const privateCopy = row.cloneNode(true);
+    privateCopy.removeAttribute('data-send-status');
+    privateCopy.textContent = '私信内容';
+    chat.append(privateCopy);
+    row.after(chat);
+  });
+  assert.deepEqual(await f.commenter.discussion('12345'), [text]);
+  const delivery = await f.post();
+  assert.equal(delivery.code, 'COMMENT_DISCUSSION_DUPLICATE');
+  assert.equal(delivery.skipped, true);
+  assert.equal(await f.page.locator('[contenteditable]').innerText(), '');
+  assert.equal(await f.page.evaluate(() => window.commentClicks), 0);
+  assert.equal(f.stats().begins, 0);
+});
 
 async function nativeFixture(t, { activated = false, existingDraft = '', wrongGeometry = false, disabled = false, wrongToolbar = false, duplicate = false, selectedFile = false, innerOnly = false } = {}) {
   const f = await fixture(t, { missingInput: true });
@@ -201,7 +264,7 @@ test('唯一真实点击、同作品新本人commentId和稳定发出状态才�
 });
 test('旧评论、其他人的相同文字、不同作品、pending和无编号都不冒充成功', async t => {
   for (const result of [{ id: '90001', mine: true, status: 'sent' }, { id: '90002', mine: false, status: 'sent' }, { id: '90002', mine: true, status: 'sent', videoId: '67890' }, { id: '90002', mine: true, status: 'pending' }, { id: 'local-pending', mine: true, status: 'sent' }]) {
-    const f = await fixture(t, { existing: [{ id: '90001', mine: true, status: 'sent', text }], result }); const output = await f.post(); assert.equal(output.confirmed, false); assert.equal(output.deliveryUncertain, true); assert.equal(await f.page.evaluate(() => window.commentClicks), 1); assert.equal(f.commenter.receipts().operations[0].status, 'uncertain');
+    const f = await fixture(t, { existing: [{ id: '90001', mine: true, status: 'sent', text: '刚才聊的是另一个镜头。' }], result }); const output = await f.post(); assert.equal(output.confirmed, false); assert.equal(output.deliveryUncertain, true); assert.equal(await f.page.evaluate(() => window.commentClicks), 1); assert.equal(f.commenter.receipts().operations[0].status, 'uncertain');
   }
 });
 test('同文多条新本人评论不能作为唯一发布证据', async t => {

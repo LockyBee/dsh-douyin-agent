@@ -1,5 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {GroupVideoInbox} from '../group-video-inbox.mjs';import {ChatService} from '../chat-service.mjs';import {ChatAgent} from '../chat-agent.mjs';
+import { YunsurBackgroundController } from '../yunsur-background.mjs';
+import { VideoLimits } from '../video-limits.mjs';
 import jpeg from '../storyboard/vendor/jpeg-js/index.js';
 const group={id:'conv:'+'1'.repeat(64),name:'合成许可群',isGroup:true,followed:false,identityVerified:true,identityBinding:'binding:'+'2'.repeat(64),identityVersion:2,identityKind:'rendered-group',identityHash:'1'.repeat(64),authorizationKind:'existing-group'};
 const card=(id='new')=>({id,sender:'incoming',eligibleForReply:true,memberId:'member:'+'3'.repeat(64),media:{type:'shared-work',title:'合成分享'}});
@@ -7,6 +9,65 @@ const pixel='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwM
 const videoPixel=Buffer.from(jpeg.encode({data:Buffer.alloc(320*180*4,255),width:320,height:180},80).data).toString('base64');
 const observation=(id='new')=>({messageId:id,understandingScope:'card-cover-and-timed-video-sampling',frames:[1,2,3].map(time=>({mimeType:'image/jpeg',data:videoPixel,videoId:'123456',time})),sharedWork:{videoId:'123456',observation:{actualWallSeconds:3,playbackProgressSeconds:3,beforeTime:1,afterTime:4}}});
 function fixture(t){const stateDir=fs.mkdtempSync(path.join(os.tmpdir(),'dy-group-video-')),clock={value:Date.now()},box=new GroupVideoInbox({stateDir,now:()=>clock.value}),counters={observe:0,inspect:0,reserve:0};const message=card();const hooks={canRun:()=>({allowed:true}),authorize:()=>{},resolve:async()=>({contact:group,message}),observe:async()=>{counters.observe++;return observation()},inspect:async()=>{counters.inspect++;return{text:'合成屏幕与话筒画面，仅为分时采样，没有音频。',watchDecision:{action:'stop'}}},reserve:()=>{counters.reserve++}};t.after(()=>{assert.equal(path.dirname(path.resolve(stateDir)),path.resolve(os.tmpdir()));fs.rmSync(stateDir,{recursive:true,force:true})});return{stateDir,clock,box,counters,message,hooks};}
+
+test('后台群分享把分镜及最后一段交给模型，播放到结尾后写入完成回执', async t => {
+  const f = fixture(t);
+  const id = '7579432563794584933', url = 'https://www.douyin.com/video/' + id;
+  const limits = new VideoLimits({ stateDir: f.stateDir });
+  limits.savePolicy({ enabled: true, windows: ['00:00-24:00'], dailyMinutes: 30, dailyRequests: 40 }, { explicit: true });
+  const connectionFile = path.join(f.stateDir, 'background-connection.json');
+  fs.writeFileSync(connectionFile, JSON.stringify({ endpoint: 'http://127.0.0.1:1/mcp', token: 'x'.repeat(32) }));
+  const controller = new YunsurBackgroundController({ connectionFile, source: 'api', videoLimits: limits, personaMemory: { context: () => '' } });
+  let sampleIndex = 0, closed = false;
+  Object.assign(controller, {
+    initialization: Promise.resolve(),
+    client: { call: async (method, args) => {
+      assert.deepEqual([method, args], ['get_video_detail', { video: id }]);
+      return { aweme_detail: { aweme_id: id } };
+    } },
+    createSampler: () => ({
+      open: async (_work, options) => { assert.equal(options.includeAudio, false); },
+      close: async () => { closed = true; },
+      observe: async ({ seconds, includeAudio }) => {
+        assert.equal(includeAudio, false);
+        assert.equal(seconds, sampleIndex === 0 ? 12 : 3);
+        const start = sampleIndex++ * 3, end = start + 3;
+        return { state: { playbackBackend: 'local-decoder', video: { id, ended: sampleIndex === 2 } },
+          frames: [0, 1, 2].map(second => ({ mimeType: 'image/jpeg', data: videoPixel, videoId: id, time: start + second })),
+          observation: { videoId: id, beforeTime: start, afterTime: end, beforePaused: false, paused: false, actualWallSeconds: 3, playbackProgressSeconds: 3, source: 'ffmpeg-realtime-local-media' } };
+      },
+    }),
+  });
+  const message = card(), snapshots = [], browser = {
+    listContacts: async () => ({ contacts: [group] }),
+    readConversation: async () => ({ conversation: { id: group.id }, contact: group, messages: [message] }),
+    sendMessage: async () => assert.fail('观看群分享不发送消息'),
+    captureMessage: async (_recipient, messageId) => ({ messageId, frames: [{ mimeType: 'image/jpeg', data: videoPixel }] }),
+    openSharedVideo: async () => ({ url, videoId: id }),
+    close: async () => {},
+  };
+  const agent = new ChatAgent({ config: {}, replyProvider: async request => {
+    const parts = request.messages.flatMap(item => Array.isArray(item.content) ? item.content : []);
+    const images = parts.filter(item => item.type === 'image_url');
+    const evidence = parts.find(item => item.type === 'text' && item.text.includes('"storyboard"'));
+    assert.equal(images.length, 2);
+    assert.match(evidence.text, /"videoFrameCount":3/);
+    snapshots.push(JSON.parse(evidence.text).videoSampling.storyboard.map(cell => cell.time));
+    return { text: JSON.stringify({ action: 'continue', seconds: 3, note: '已经看过本批分镜。' }) };
+  } });
+  const service = new ChatService({ stateDir: f.stateDir, browser, agent, config: {}, videoLimits: limits,
+    observeSharedWork: params => controller.observeSharedWork(params) });
+  await service.configure({ recipientIds: [group.id], allowConversationOnly: true });
+  const note = await service.observeMessage(group.id, message.id, { onVideoObservation: observed =>
+    agent.inspectSharedVideo({ message, observation: observed }).then(result => result.watchDecision) });
+  assert.deepEqual(snapshots, [[0, 1, 2], [3, 4, 5]]);
+  assert.equal(note.watchOutcome.stopReason, 'video-ended');
+  assert.equal(note.watchOutcome.frames, 6);
+  assert.equal(note.watchOutcome.reachedEnd, true);
+  assert.equal(note.watchOutcome.fullVideoObserved, false);
+  assert.equal(closed, true);
+  assert.equal(fs.existsSync(path.join(f.stateDir, 'watch-manual.lock')), false);
+});
 
 test('许可群中无艾特的新分享可入队，旧历史、本人、个人会话和未知成员不自动观看',t=>{const f=fixture(t);assert.equal(f.box.enqueue(group,[{...card('old'),eligibleForReply:false},{...card('self'),sender:'outgoing'},{...card('unknown'),memberId:undefined}]),0);assert.equal(f.box.enqueue({...group,isGroup:false},[card()]),0);assert.equal(f.box.enqueue(group,[card()]),1);assert.equal(f.box.enqueue(group,[card()]),0);assert.equal(f.box.state().pending,1);});
 test('本人明确指定当前卡片可以补入，普通重启仍不批量补旧历史',t=>{const f=fixture(t),old={...card(),eligibleForReply:false};assert.equal(f.box.enqueue(group,[old]),0);assert.equal(f.box.enqueue(group,[old],{explicit:true}),1);const next=new GroupVideoInbox({stateDir:f.stateDir});assert.equal(next.state().pending,1);assert.equal(next.enqueue(group,[old]),0);});

@@ -2,11 +2,25 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {MemoryStore} from '../memory.mjs';
 import {ChatAgent} from '../chat-agent.mjs';
+import { BrowserController } from '../core.mjs';
 import {createRuntimeConversationMemory,bindMemoryContact,memoryContactFromToken} from '../runtime-conversation-memory.mjs';
 import {appendConversationOriginals,readConversationOriginals,recallLocalConversationHistory} from '../conversation-history-store.mjs';
 const contact=(n='a',group=false)=>({id:`conv:${n.repeat(64)}`,name:'合成许可会话',isGroup:group,identityVerified:true,identityBinding:`binding:${'c'.repeat(64)}`,identityVersion:2,identityHash:n.repeat(64),identityKind:group?'rendered-group':'rendered-user'});
 const scope=c=>({platform:'douyin',conversationId:c.id,isGroup:c.isGroup,sharedEnabled:false});
 function fixture(t){const store=new MemoryStore(':memory:',{qqMemoryPath:null});t.after(()=>store.close());return store;}
+test('独立软件与后台回复绑定稳定身份，撤回许可后本轮不能回忆', t => {
+ const store = fixture(t), c = contact(), controller = new BrowserController({ source: 'api', memory: store });
+ const service = { agent: {}, isMemoryScopeAuthorized: candidate => candidate.id === c.id && permitted };
+ let permitted = true;
+ controller.bindChatMemory(service, { snapshot: () => ({ manualText: '合成人格' }) });
+ const session = service.agent.createConversationMemory({ scopeToken: bindMemoryContact(c), messages: [
+   { id: 'memory-scope-probe', sender: 'incoming', text: '合成行程记得周四拿松果' },
+ ] }).session;
+ assert.ok(session.recall({ query: '松果' }).entries.some(item => item.content.includes('周四')));
+ assert.throws(() => service.agent.createConversationMemory({ scopeToken: {}, messages: [] }), /可信宿主/);
+ permitted = false;
+ assert.throws(() => session.recall({ query: '松果' }), /撤销/);
+});
 test('运行时实际工厂接入同一SQLite，旧记录保留，按当前可信会话找出较早原文',t=>{
  const store=fixture(t),c=contact(),old=store.remember({content:'合成公开视频笔记：纸船'});
  const previous=Array.from({length:20},(_,i)=>({id:`old-${i}`,sender:'incoming',text:i===0?'合成旧事：松果计划周五完成。':`合成普通消息${i}`}));

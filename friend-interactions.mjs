@@ -8,7 +8,10 @@ const defaults = () => ({ version: 1, enabled: true });
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const active = value => Boolean(value?.running || value?.starting || value?.busy || value?.worker?.alive);
 const workerKey = value => value?.worker ? `${value.worker.pid}:${value.worker.runId}` : active(value) ? 'local-active' : '';
+const ownsRunningChat = (state, runId) => state?.running && state.worker?.owned === true && state.worker.runId === runId;
 const explain = error => String(error?.message || '好友互动暂未就绪，请查看自检。').replace(/\bBearer\s+[^\s,;"']+/gi, 'Bearer [凭据已隐藏]').replace(/\bsk-[A-Za-z0-9_-]+/g, '[凭据已隐藏]').slice(0, 600);
+const loadingDuringSetup = /^(?:page|locator)\.evaluate: (?:Execution context was destroyed|Cannot find context with (?:specified )?id)\b/;
+const fastRetryCodes = new Set(['CHAT_PAGE_LOADING', 'CHAT_CONTACT_LIST_CHANGED', 'CHAT_SNAPSHOT_CHANGED']);
 
 // 复用既有回复与作品分享服务；总开关不改名单、收据、旧消息基线或预算。
 export class FriendInteractions {
@@ -20,18 +23,25 @@ export class FriendInteractions {
     this.timer = null; this.closed = false; this.inflight = null; this.rerun = false; this.startAbort = null;
     this.chat = null; this.share = null; this.spark = null; this.lastError = ''; this.status = 'waiting'; this.lastCheckedAt = null; this.deferUntil = 0;
     this.waitReason = ''; this.lastErrorCode = ''; this.nextRetryAt = null; this.waitKey = ''; this.prepare = null;
+    this.fastRetries = 0;
     this.chatStopKey = ''; this.sparkStopKey = '';
     this.autoPrepareJob = null; this.prepareGuard = path.join(stateDir, 'friend-interactions-prepare.guard');
     this.prepareBudgetFile = path.join(stateDir, 'friend-interactions-prepare-budget.json');
   }
   clearError() { if (this.lastError) { this.lastError = ''; if (this.status === 'blocked') this.status = 'waiting'; } }
   waitFor(error) {
-    const code = error?.code || 'CHAT_START_FAILED', reason = explain(error), now = Date.now(), next = Number.isSafeInteger(error?.retryAt) && error.retryAt > now && error.retryAt <= now + 600_000 ? error.retryAt : now + 60_000;
+    const code = error?.code || (loadingDuringSetup.test(error?.message || '') ? 'CHAT_PAGE_LOADING' : 'CHAT_START_FAILED');
+    const reason = code === 'CHAT_PAGE_LOADING' ? '抖音页面正在加载，稍后自动连接。' : explain(error);
+    const now = Date.now();
+    const explicitRetry = Number.isSafeInteger(error?.retryAt) && error.retryAt > now && error.retryAt <= now + 600_000;
+    const fastRetry = !explicitRetry && fastRetryCodes.has(code) && this.fastRetries < 2;
+    if (fastRetry) this.fastRetries++;
+    const next = explicitRetry ? error.retryAt : now + (fastRetry ? 1_500 : 60_000);
     this.status = 'waiting'; this.lastError = ''; this.waitReason = reason; this.lastErrorCode = code;
     this.nextRetryAt = new Date(next).toISOString(); this.deferUntil = next;
     this.waitKey = `${code}:${reason}`;
   }
-  clearWait() { this.waitReason = ''; this.lastErrorCode = ''; this.nextRetryAt = null; this.waitKey = ''; }
+  clearWait() { this.waitReason = ''; this.lastErrorCode = ''; this.nextRetryAt = null; this.waitKey = ''; this.fastRetries = 0; }
 
   policy() {
     let value;
@@ -160,7 +170,17 @@ export class FriendInteractions {
       }
       if (!this.checkRevocation()) { await this.disable(); return; }
     }
-    if (active(chatState)) { this.status = chatState.starting ? 'starting' : 'running'; this.lastError = ''; this.deferUntil = 0; this.clearWait(); return; }
+    if (active(chatState)) {
+      const browserError = chatState.running && chatState.worker?.owned === true ? this.chat.getBrowserWaitError?.() : null;
+      if (browserError && this.chat.canStartBackgroundBrowser?.()) {
+        if (Date.now() >= this.deferUntil) {
+          this.waitFor(browserError);
+          this.queueAutomaticPrepare(browserError, chatState.worker.runId);
+        }
+        return;
+      }
+      this.status = chatState.starting ? 'starting' : 'running'; this.lastError = ''; this.deferUntil = 0; this.clearWait(); return;
+    }
     if (Date.now() < this.deferUntil) { this.status = 'waiting'; return; }
     if (chatState.contacts?.some(item => ['inflight', 'delivery-uncertain'].includes(item.status))) throw fail('好友互动有未确认发送，请先核对原收据；不会重置或重发。');
     if (!await this.modelReady()) { this.status = 'waiting-model'; this.lastError = ''; return; }
@@ -197,13 +217,16 @@ export class FriendInteractions {
     if (!chat?.state || !chat?.stop) throw fail('回复服务尚未就绪。', 503);
     return this.withChatPaused(service => service.markUnansweredHandled(input), { reason: 'unanswered-review', resume: 'preserve' });
   }
-  queueAutomaticPrepare(error) {
-    if (error?.code !== 'CHAT_PAGE_NOT_OPEN' || this.autoPrepareJob || typeof this.chat?.prepareChat !== 'function' || this.closed) return;
+  queueAutomaticPrepare(error, recoveryRunId) {
+    if (!['CHAT_PAGE_NOT_OPEN', 'BROWSER_NOT_RUNNING'].includes(error?.code) || this.autoPrepareJob || typeof this.chat?.prepareChat !== 'function' || this.closed) return;
+    const startBackgroundBrowser = error.code === 'BROWSER_NOT_RUNNING' || Boolean(recoveryRunId);
+    if (startBackgroundBrowser && !this.chat.canStartBackgroundBrowser?.()) return;
     const current = this.inflight;
     const job = Promise.resolve(current).then(async () => {
-      if (!this.checkRevocation() || active(this.chat?.state())) return;
-      await this.prepareChat({ automatic: true });
-    }).catch(failure => { if (!this.closed && this.checkRevocation()) this.waitFor(failure); })
+      const state = this.chat?.state();
+      if (!this.checkRevocation() || (recoveryRunId ? !ownsRunningChat(state, recoveryRunId) : active(state))) return;
+      await this.prepareChat({ automatic: true, startBackgroundBrowser, recoveryRunId });
+    }).catch(failure => { if (!this.closed && this.checkRevocation() && this.nextRetryAt === null) this.waitFor(failure); })
       .finally(() => { if (this.autoPrepareJob === job) this.autoPrepareJob = null; });
     this.autoPrepareJob = job;
   }
@@ -244,21 +267,24 @@ export class FriendInteractions {
     };
   }
 
-  async prepareChat({ automatic = false } = {}) {
+  async prepareChat({ automatic = false, startBackgroundBrowser = false, recoveryRunId } = {}) {
     if (this.closed) throw fail('好友互动入口已关闭。');
     if (this.prepare) return this.prepare.promise;
     const controller = new AbortController();
     const token = randomUUID();
     const timeout = setTimeout(() => controller.abort(Object.assign(fail('准备回复通道超时，请稍后重试。'), { code: 'CHAT_PREPARE_TIMEOUT' })), 60_000); timeout.unref?.();
     this.prepare = { promise: null, controller, token, phase: 'starting' };
-    this.status = 'preparing'; this.waitReason = '受管聊天入口准备中，最多打开一个页面。'; this.lastErrorCode = 'CHAT_PREPARING'; this.nextRetryAt = null;
+    this.status = 'preparing'; this.waitReason = startBackgroundBrowser ? '正在连接专用浏览器。' : '正在准备回复通道。'; this.lastErrorCode = 'CHAT_PREPARING'; this.nextRetryAt = null;
     const promise = (async () => {
       let releasePrepare;
       try {
         const chat = await this.getChat(); this.chat = chat;
         if (!chat?.state || !chat?.prepareChat) throw fail('回复通道准备入口尚未就绪。', 503);
         if (!this.checkRevocation()) throw fail('好友互动总开关已关闭或正在维护，未准备回复通道。', 403);
-        if (active(chat.state())) { this.clearWait(); this.status = 'running'; return this.state(); }
+        const recovering = automatic && Boolean(recoveryRunId);
+        const chatState = chat.state();
+        if (recovering && !ownsRunningChat(chatState, recoveryRunId)) return this.state();
+        if (!recovering && active(chatState)) { this.clearWait(); this.status = 'running'; return this.state(); }
         if (automatic && (!chat.state().policy?.allowlist?.length || !await this.modelReady())) return this.state();
         if (!this.checkRevocation()) throw fail('好友互动设置已变化，未自动准备回复通道。', 403);
         const allowedBefore = JSON.stringify(chat.state().policy?.allowlist || []);
@@ -269,13 +295,18 @@ export class FriendInteractions {
           if (!configured || !this.checkRevocation()) throw Object.assign(fail('模型或好友互动设置已变化，已取消自动准备。', 403), { code: 'CHAT_PREPARE_REVOKED' });
           const current = JSON.parse(fs.readFileSync(path.join(this.stateDir, 'chat-policy.json'), 'utf8'));
           if (current?.version !== 1 || !Array.isArray(current.allowlist) || !current.allowlist.length || JSON.stringify(current.allowlist) !== allowedBefore) throw Object.assign(fail('许可名单已变化，已取消自动准备。', 403), { code: 'CHAT_PREPARE_REVOKED' });
+          if (recovering && !ownsRunningChat(chat.state(), recoveryRunId)) throw Object.assign(fail('回复任务已结束，已取消自动准备。', 409), { code: 'CHAT_PREPARE_REVOKED' });
           controller.signal.throwIfAborted(); return true;
         } : undefined;
         releasePrepare = this.acquirePrepare({ automatic });
-        const prepared = await chat.prepareChat({ signal: controller.signal, ...(automatic ? { automatic: true, authorizePrepare } : {}) });
+        const prepared = await chat.prepareChat({ signal: controller.signal, ...(automatic ? { automatic: true, authorizePrepare, startBackgroundBrowser } : {}) });
         if (controller.signal.aborted) throw controller.signal.reason || fail('回复通道准备已取消。');
-        if (prepared?.blocked || prepared?.loginRequired || prepared?.verificationRequired) { this.waitFor(Object.assign(new Error('专用聊天页需要登录或验证，未自动操作。'), { code: 'CHAT_LOGIN_REQUIRED' })); throw fail('专用聊天页需要登录或验证，未自动操作。', 409); }
+        if (prepared?.blocked || prepared?.loginRequired || prepared?.verificationRequired) throw Object.assign(fail('专用聊天页需要登录或验证。'), { code: 'CHAT_LOGIN_REQUIRED' });
         if (!this.checkRevocation()) throw fail('好友互动总开关已关闭或正在维护，准备已停止。', 409);
+        if (recovering) {
+          await authorizePrepare();
+          chat.startPolling();
+        }
         this.deferUntil = 0; this.clearWait();
         if (this.prepare?.token === token) this.prepare.phase = 'prepared';
         const settled = await this.reconcile();
@@ -297,7 +328,35 @@ export class FriendInteractions {
     this.prepare.promise = promise;
     return promise;
   }
-  async withChatPaused(action, { timeoutMs = 60_000, reason = 'settings-update', resume = 'reconcile' } = {}) {
+  async prepareBrowserReply(chat, owner, signal) {
+    try {
+      signal?.throwIfAborted();
+      const allowlist = chat.state().policy?.allowlist;
+      if (this.closed || !this.policy().enabled || !allowlist?.length || !await this.modelReady()) return { status: 'idle' };
+      const allowed = JSON.stringify(allowlist);
+      const revoked = () => Object.assign(fail('好友互动设置已变化，已取消准备回复通道。', 403), { code: 'CHAT_PREPARE_REVOKED' });
+      const authorizePrepare = async () => {
+        signal?.throwIfAborted();
+        if (!await this.modelReady()) throw revoked();
+        const current = JSON.parse(fs.readFileSync(this.settingsGuard, 'utf8'));
+        const policy = JSON.parse(fs.readFileSync(path.join(this.stateDir, 'chat-policy.json'), 'utf8'));
+        if (this.closed || !this.policy().enabled || current?.pid !== owner.pid || current.token !== owner.token
+          || policy?.version !== 1 || JSON.stringify(policy.allowlist) !== allowed) throw revoked();
+        signal?.throwIfAborted();
+      };
+      await authorizePrepare();
+      const prepared = await chat.prepareChat({ signal, automatic: true, authorizePrepare, allowForegroundBrowsing: true });
+      await authorizePrepare();
+      if (prepared?.prepared !== true) throw Object.assign(new Error('专用聊天页需要登录或验证。'), { code: 'CHAT_LOGIN_REQUIRED' });
+      this.deferUntil = 0;
+      this.clearWait();
+      return { status: 'ready' };
+    } catch (error) {
+      if (!this.closed && this.policy().enabled) this.waitFor(error);
+      return { status: 'waiting', code: error?.code || 'CHAT_START_FAILED' };
+    }
+  }
+  async withChatPaused(action, { timeoutMs = 60_000, reason = 'settings-update', resume = 'reconcile', prepareForBrowser = false } = {}) {
     if (typeof action !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000 || typeof reason !== 'string' || !reason || reason.length > 80 || !['reconcile', 'preserve'].includes(resume)) throw new TypeError('暂停回复并执行本机操作需要最多60秒的停止等待。');
     if (this.closed) throw fail('好友互动入口已关闭。');
     const releaseControl = acquireFriendInteractionDispatch(this.stateDir), owner = { pid: process.pid, token: randomUUID() };
@@ -308,7 +367,7 @@ export class FriendInteractions {
       try { fs.writeFileSync(descriptor, JSON.stringify(owner)); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
       this.abortStart(); this.abortPrepare(fail('设置维护中，准备回复通道已取消。'));
     } finally { releaseControl(); }
-    let saved, failure, wasActive = false;
+    let saved, failure, browserReply, wasActive = false;
     try {
       const chat = await this.getChat(); this.chat = chat;
       if (!chat?.state || !chat?.stop || !chat?.configure) throw fail('许可名单服务尚未就绪，草稿未保存。');
@@ -322,7 +381,11 @@ export class FriendInteractions {
         if (active(chat.state())) await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
       }
       if (this.closed) throw fail('当前入口已退出，草稿未保存。');
-      saved = await action(chat);
+      const prepareReply = prepareForBrowser ? async signal => {
+        browserReply = await this.prepareBrowserReply(chat, owner, signal);
+        return browserReply;
+      } : undefined;
+      saved = await action(chat, prepareReply);
     } catch (error) { failure = error; this.lastError = explain(error); }
     finally {
       let current;
@@ -337,19 +400,22 @@ export class FriendInteractions {
       }
       throw failure;
     }
-    if (!this.closed) {
+    if (!this.closed && (!prepareForBrowser || browserReply?.status === 'ready')) {
       if (resume === 'preserve' && wasActive && this.policy().enabled) {
         if (typeof this.chat?.resumeAfterMaintenance !== 'function') {
           this.lastError = '回复服务未提供不重建基线的恢复入口，已保留处理结果并停止回复。';
         } else {
-          try { await this.chat.resumeAfterMaintenance(); }
+          try {
+            await this.chat.resumeAfterMaintenance();
+            if (prepareForBrowser) await this.reconcile();
+          }
           catch (error) {
             const warning = explain(error);
             this.lastError = warning;
             if (saved && typeof saved === 'object') saved = { ...saved, resumeWarning: warning };
           }
         }
-      } else if (resume !== 'preserve') {
+      } else if (resume !== 'preserve' || prepareForBrowser) {
         await this.reconcile();
       }
     }
